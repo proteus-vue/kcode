@@ -1,0 +1,29 @@
+[package]
+name = "kcode-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "KCode 桌面宿主（Tauri 2 薄壳）"
+
+[lib]
+name = "kcode_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# 图片详情转 data URL 用。仅用于本地已校验路径的文件。
+base64 = "0.22"
+kcode-app = { path = "../kcode-app" }
+kcode-domain = { path = "../kcode-domain" }
+kcode-bridge = { path = "../kcode-bridge" }
+# unstable 用于 `Window::add_child` —— 右侧栏的内嵌浏览器是**子 webview**
+# （原生视图），不是 iframe。iframe 会被绝大多数站点的 X-Frame-Options /
+# CSP frame-ancestors 拒绝，做不到「内置浏览器」。
+tauri = { version = "2", features = ["unstable"] }
+tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

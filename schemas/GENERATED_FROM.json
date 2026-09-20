@@ -1,0 +1,6 @@
+{
+  "generator": "codex app-server generate-json-schema",
+  "codexVersion": "0.155.1",
+  "generatedAt": "2026-09-20T02:15:06Z",
+  "note": "此目录由 scripts/gen-schema.sh 生成，请勿手工编辑。协议漂移由 CI 通过 --check 检测。"
+}

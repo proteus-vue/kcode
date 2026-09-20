@@ -1,0 +1,120 @@
+name: protocol-contract
+
+# 本仓库最关键的一道 CI：协议漂移 + 安全基线 + 端到端契约。
+# app-server 被官方标记为实验性，字段随时可能变；这三道闸门保证变化被及时发现而非静默破坏 UI。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # 每周一 03:00 UTC 主动检查上游是否有新版 codex 发布（版本漂移）
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: npm
+
+      - name: 安装锁定依赖
+        run: npm ci
+
+      - name: 校验 codex 版本与哈希（安全基线 + 可复现）
+        run: bash scripts/verify-codex-version.sh
+
+      - name: 检测协议漂移（schema + TS 绑定）
+        run: bash scripts/gen-schema.sh --check
+
+      - name: 协议事实清单是否需重新生成
+        run: |
+          node scripts/protocol-facts.mjs
+          if ! git diff --quiet docs/protocol-facts.md; then
+            echo "::error::docs/protocol-facts.md 与当前 schema 不一致，请运行 node scripts/protocol-facts.mjs 并提交"
+            git diff --stat docs/protocol-facts.md
+            exit 1
+          fi
+
+      - name: 端到端契约测试（离线、零凭据、本地 mock provider）
+        run: node scripts/contract-test.mjs
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: npm
+
+      # Rust 集成测试需要真实的 codex 二进制
+      - name: 安装锁定依赖（含 codex 平台二进制）
+        run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 全部单元测试（纯逻辑，无外部依赖）
+        run: cargo test --workspace --lib
+
+      - name: 集成测试（真实 app-server 进程 + 本地 mock 模型）
+        run: |
+          cargo test -p codex-bridge --test contract --test approval_semantics
+          cargo test -p kcode-domain --test integration
+          cargo test -p kcode-app --test acceptance
+
+      - name: 静态检查
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # 出站连接抓取：验证 SECURITY.md 的零静默外发承诺。
+      # 允许 OpenAI CDN 段（上游 codex 行为，已在 SECURITY.md 披露），
+      # 任何其他连接都会使本步骤失败。
+      - name: 出站连接验证
+        run: bash scripts/verify-no-egress.sh --duration 6
+
+      # Tauri 2 默认不授予权限，缺失时构建仍然成功但 invoke/listen 会
+      # 在运行时被静默拒绝——这类缺陷穿不过 IPC 层，全部 Rust 测试都测不到。
+      - name: Tauri capability 校验
+        run: bash scripts/verify-tauri-capabilities.sh
+
+      # 沙箱边界：需要真实模型凭据（CI 中通过 secrets 注入）。
+      # 无凭据时脚本退出码 3，此处允许跳过而非失败。
+      - name: 沙箱边界验收（需模型凭据）
+        if: ${{ secrets.KCODE_MODEL_API_KEY != '' }}
+        env:
+          KCODE_MODEL_BASE_URL: ${{ secrets.KCODE_MODEL_BASE_URL }}
+          KCODE_MODEL_API_KEY: ${{ secrets.KCODE_MODEL_API_KEY }}
+          KCODE_MODEL_NAME: ${{ secrets.KCODE_MODEL_NAME }}
+        run: bash scripts/verify-sandbox-boundary.sh
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      # 前端状态推导最容易出细微错误（例如把 declined 显示成 completed），
+      # 且这类错误只在特定事件顺序下才显现，必须单测覆盖。
+      - name: 前端单元测试
+        run: npx vitest run
+
+      - name: 类型检查
+        run: npx tsc --noEmit
+
+      - name: 构建检查
+        run: npx vite build

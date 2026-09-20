@@ -1,0 +1,20 @@
+[package]
+name = "kcode-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "codex app-server 的 JSON-RPC 适配层（L1），不依赖 Tauri"
+
+[dependencies]
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "macros", "rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+sha2 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"

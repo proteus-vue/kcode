@@ -1,0 +1,20 @@
+[package]
+name = "kcode-domain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "KCode 领域层（L2）：Thread/Turn/Item/Approval 状态、风险分级、事件日志"
+
+[dependencies]
+kcode-bridge = { path = "../kcode-bridge" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+time = { version = "0.3", features = ["formatting"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }

@@ -1,0 +1,8 @@
+{
+  "comment": "codex CLI 锁定记录。修改此文件必须在 PR 中说明理由并跑通契约测试。",
+  "version": "0.155.1",
+  "sha256": "8eaf1ad12fe6bf89b1710330f58900014322c7c5af677e43be116d8ac5fc0a9e",
+  "securityBaseline": "0.39.0",
+  "advisory": "GHSA-w5fx-fh39-j5rw / CVE-2025-59532",
+  "recordedAt": "2026-09-20T02:14:55.684Z"
+}
