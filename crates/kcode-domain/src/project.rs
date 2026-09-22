@@ -34,7 +34,10 @@ impl Projector {
     pub fn project_item_body(&self, item: &Value) -> ItemBody {
         let ty = item.get("type").and_then(Value::as_str).unwrap_or("");
         match ty {
-            "userMessage" => ItemBody::UserMessage { text: extract_text(item) },
+            "userMessage" => ItemBody::UserMessage {
+                text: extract_text(item),
+                images: extract_local_images(item),
+            },
             "agentMessage" => ItemBody::AgentMessage { text: extract_text(item) },
             "reasoning" => ItemBody::Reasoning { text: extract_text(item) },
             "plan" => ItemBody::Plan {
@@ -281,6 +284,24 @@ impl Projector {
             _ => None,
         }
     }
+}
+
+/// 从 `content[]` 里取出本地图片路径（协议 `localImage`）。
+///
+/// 服务端会把我们发出去的图片原样回显在 userMessage 的 content 里，
+/// 因此**时间线能据此还原「这条消息带了哪几张图」**。
+/// 只支持 `localImage`（我们发出去的就是这种）；`image`（URL）是外部图片，
+/// 这里不处理以免把网络地址当成本地路径。
+fn extract_local_images(item: &Value) -> Vec<String> {
+    item.get("content")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter(|c| c.get("type").and_then(Value::as_str) == Some("localImage"))
+                .filter_map(|c| c.get("path").and_then(Value::as_str).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn extract_text(item: &Value) -> String {

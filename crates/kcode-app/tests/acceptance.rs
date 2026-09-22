@@ -874,7 +874,7 @@ async fn concurrent_threads_do_not_cross_contaminate() {
             .iter()
             .filter_map(|i| match &i.body {
                 kcode_domain::ItemBody::AgentMessage { text } => Some(text.clone()),
-                kcode_domain::ItemBody::UserMessage { text } => Some(text.clone()),
+                kcode_domain::ItemBody::UserMessage { text, .. } => Some(text.clone()),
                 _ => None,
             })
             .collect();

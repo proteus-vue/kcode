@@ -145,7 +145,18 @@ export interface ChangeSet {
 }
 
 export type ItemBody =
-  | { kind: 'userMessage'; text: string }
+  | {
+      kind: 'userMessage';
+      text: string;
+      /**
+       * 该消息携带的本地图片路径。
+       *
+       * 服务端会把本地图片原样回显在 userMessage 的 content 里，
+       * 保留它才能让时间线显示「这条消息带了哪几张图」——
+       * 只取 text 的话界面显示为纯文字，而图片其实已发出且模型看到了。
+       */
+      images?: string[];
+    }
   | { kind: 'agentMessage'; text: string }
   | { kind: 'reasoning'; text: string }
   | { kind: 'plan'; text: string }

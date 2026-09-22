@@ -651,29 +651,51 @@ async fn compact_thread(
     svc.compact_thread(thread_id).await.map_err(CommandError::from)
 }
 
-/// 保存粘贴的图片附件，返回可交给 `localImage` 的绝对路径。
-///
-/// # 为什么必须落盘
-///
-/// 协议的图片输入只有 `localImage`（本地路径）与 `image`（URL）两种，
-/// **没有内嵌 base64 的形式**。从剪贴板粘进来的是字节、没有路径，
-/// 因此必须先写到磁盘。
-///
-/// 写入位置固定在自己的 app_data 下（`attachments/`），不接受调用方指定
-/// 目录：这是唯一避免「前端传什么就写什么」的路径注入面的做法。
-/// 拖放进来的文件本来就有路径，不走这里。
-#[tauri::command]
-async fn save_attachment(
-    state: State<'_, AppState>,
-    file_name: String,
-    data_base64: String,
-) -> Result<String, CommandError> {
-    use base64::Engine as _;
+/// 一个已接受的图片附件。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedAttachment {
+    /// 落盘后的绝对路径——交给协议 `localImage` 用。
+    path: String,
+    /// 文件名（展示用）。
+    name: String,
+    /// 字节数。
+    size: u64,
+    /// data URL，供输入区缩略图与时间线预览。
+    ///
+    /// **随附件一起返回，而不是让前端事后按路径来读**：那样会多出一个
+    /// 「按任意路径读文件」的接口，而这里只需要把刚收到的字节编码回去。
+    preview_data_url: String,
+}
 
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data_base64.as_bytes())
-        .map_err(|e| CommandError::from(format!("附件数据不是合法 base64：{e}")))?;
+/// 附件目录。所有附件都落在这里——**唯一的图片读取根**。
+fn attachments_dir(app_data: &std::path::Path) -> std::path::PathBuf {
+    app_data.join("attachments")
+}
 
+/// 生成附件文件名：扩展名走白名单，主名由我们生成。
+///
+/// 不能直接用调用方给的文件名——它可能含 `/` 或 `..`，拼进路径即穿越。
+fn attachment_path(dir: &std::path::Path, ext_hint: &str) -> std::path::PathBuf {
+    let ext = if ext_hint.len() <= 8 && ext_hint.chars().all(|c| c.is_ascii_alphanumeric()) {
+        ext_hint.to_ascii_lowercase()
+    } else {
+        "png".to_owned()
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0);
+    dir.join(format!("attachment-{stamp}.{ext}"))
+}
+
+/// 把字节写成附件并组装返回值（粘贴与拖入共用）。
+fn store_attachment(
+    app_data: &std::path::Path,
+    bytes: &[u8],
+    ext_hint: &str,
+    name: &str,
+) -> Result<SavedAttachment, CommandError> {
     // 单条上限 20MB：模型侧对图片本就有分辨率上限，更大的图既送不进去
     // 也会把报文撑爆。提前挡住并给出可读原因，比让上游报错更好排查。
     const MAX: usize = 20 * 1024 * 1024;
@@ -684,27 +706,112 @@ async fn save_attachment(
         )));
     }
 
-    let dir = state.paths.app_data.join("attachments");
+    let dir = attachments_dir(app_data);
     std::fs::create_dir_all(&dir)
         .map_err(|e| CommandError::from(format!("创建附件目录失败：{e}")))?;
+    let path = attachment_path(&dir, ext_hint);
+    std::fs::write(&path, bytes)
+        .map_err(|e| CommandError::from(format!("写入附件失败：{e}")))?;
 
-    // 只取扩展名，文件名由我们生成：调用方给的名字可能含 `/` 或 `..`，
-    // 直接拼进路径就是路径穿越。时间戳 + 随机后缀避免同名覆盖。
+    let mime = crate::fileaccess::image_mime(&path).unwrap_or("image/png");
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+
+    Ok(SavedAttachment {
+        path: path.display().to_string(),
+        name: name.to_owned(),
+        size: bytes.len() as u64,
+        preview_data_url: format!("data:{mime};base64,{b64}"),
+    })
+}
+
+/// 保存**粘贴**的图片附件（剪贴板只有字节，没有路径）。
+///
+/// 协议的图片输入只有 `localImage`（本地路径）与 `image`（URL）两种，
+/// **没有内嵌 base64 的形式**，因此必须先写到磁盘。
+#[tauri::command]
+async fn save_attachment(
+    state: State<'_, AppState>,
+    file_name: String,
+    data_base64: String,
+) -> Result<SavedAttachment, CommandError> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|e| CommandError::from(format!("附件数据不是合法 base64：{e}")))?;
+    // 先取出扩展名与展示名（两者都是 String），再交出 file_name，
+    // 否则借用与移动会冲突。
     let ext = std::path::Path::new(&file_name)
         .extension()
         .and_then(|e| e.to_str())
-        .filter(|e| e.len() <= 8 && e.chars().all(|c| c.is_ascii_alphanumeric()))
-        .unwrap_or("png");
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let path = dir.join(format!("attachment-{stamp}.{ext}"));
+        .unwrap_or("png")
+        .to_owned();
+    let name = if file_name.is_empty() {
+        "粘贴的图片".to_owned()
+    } else {
+        file_name
+    };
+    store_attachment(&state.paths.app_data, &bytes, &ext, &name)
+}
 
-    std::fs::write(&path, &bytes)
-        .map_err(|e| CommandError::from(format!("写入附件失败：{e}")))?;
+/// 接纳**拖入**的图片文件：校验后复制进附件目录。
+///
+/// # 为什么要复制，而不是直接用原路径
+///
+/// 原路径可能在任何地方（桌面、下载、外接盘）。若直接引用它：
+///
+/// 1. 时间线要显示预览就得提供一个「按任意路径读文件」的接口——
+///    那是一个静默的任意文件读取面（前端能读到 `~/Pictures` 里的任何东西）；
+/// 2. 用户移动或删除源文件后，这条消息的图片就永久失效了。
+///
+/// 复制进 `attachments/` 后，读图接口只需认这一个目录，且附件不再依赖源文件。
+/// 代价只是一份副本。
+#[tauri::command]
+async fn attach_local_image(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<SavedAttachment, CommandError> {
+    let src = std::path::Path::new(&path);
+    let mime = crate::fileaccess::image_mime(src)
+        .ok_or_else(|| CommandError::from(format!("不是支持的图片格式：{path}")))?;
+    let meta = std::fs::metadata(src)
+        .map_err(|e| CommandError::from(format!("读取文件失败：{e}")))?;
+    if !meta.is_file() {
+        return Err(CommandError::from(format!("不是文件：{path}")));
+    }
+    let bytes = std::fs::read(src).map_err(|e| CommandError::from(format!("读取失败：{e}")))?;
+    let _ = mime;
+    let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("png");
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("图片")
+        .to_owned();
+    store_attachment(&state.paths.app_data, &bytes, ext, &name)
+}
 
-    Ok(path.display().to_string())
+/// 读取附件图片的 data URL（时间线预览用）。
+///
+/// **只接受附件目录内的路径**：这是渲染历史消息所必需的读取，而历史里的
+/// 路径本来就是我们落盘时写下的。收紧到单一目录，避免它变成通用的
+/// 「按路径读文件」接口。
+#[tauri::command]
+async fn read_attachment_image(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<String, CommandError> {
+    let dir = attachments_dir(&state.paths.app_data);
+    let p = std::path::Path::new(&path);
+    // 必须直接位于附件目录下（不允许子路径穿越）
+    if p.parent() != Some(dir.as_path()) {
+        return Err(CommandError::from("该路径不在附件目录内，拒绝读取".to_owned()));
+    }
+    let mime = crate::fileaccess::image_mime(p)
+        .ok_or_else(|| CommandError::from("不是支持的图片格式".to_owned()))?;
+    let bytes = std::fs::read(p).map_err(|e| CommandError::from(format!("读取失败：{e}")))?;
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{mime};base64,{b64}"))
 }
 
 /// 列出当前工作区可见的技能。
@@ -904,6 +1011,8 @@ pub fn run() {
             list_threads_remote,
             list_skills,
             save_attachment,
+            attach_local_image,
+            read_attachment_image,
             fuzzy_search_files,
             compact_thread,
             list_plugins,

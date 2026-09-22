@@ -68,7 +68,7 @@ fn assert_no_snake_case_keys(value: &serde_json::Value, what: &str) {
 #[test]
 fn item_body_wire_format_is_camel_case() {
     let variants = vec![
-        ItemBody::UserMessage { text: "hi".into() },
+        ItemBody::UserMessage { text: "hi".into(), images: vec!["/tmp/a.png".into()] },
         ItemBody::AgentMessage { text: "hi".into() },
         ItemBody::Reasoning { text: "thinking".into() },
         ItemBody::Plan { text: "plan".into() },

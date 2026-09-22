@@ -107,7 +107,17 @@ impl ItemStatus {
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ItemBody {
     #[serde(rename_all = "camelCase")]
-    UserMessage { text: String },
+    UserMessage {
+        text: String,
+        /// userMessage 的 `content[]` 里带的本地图片路径（协议 `localImage`）。
+        ///
+        /// **必须保留**：服务端会把我们发出去的图片原样回显在 userMessage 里，
+        /// 只取 text 的话，时间线上用户看到自己那条消息是「纯文字」——
+        /// 而图片确实是发出去、模型也确实看到了，界面与现实不符。
+        /// 有没有图片也是理解「模型为什么这样回答」的关键线索。
+        #[serde(default)]
+        images: Vec<String>,
+    },
     #[serde(rename_all = "camelCase")]
     AgentMessage { text: String },
     #[serde(rename_all = "camelCase")]

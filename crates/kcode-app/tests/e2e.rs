@@ -1058,6 +1058,29 @@ async fn turn_accepts_local_image_attachment() {
         .await;
     assert!(done.is_some(), "带图片的轮次未能完成");
 
+    // ── 服务端回显里的图片必须被投影保留 ──────────────────────────────
+    //
+    // 实测：userMessage 的 `content[]` 里带 `{"type":"localImage","path":...}`，
+    // 而我们的投影原先只取 text —— 时间线上用户那条消息显示成纯文字，
+    // 而图片其实已发出、模型也确实看到了。界面与现实不符。
+    let snap = h.service.load_thread(&thread_id).await.expect("重建线程失败");
+    let user_img = snap.items.iter().find_map(|i| match &i.body {
+        kcode_domain::ItemBody::UserMessage { images, .. } if !images.is_empty() => {
+            Some(images.clone())
+        }
+        _ => None,
+    });
+    let imgs = user_img.expect(
+        "用户消息里的图片未出现在时间线 —— 投影丢弃了 localImage，\
+         用户会以为自己发的是纯文字",
+    );
+    assert_eq!(imgs.len(), 1, "应恰好带一张图，实际 {imgs:?}");
+    assert!(
+        imgs[0].ends_with("shot.png"),
+        "图片路径应原样保留，实际 {:?}",
+        imgs[0]
+    );
+
     h.service.shutdown();
     tokio::time::sleep(Duration::from_millis(200)).await;
 }

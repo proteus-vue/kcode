@@ -34,6 +34,14 @@ import {
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { inTauri } from '../stores/useKcode';
+/** 后端 save_attachment / attach_local_image 的返回。 */
+interface SavedAttachment {
+  path: string;
+  name: string;
+  size: number;
+  previewDataUrl: string;
+}
+
 import type {
   ComposerAttachment,
   FileMatch,
@@ -134,6 +142,8 @@ export function Composer({
   const [attachError, setAttachError] = useState<string | null>(null);
   /** 正在处理拖入的图片（读文件 + 落盘需要时间，期间给可见反馈）。 */
   const [dropping, setDropping] = useState(false);
+  /** 拖入过程中已识别到的图片（仅用于展示「拖的是哪几张」）。 */
+  const [dragPreview, setDragPreview] = useState<{ name: string; path: string }[]>([]);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   /** 已提交输入的历史（↑ 回溯，规格 04 §4.5）。 */
   const [history, setHistory] = useState<string[]>([]);
@@ -312,16 +322,18 @@ export function Composer({
       try {
         const preview = await readAsDataUrl(f);
         const dataBase64 = preview.slice(preview.indexOf(',') + 1);
-        const path = await invoke<string>('save_attachment', {
+        const saved = await invoke<SavedAttachment>('save_attachment', {
           fileName: f.name || `pasted.${extensionOf(f.name, f.type)}`,
           dataBase64,
         });
         out.push({
           kind: 'image',
-          path,
-          name: f.name || '粘贴的图片',
-          preview,
-          size: f.size,
+          path: saved.path,
+          name: saved.name,
+          // 用后端回传的 data URL（与落盘字节完全一致），
+          // 而不是前端那份——两者本应相同，但以落盘内容为准更可靠。
+          preview: saved.previewDataUrl,
+          size: saved.size,
         });
       } catch (err) {
         setAttachError(err instanceof Error ? err.message : String(err));
@@ -344,8 +356,25 @@ export function Composer({
 
     // 拖入过程中给出可见反馈：此时文件还没进来，没有反馈用户会以为
     // 「拖了没反应」而反复拖。over/leave 由 Tauri 成对发出。
+    const onEnter = (ev: { payload?: { paths?: string[] } }) => {
+      setDropping(true);
+      // 拖入过程中就显示**真实缩略图**：Tauri 的 enter 事件已带 paths，
+      // 因此可以在用户松手之前让他确认「拖的是这几张」。
+      // 用 DataURL 缩略图预览，不落盘（落盘发生在 drop）。
+      const imgs = (ev.payload?.paths ?? []).filter((p) =>
+        /\.(png|jpe?g|gif|webp|bmp)$/i.test(p),
+      );
+      if (imgs.length > 0) setDragPreview(imgs.map((p) => ({ name: p.split('/').pop() ?? p, path: p })));
+    };
     const onOver = () => setDropping(true);
-    const onLeave = () => setDropping(false);
+    const onLeave = () => {
+      setDropping(false);
+      setDragPreview([]);
+    };
+    void listen<{ paths: string[] }>('tauri://drag-enter', onEnter).then((fn) => {
+      if (disposed) fn();
+      else unlisteners.push(fn);
+    });
 
     void listen('tauri://drag-over', onOver).then((fn) => {
       if (disposed) fn();
@@ -357,6 +386,7 @@ export function Composer({
     });
     void listen<{ paths: string[] }>('tauri://drag-drop', (ev) => {
       setDropping(false);
+      setDragPreview([]);
       const paths = ev.payload?.paths ?? [];
       const isImg = (p: string) => /\.(png|jpe?g|gif|webp|bmp)$/i.test(p);
       const imgs = paths.filter(isImg);
@@ -367,20 +397,26 @@ export function Composer({
         );
       }
       if (imgs.length === 0) return;
-      // 拖放的文件本来就有绝对路径（Tauri 直接给出），因此不落盘、
-      // 不在 app_data 里留副本，直接把路径交给 localImage。
-      // 预览图此处不读：大图在拖入瞬间就解码会卡一下。
-      setAttachments((prev) => [
-        ...prev,
-        ...imgs.map((p) => ({
-          kind: 'image' as const,
-          path: p,
-          name: p.split('/').pop() ?? p,
-          preview: '',
-          size: 0,
-        })),
-      ]);
-      setAttachError(null);
+      // 交给后端复制进附件目录：这样时间线预览只需认那一个目录，
+      // 也避免用户之后移动/删除源文件导致图片永久失效。
+      void (async () => {
+        const out: ImageAttachment[] = [];
+        for (const p of imgs) {
+          try {
+            const saved = await invoke<SavedAttachment>('attach_local_image', { path: p });
+            out.push({
+              kind: 'image',
+              path: saved.path,
+              name: saved.name,
+              preview: saved.previewDataUrl,
+              size: saved.size,
+            });
+          } catch (err) {
+            setAttachError(err instanceof Error ? err.message : String(err));
+          }
+        }
+        addImages(out);
+      })();
     }).then((fn) => {
       if (disposed) fn();
       else unlisteners.push(fn);
@@ -456,14 +492,40 @@ export function Composer({
           ))}
         </div>
       )}
-      <div className={`composer-box ${running ? 'is-running' : ''} ${dropping ? 'is-dropping' : ''}`}>
-        {/* 拖入时的覆盖提示：文件还没进来，必须让用户确认「松手就会加上」 */}
-        {dropping && (
-          <div className="drop-hint">
-            <Icon name="image" size={16} />
-            <span>松手即可附加图片</span>
+      {/* 拖入时的全屏提示。
+          # 为什么做全屏、以及我们和参照的不同
+          参照客户端也是全屏，但它们只给一句话。Tauri 的 `drag-enter`
+          事件**已经带了文件路径**，因此我们能在用户松手之前就显示
+          「拖的是哪几张」——图片用小预览、非图片直接标红说明会被忽略。
+          这样松手前就能发现问题，而不必等附加完再看。 */}
+      {dropping && (
+        <div className="drop-overlay" role="status" aria-live="polite">
+          <div className="drop-card">
+            <div className="drop-icon">
+              <Icon name="image" size={22} />
+            </div>
+            <p className="drop-title">松手即可附加</p>
+            {dragPreview.length > 0 ? (
+              <>
+                <ul className="drop-list">
+                  {dragPreview.map((d) => (
+                    <li key={d.path}>
+                      <Icon name="image" size={12} />
+                      <span className="drop-name">{d.name}</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="drop-note">
+                  将复制到 KCode 的附件目录，原文不会改动
+                </p>
+              </>
+            ) : (
+              <p className="drop-note">把这个文件拖到窗口任意位置即可</p>
+            )}
           </div>
-        )}
+        </div>
+      )}
+      <div className={`composer-box ${running ? 'is-running' : ''}`}>
         {/* 附件区：在文本域之上。放在上面而不是下面，是因为它属于
             「这次要发送的内容」，视线应当先看到内容再看到操作。 */}
         {attachments.length > 0 && (
