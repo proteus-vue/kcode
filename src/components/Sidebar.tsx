@@ -27,14 +27,17 @@
 import { useMemo, useState } from 'react';
 import type { RootState } from '../stores/store';
 import {
+  changedFileCount,
   groupByProject,
   recentThreads,
   relativeTime,
+  shortModelName,
   threadLastActivity,
   threadSortRank,
   threadTitle,
 } from '../stores/store';
 import { Icon } from './Icon';
+import { ThreadMenu } from './ThreadMenu';
 import { onColumnBandDoubleClick, onTitlebarDoubleClick } from '../hooks/titlebarZoom';
 
 export function Sidebar({
@@ -57,6 +60,10 @@ export function Sidebar({
   const [showAllRecent, setShowAllRecent] = useState(false);
   const [searching, setSearching] = useState(false);
   const [filter, setFilter] = useState('');
+  const [pinnedIds, setPinnedIds] = useState<Record<string, boolean>>({});
+  const [renames, setRenames] = useState<Record<string, string>>({});
+  const [archived, setArchived] = useState<Set<string>>(new Set());
+  const [err, setErr] = useState<string | null>(null);
 
   const groups = useMemo(() => groupByProject(state), [state]);
   const recent = useMemo(() => recentThreads(state, showAllRecent ? 50 : 6), [state, showAllRecent]);
@@ -158,6 +165,25 @@ export function Sidebar({
                 {isOpen &&
                   visible.map((id) => (
                     <ThreadRow
+                      menu={
+                        <ThreadMenu
+                          threadId={id}
+                          title={renames[id] ?? threadTitle(state, id)}
+                          pinned={!!pinnedIds[id]}
+                          onPinned={(i, v) => setPinnedIds((m) => ({ ...m, [i]: v }))}
+                          onRenamed={(i, n) => setRenames((m) => ({ ...m, [i]: n }))}
+                          onArchived={(i) =>
+                            setArchived((prev) => {
+                              const n = new Set(prev);
+                              n.add(i);
+                              return n;
+                            })
+                          }
+                          onError={setErr}
+                        />
+                      }
+                      rename={renames[id]}
+                      hidden={archived.has(id)}
                       key={id}
                       state={state}
                       id={id}
@@ -179,6 +205,25 @@ export function Sidebar({
             </div>
             {recent.filter(match).map((id) => (
               <ThreadRow
+                menu={
+                  <ThreadMenu
+                    threadId={id}
+                    title={renames[id] ?? threadTitle(state, id)}
+                    pinned={!!pinnedIds[id]}
+                    onPinned={(i, v) => setPinnedIds((m) => ({ ...m, [i]: v }))}
+                    onRenamed={(i, n) => setRenames((m) => ({ ...m, [i]: n }))}
+                    onArchived={(i) =>
+                      setArchived((prev) => {
+                        const n = new Set(prev);
+                        n.add(i);
+                        return n;
+                      })
+                    }
+                    onError={setErr}
+                  />
+                }
+                rename={renames[id]}
+                hidden={archived.has(id)}
                 key={id}
                 state={state}
                 id={id}
@@ -212,6 +257,7 @@ export function Sidebar({
           <span>导出审计日志</span>
         </button>
       </footer>
+      {err && <div className="sb-thread-err">{err}</div>}
     </aside>
   );
 }
@@ -223,30 +269,56 @@ function ThreadRow({
   indented,
   active,
   onSelect,
+  menu,
+  rename,
+  hidden,
 }: {
   state: RootState;
   id: string;
   indented?: boolean;
   active: boolean;
   onSelect: (id: string) => void;
+  menu?: React.ReactNode;
+  /** 本地临时重命名（服务端 thread/name/set 成功后写入）。 */
+  rename?: string;
+  /** 已归档：从列表中移除（服务端 thread/archive 成功后置位）。 */
+  hidden?: boolean;
 }) {
+  if (hidden) return null;
+
   const rank = threadSortRank(state, id);
   const pending = Object.keys(state.threads[id]?.pendingApprovals ?? {}).length;
   const time = relativeTime(threadLastActivity(state, id));
+  const changed = changedFileCount(state, id);
+  const model = shortModelName(state.threads[id]?.model ?? null);
+  const label = rename ?? threadTitle(state, id);
 
   return (
-    <button
-      className={`sb-thread ${indented ? 'indented' : ''} ${active ? 'is-active' : ''}`}
-      onClick={() => onSelect(id)}
-      title={threadTitle(state, id)}
-    >
-      <span className="sb-thread-title">{threadTitle(state, id)}</span>
-      <span className="sb-thread-meta">
-        {pending > 0 && <span className="dot dot-warn" title={`${pending} 项待审批`} />}
-        {pending === 0 && rank === 1 && <span className="dot dot-run" title="运行中" />}
-        {pending === 0 && rank === 3 && <span className="dot dot-fail" title="失败" />}
-        {time && <span className="sb-time">{time}</span>}
-      </span>
-    </button>
+    <div className="sb-thread-wrap">
+      <button
+        className={`sb-thread ${indented ? 'indented' : ''} ${active ? 'is-active' : ''}`}
+        onClick={() => onSelect(id)}
+        title={label}
+      >
+        <span className="sb-thread-title">{label}</span>
+        <span className="sb-thread-meta">
+          {pending > 0 && <span className="dot dot-warn" title={`${pending} 项待审批`} />}
+          {pending === 0 && rank === 1 && <span className="dot dot-run" title="运行中" />}
+          {pending === 0 && rank === 3 && <span className="dot dot-fail" title="失败" />}
+          {model && (
+            <span className="sb-model" title={`模型：${state.threads[id]?.model}`}>
+              {model}
+            </span>
+          )}
+          {changed > 0 && (
+            <span className="sb-chg" title={`${changed} 个文件有变更`}>
+              Δ{changed}
+            </span>
+          )}
+          {time && <span className="sb-time">{time}</span>}
+        </span>
+      </button>
+      {menu}
+    </div>
   );
 }

@@ -148,11 +148,61 @@ pub enum AppEvent {
     Error {
         message: String,
     },
+    /// **护栏警告**（协议 `guardianWarning`）。
+    ///
+    /// 上游的循环/异常检测触发时推给我们。丢掉它的后果最严重：
+    /// 模型正在原地打转、上游已经判定异常，而界面上什么都不显示——
+    /// 用户只能看着它一直转下去，既不知道发生了什么，也没有依据决定
+    /// 是否该中断。**这条通知是「上游刹车已介入」的唯一可见信号。**
+    #[serde(rename_all = "camelCase")]
+    GuardianWarning {
+        thread_id: String,
+        message: String,
+    },
+    /// 线程 token 用量更新（协议 `thread/tokenUsage/updated`）。
+    ///
+    /// 提供上下文余量的唯一数据来源。没有它，「接近上限」这件事
+    /// 对用户完全不可见——直到某轮突然失败。
+    #[serde(rename_all = "camelCase")]
+    TokenUsageUpdated {
+        thread_id: String,
+        turn_id: String,
+        usage: ThreadTokenUsage,
+    },
     /// 子进程退出。活动轮次须标记为 unknown，**绝不静默当作成功或失败**。
     #[serde(rename_all = "camelCase")]
     ProcessExited {
         code: Option<i32>,
     },
+}
+
+/// 单次计量的 token 明细（协议 `TokenUsageBreakdown`）。
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsageBreakdown {
+    pub input_tokens: i64,
+    #[serde(default)]
+    pub cached_input_tokens: i64,
+    pub output_tokens: i64,
+    #[serde(default)]
+    pub reasoning_output_tokens: i64,
+    pub total_tokens: i64,
+}
+
+/// 线程级 token 用量（协议 `ThreadTokenUsage`）。
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadTokenUsage {
+    /// 最近一轮的用量——**上下文占用按它估算**（见前端 `contextRemaining`）。
+    pub last: TokenUsageBreakdown,
+    /// 线程累计用量（跨轮累加）。用于回答「这个任务一共花了多少」。
+    pub total: TokenUsageBreakdown,
+    /// 模型上下文窗口大小。协议可能不给，此时无法算余量。
+    ///
+    /// 缺失时**显式序列化为 `null`**（不跳过字段）：漏字段在 TS 侧是
+    /// `undefined`，与 `null` 不是一回事，容易在 `??` 之外的地方踩空。
+    #[serde(default)]
+    pub model_context_window: Option<i64>,
 }
 
 /// 一个可用技能（来自 `skills/list`）。
@@ -343,6 +393,18 @@ enum Command {
         request_id: String,
         decision: ApprovalDecision,
         scope: Option<ApprovalScope>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// 重命名线程（协议 `thread/name/set`）。
+    SetThreadName {
+        thread_id: String,
+        name: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// 归档 / 取消归档线程（协议 `thread/archive` 与 `thread/unarchive`）。
+    ArchiveThread {
+        thread_id: String,
+        archived: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
     ExportAudit {
@@ -657,6 +719,30 @@ impl AgentService {
         let request_id = request_id.into();
         self.call(|reply| Command::ResolveApproval { request_id, decision, scope, reply })
             .await
+    }
+
+    /// 重命名线程（协议 `thread/name/set`）。
+    ///
+    /// 名字由服务端持久化——本地改完不写回服务端，重启后就消失。
+    pub async fn set_thread_name(
+        &self,
+        thread_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Result<(), String> {
+        let (thread_id, name) = (thread_id.into(), name.into());
+        self.call(|reply| Command::SetThreadName { thread_id, name, reply }).await
+    }
+
+    /// 归档或取消归档线程（协议 `thread/archive` / `thread/unarchive`）。
+    ///
+    /// 归档不是删除：线程仍可用 `thread/list` 找回（协议二者区分）。
+    pub async fn archive_thread(
+        &self,
+        thread_id: impl Into<String>,
+        archived: bool,
+    ) -> Result<(), String> {
+        let thread_id = thread_id.into();
+        self.call(|reply| Command::ArchiveThread { thread_id, archived, reply }).await
     }
 
     pub async fn export_audit(&self) -> Result<String, String> {
@@ -1083,6 +1169,26 @@ async fn handle_command(
                 // 这不是故障而是「轮次已结束」的正常表达——折叠为成功，
                 // 调用方无需区分「刚结束」与「本来就结束」。
                 Err(kcode_bridge::BridgeError::Rpc { code: -32600, .. }) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(out);
+        }
+
+        Command::SetThreadName { thread_id, name, reply } => {
+            let params = json!({ "threadId": thread_id, "name": name });
+            let out = match transport.request("thread/name/set", params).await {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(out);
+        }
+
+        Command::ArchiveThread { thread_id, archived, reply } => {
+            // 归档与取消归档是两个方法名（协议未用布尔参数区分）。
+            let method = if archived { "thread/archive" } else { "thread/unarchive" };
+            let params = json!({ "threadId": thread_id });
+            let out = match transport.request(method, params).await {
+                Ok(_) => Ok(()),
                 Err(e) => Err(e.to_string()),
             };
             let _ = reply.send(out);
@@ -1783,8 +1889,90 @@ async fn handle_incoming(
                 emit(AppEvent::Error { message });
             }
 
+            // 护栏警告：上游的循环/异常检测已介入。
+            // 落库 + 推送——这是「刹车已踩下」的唯一可见信号，丢了等于瞒报。
+            "guardianWarning" => {
+                let thread_id = params
+                    .get("threadId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let message = params
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("上游检测到异常执行模式")
+                    .to_owned();
+                record(log, event_kind::GUARDIAN_WARNING, Some(&thread_id), None, None, params)
+                    .await;
+                emit(AppEvent::GuardianWarning { thread_id, message });
+            }
+
+            // token 用量：只推送不落库——每轮一条的频度会让审计日志膨胀，
+            // 而它不承载安全语义（成本统计另走 export_audit 的汇总）。
+            "thread/tokenUsage/updated" => {
+                let thread_id = params
+                    .get("threadId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let turn_id = params
+                    .get("turnId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let usage = parse_token_usage(&params["tokenUsage"]);
+                emit(AppEvent::TokenUsageUpdated { thread_id, turn_id, usage });
+            }
+
+            // 上下文压缩通知。协议已标记 deprecated（改由 `contextCompaction`
+            // item 承载），但**不能因此静默丢弃**：老版本 app-server 仍会推，
+            // 且「上下文被压缩过」是解释后续行为变化的关键事实，落库备查。
+            "thread/compacted" => {
+                let thread_id = params
+                    .get("threadId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let turn_id = params
+                    .get("turnId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                record(
+                    log,
+                    event_kind::CONTEXT_COMPACTED,
+                    Some(&thread_id),
+                    Some(&turn_id),
+                    None,
+                    params,
+                )
+                .await;
+            }
+
             _ => {}
         },
+    }
+}
+
+/// 从协议载荷解析 token 用量。
+///
+/// 各字段缺失时取 0（协议把多数计数标为 required，但 `modelContextWindow`
+/// 可空——它缺失时前端就无法计算余量，这一点必须原样传递而不是猜一个值）。
+fn parse_token_usage(v: &Value) -> ThreadTokenUsage {
+    fn breakdown(v: &Value) -> TokenUsageBreakdown {
+        let n = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+        TokenUsageBreakdown {
+            input_tokens: n("inputTokens"),
+            cached_input_tokens: n("cachedInputTokens"),
+            output_tokens: n("outputTokens"),
+            reasoning_output_tokens: n("reasoningOutputTokens"),
+            total_tokens: n("totalTokens"),
+        }
+    }
+    ThreadTokenUsage {
+        last: breakdown(v.get("last").unwrap_or(&Value::Null)),
+        total: breakdown(v.get("total").unwrap_or(&Value::Null)),
+        model_context_window: v.get("modelContextWindow").and_then(Value::as_i64),
     }
 }
 
@@ -2174,5 +2362,54 @@ mod tests {
         assert_eq!(v2["type"], "approvalRequired");
         assert!(v2["approval"].get("requestId").is_some(), "keys: {}", v2["approval"]);
         assert!(v2["approval"].get("startedAtMs").is_some(), "keys: {}", v2["approval"]);
+    }
+
+    #[test]
+    fn token_usage_parses_full_payload() {
+        let payload = json!({
+            "last": {
+                "inputTokens": 1200, "cachedInputTokens": 800,
+                "outputTokens": 300, "reasoningOutputTokens": 50,
+                "totalTokens": 1500
+            },
+            "total": {
+                "inputTokens": 5000, "cachedInputTokens": 2000,
+                "outputTokens": 900, "reasoningOutputTokens": 120,
+                "totalTokens": 5900
+            },
+            "modelContextWindow": 200000
+        });
+        let u = parse_token_usage(&payload);
+        assert_eq!(u.last.input_tokens, 1200);
+        assert_eq!(u.last.cached_input_tokens, 800);
+        assert_eq!(u.last.output_tokens, 300);
+        assert_eq!(u.last.reasoning_output_tokens, 50);
+        assert_eq!(u.last.total_tokens, 1500);
+        assert_eq!(u.total.total_tokens, 5900);
+        assert_eq!(u.model_context_window, Some(200_000));
+    }
+
+    #[test]
+    fn token_usage_missing_fields_degrade_to_zero_not_panic() {
+        // 协议演进中字段可能缺席。此时应退化为 0（余量算不出 → 前端不显示），
+        // 而不是 panic 掉整个通知分发——那会连带丢掉后续所有事件。
+        let u = parse_token_usage(&json!({}));
+        assert_eq!(u.last.total_tokens, 0);
+        assert_eq!(u.total.total_tokens, 0);
+        // 窗口缺失必须如实为 None：猜一个值会让「余量」显示错误的比例。
+        assert_eq!(u.model_context_window, None);
+
+        // 半截载荷（只有 last）同样不应崩
+        let half = parse_token_usage(&json!({ "last": { "inputTokens": 5, "outputTokens": 1, "totalTokens": 6 } }));
+        assert_eq!(half.last.total_tokens, 6);
+        assert_eq!(half.total.total_tokens, 0);
+    }
+
+    #[test]
+    fn token_usage_window_zero_is_preserved() {
+        // 0 与 None 语义不同：0 表示「协议明确说窗口是 0」（异常但已知），
+        // None 表示「协议没说」。用 unwrap_or(0) 会把两者混为一谈。
+        let u = parse_token_usage(&json!({ "modelContextWindow": 0 }));
+        assert_eq!(u.model_context_window, Some(0));
     }
 }

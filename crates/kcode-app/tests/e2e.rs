@@ -779,3 +779,149 @@ async fn unknown_approval_id_is_rejected() {
     h.service.shutdown();
     tokio::time::sleep(Duration::from_millis(200)).await;
 }
+
+/// 线程重命名必须真正到达 app-server 并能被读回（IA-05）。
+///
+/// 为什么不能只测「命令返回 Ok」：命令成功只说明我们发出去了，
+/// 不说明服务端接受了这个参数名。若参数拼错，很多服务端会静默忽略——
+/// UI 显示新名字（本地乐观更新），重启后又变回去。
+/// 因此这里用 `thread/list` 回读，以服务端的名字为准。
+#[tokio::test(flavor = "multi_thread")]
+async fn thread_rename_reaches_server_and_is_readable() {
+    let Some(h) = Harness::start(vec![]).await else { return };
+
+    let thread_id = h.start_thread().await;
+    // 先跑一轮：服务端只把「有内容」的线程纳入 thread/list，
+    // 空线程列举不出来，会让下面的回读断言产生假阴性。
+    h.service.send_turn(&thread_id, "重命名验证").await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    h.service
+        .set_thread_name(&thread_id, "重命名验证")
+        .await
+        .expect("thread/name/set 失败");
+
+    let list = h.service.list_threads_remote(None).await.expect("列举失败");
+    let got = list.iter().find(|t| t.thread_id == thread_id);
+    assert!(got.is_some(), "重命名后线程不在列表里");
+    assert_eq!(
+        got.unwrap().name.as_deref(),
+        Some("重命名验证"),
+        "服务端未记住新名字 —— 前端显示的名字会在重启后丢失"
+    );
+
+    h.service.shutdown();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+/// 归档后 `thread/list` 默认不再返回该线程；取消归档后必须回来（IA-05）。
+///
+/// 两条都要测：只测归档的话，「取消归档」写成不生效也发现不了——
+/// 而那正是这个功能存在的意义（归档不是删除，必须可恢复）。
+#[tokio::test(flavor = "multi_thread")]
+async fn archive_hides_thread_and_unarchive_restores_it() {
+    let Some(h) = Harness::start(vec![]).await else { return };
+
+    let thread_id = h.start_thread().await;
+    h.service.send_turn(&thread_id, "归档验证").await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    h.service.archive_thread(&thread_id, true).await.expect("归档失败");
+    let after_archive = h.service.list_threads_remote(None).await.expect("列举失败");
+    assert!(
+        !after_archive.iter().any(|t| t.thread_id == thread_id),
+        "归档后线程仍出现在默认列表里 — 侧栏的「归档」会看起来没反应"
+    );
+
+    h.service.archive_thread(&thread_id, false).await.expect("取消归档失败");
+    let after_restore = h.service.list_threads_remote(None).await.expect("列举失败");
+    assert!(
+        after_restore.iter().any(|t| t.thread_id == thread_id),
+        "取消归档后线程没有回来 — 归档不可恢复，用户的线程就丢了"
+    );
+
+    h.service.shutdown();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+/// 真实轮次必须产生 token 用量事件（CH-08 / 方案 05 第 9 条）。
+///
+/// # 这条测试在防什么
+///
+/// 此前 `service.rs` 的通知分发末尾是 `_ => {}`，`thread/tokenUsage/updated`
+/// **被无声丢弃**——用户永远看不到上下文余量，直到某轮突然失败。
+///
+/// 单测覆盖了 `parse_token_usage` 的解析正确性，但「解析对」不等于
+/// 「分发接上了」。这里跑一轮真实对话，断言事件确实从 app-server
+/// 一路走到了 AppEvent。
+#[tokio::test(flavor = "multi_thread")]
+async fn real_turn_emits_token_usage_for_context_meter() {
+    let Some(mut h) = Harness::start(vec![json!({
+        "type": "message", "id": "m", "role": "assistant", "status": "completed",
+        "content": [{ "type": "output_text", "text": "hello", "annotations": [] }]
+    })])
+    .await
+    else {
+        eprintln!("跳过：未安装 codex 二进制");
+        return;
+    };
+
+    let thread_id = h.start_thread().await;
+    h.service.send_turn(&thread_id, "打个招呼").await.expect("提交失败");
+
+    let usage = h
+        .wait_for(Duration::from_secs(30), |ev| match ev {
+            AppEvent::TokenUsageUpdated { usage, .. } => Some(*usage),
+            _ => None,
+        })
+        .await;
+
+    let usage = usage.expect(
+        "整轮跑完仍未收到 tokenUsage 事件 —— 上下文余量对用户不可见（通知被静默丢弃）",
+    );
+    assert!(
+        usage.last.total_tokens > 0,
+        "token 用量应大于 0，实际 {:?}",
+        usage.last
+    );
+
+    h.service.shutdown();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+/// 护栏警告事件必须能落库（AP-11）。
+///
+/// # 为什么单独测落库而不是测事件
+///
+/// `guardianWarning` 由上游的循环检测触发，**mock provider 不会产生它**，
+/// 因此无法用真实轮次覆盖。但这个事件的价值有一半在审计上：事故复盘时
+/// 第一个要回答的问题就是「上游当时示警了吗」。这里验证的是落库路径
+/// （`record` + `event_kind::GUARDIAN_WARNING`）本身可用——它不依赖
+/// 上游是否触发。
+#[tokio::test(flavor = "multi_thread")]
+async fn guardian_warning_kind_is_persistable_and_replayable() {
+    // 直接对事件日志读写：验证 kind 常量与重放能对上。
+    let log = kcode_domain::EventLog::in_memory().expect("建内存日志失败");
+    let payload = json!({ "threadId": "th-1", "message": "检测到重复的工具调用" });
+    log.append(&kcode_domain::EventRecord {
+        seq: 0,
+        thread_id: Some("th-1".into()),
+        turn_id: None,
+        item_id: None,
+        ts_ms: 1000,
+        kind: kcode_domain::event_kind::GUARDIAN_WARNING.to_owned(),
+        payload: payload.clone(),
+        raw_json: payload.to_string(),
+    })
+    .expect("写入失败");
+
+    let all = log.all_events().expect("读取失败");
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].kind, kcode_domain::event_kind::GUARDIAN_WARNING);
+    assert_eq!(all[0].thread_id.as_deref(), Some("th-1"));
+    assert_eq!(
+        all[0].payload.get("message").and_then(|v| v.as_str()),
+        Some("检测到重复的工具调用"),
+        "警告原文必须可读回，否则复盘时只剩一个空事件"
+    );
+}

@@ -30,6 +30,7 @@ import {
 } from './components/scenes';
 import { useKcode, extractErrorMessage } from './stores/useKcode';
 import { usePanelLayout } from './hooks/usePanelLayout';
+import { useAutoScroll } from './hooks/useAutoScroll';
 import { matchPanelShortcut } from './hooks/panelShortcut';
 import { onColumnBandDoubleClick, onTitlebarDoubleClick } from './hooks/titlebarZoom';
 import { reviewDataFor, threadTitle } from './stores/store';
@@ -77,6 +78,23 @@ export default function App() {
    */
   const [openScenes, setOpenScenes] = useState<WorkbenchScene[]>(['review']);
   const [activeScene, setActiveScene] = useState<WorkbenchScene | null>('review');
+
+  /**
+   * 消息流的跟随滚动。
+   *
+   * 依赖信号用「轮次 + 该轮最后一条 Item + 流式缓冲长度」——任一变化
+   * 都意味着有新内容需要跟随。只依赖轮次数量的话，一轮之内的大量
+   * 流式增量不会触发判断，用户就看不到「自动滚动」。
+   */
+  const activeThread = state.activeThreadId ? state.threads[state.activeThreadId] : undefined;
+  const lastTurnId = activeThread?.turnOrder[activeThread.turnOrder.length - 1];
+  const lastTurn = lastTurnId ? activeThread?.turns[lastTurnId] : undefined;
+  const lastItemId = lastTurn?.itemIds[lastTurn.itemIds.length - 1];
+  const streamLen = lastItemId
+    ? (activeThread?.streamBuffer[lastItemId]?.length ?? 0)
+    : 0;
+  const scrollSignal = `${state.activeThreadId ?? ''}:${activeThread?.turnOrder.length ?? 0}:${lastItemId ?? ''}:${streamLen}`;
+  const scroll = useAutoScroll<HTMLDivElement>(scrollSignal);
 
   useEffect(() => {
     void api.startRuntime();
@@ -428,39 +446,50 @@ export default function App() {
           </div>
         </header>
 
-        <div className="main-body">
-          {/* 空态条件必须包含「线程存在但还没有轮次」。
-              只判 !thread 时，新建对话（线程已建、turnOrder 为空）
-              既不显示欢迎页、也没有任何轮次可渲染——用户看到一片空白
-              （实测：点「新对话」后主区全空）。 */}
-          {(!thread || thread.turnOrder.length === 0) && (
-            <Welcome
-              projectName={projectName}
-              onPick={(prompt) => {
-                // 建议卡片直接建线程并提交——不是装饰性文案
-                void (async () => {
-                  await api.createThread();
-                  await api.sendTurn(prompt);
-                })();
-              }}
-            />
-          )}
-          {thread &&
-            thread.turnOrder.map((turnId) => (
-              <TurnView
-                key={turnId}
-                state={state}
-                threadId={thread.id}
-                turnId={turnId}
-                onOpenFile={(path) =>
-                  api.openInRight({
-                    kind: 'file',
-                    path,
-                    label: path.split('/').pop() ?? path,
-                  })
-                }
+        <div className="main-body-wrap">
+          <div className="main-body" ref={scroll.ref as React.RefObject<HTMLDivElement>}>
+            {/* 空态条件必须包含「线程存在但还没有轮次」。
+                只判 !thread 时，新建对话（线程已建、turnOrder 为空）
+                既不显示欢迎页、也没有任何轮次可渲染——用户看到一片空白
+                （实测：点「新对话」后主区全空）。 */}
+            {(!thread || thread.turnOrder.length === 0) && (
+              <Welcome
+                projectName={projectName}
+                onPick={(prompt) => {
+                  // 建议卡片直接建线程并提交——不是装饰性文案
+                  void (async () => {
+                    await api.createThread();
+                    await api.sendTurn(prompt);
+                  })();
+                }}
               />
-            ))}
+            )}
+            {thread &&
+              thread.turnOrder.map((turnId) => (
+                <TurnView
+                  key={turnId}
+                  state={state}
+                  threadId={thread.id}
+                  turnId={turnId}
+                  onOpenFile={(path) =>
+                    api.openInRight({
+                      kind: 'file',
+                      path,
+                      label: path.split('/').pop() ?? path,
+                    })
+                  }
+                />
+              ))}
+          </div>
+
+          {/* 「回到底部」只在用户上滑离开底部后出现。
+              贴在流底部而非顶部：它替代的正是「滚到底」这个动作。 */}
+          {scroll.showButton && (
+            <button className="scroll-bottom" onClick={scroll.scrollToBottom} title="回到底部">
+              <Icon name="chevron" size={13} />
+              <span>回到底部</span>
+            </button>
+          )}
         </div>
 
 

@@ -20,7 +20,7 @@ const cleanGit = {
 describe('dockSections 的分段条件', () => {
   it('干净仓库 + 无步骤 + 无线程 → 整段都不显示', () => {
     const r = dockSections({ hasThread: false, git: cleanGit, stepCount: 0 });
-    expect(r).toEqual({ git: false, steps: false, env: false, any: false });
+    expect(r).toEqual({ git: false, steps: false, context: false, env: false, any: false });
   });
 
   it('干净的 git 仓库不显示 Git 段', () => {
@@ -80,6 +80,41 @@ describe('dockSections 的分段条件', () => {
     expect(
       dockSections({ hasThread: false, git: { ...cleanGit, modified: 1 }, stepCount: 0 }).any,
     ).toBe(true);
+  });
+
+  describe('上下文余量段', () => {
+    it('充裕时不显示——刚开的会话显示「已用 3%」是纯噪音', () => {
+      const r = dockSections({ hasThread: true, git: cleanGit, stepCount: 0, contextRatio: 0.03 });
+      expect(r.context).toBe(false);
+    });
+
+    it('阈值边界：69% 不显示、70% 显示（对齐上游压缩线）', () => {
+      expect(
+        dockSections({ hasThread: true, git: cleanGit, stepCount: 0, contextRatio: 0.699 })
+          .context,
+      ).toBe(false);
+      expect(
+        dockSections({ hasThread: true, git: cleanGit, stepCount: 0, contextRatio: 0.7 }).context,
+      ).toBe(true);
+    });
+
+    it('窗口未知（null）时不显示——算不出比例就不该猜', () => {
+      const r = dockSections({ hasThread: true, git: cleanGit, stepCount: 0, contextRatio: null });
+      expect(r.context).toBe(false);
+    });
+
+    it('未传该字段时不影响其他段（向后兼容）', () => {
+      const r = dockSections({ hasThread: true, git: cleanGit, stepCount: 2 });
+      expect(r.context).toBe(false);
+      expect(r.steps).toBe(true);
+      expect(r.any).toBe(true);
+    });
+
+    it('仅上下文段可显示时，浮层整体仍要渲染', () => {
+      const r = dockSections({ hasThread: false, git: cleanGit, stepCount: 0, contextRatio: 0.95 });
+      expect(r.context).toBe(true);
+      expect(r.any).toBe(true);
+    });
   });
 });
 

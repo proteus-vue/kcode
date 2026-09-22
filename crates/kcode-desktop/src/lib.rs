@@ -605,6 +605,28 @@ async fn list_threads_remote(
         .map_err(CommandError::from)
 }
 
+/// 重命名线程（协议 `thread/name/set`）。
+#[tauri::command]
+async fn thread_name_set(
+    state: State<'_, AppState>,
+    thread_id: String,
+    name: String,
+) -> Result<(), CommandError> {
+    let svc = require_service(&state).await?;
+    svc.set_thread_name(thread_id, name).await.map_err(CommandError::from)
+}
+
+/// 归档 / 取消归档线程（协议 `thread/archive`、`thread/unarchive`）。
+#[tauri::command]
+async fn thread_archive(
+    state: State<'_, AppState>,
+    thread_id: String,
+    archived: bool,
+) -> Result<(), CommandError> {
+    let svc = require_service(&state).await?;
+    svc.archive_thread(thread_id, archived).await.map_err(CommandError::from)
+}
+
 /// 列出当前工作区可见的技能。
 #[tauri::command]
 async fn list_skills(state: State<'_, AppState>) -> Result<Vec<kcode_app::SkillInfo>, CommandError> {
@@ -774,6 +796,8 @@ pub fn run() {
             steer,
             interrupt,
             resolve_approval,
+            thread_name_set,
+            thread_archive,
             list_threads,
             load_thread,
             list_models,

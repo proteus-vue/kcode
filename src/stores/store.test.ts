@@ -10,8 +10,12 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  changedFileCount,
+  contextUsage,
+  decisionForScope,
   decisionLabel,
   describeSignal,
+  guardianSummary,
   initialState,
   interruptsTurn,
   isApproving,
@@ -19,11 +23,13 @@ import {
   isDeclined,
   reduce,
   reduceAll,
+  shortModelName,
   sortedThreadIds,
   threadItems,
+  threadTitle,
   turnDisplayStatus,
 } from './store';
-import type { AppEvent, Approval, Item } from '../types/domain';
+import type { AppEvent, Approval, ChangeSet, Item, ThreadTokenUsage } from '../types/domain';
 
 function makeApproval(over: Partial<Approval> = {}): Approval {
   return {
@@ -213,6 +219,203 @@ describe('侧栏排序', () => {
   });
 });
 
+describe('线程行徽标（IA-04）', () => {
+  const mkChangeSet = (
+    threadId: string,
+    turnId: string,
+    paths: string[],
+  ): ChangeSet => ({
+    threadId,
+    turnId,
+    origin: 'proposed',
+    reviewState: 'proposed',
+    decisions: paths.map(() => 'pending'),
+    files: paths.map((path) => ({ path, kind: { type: 'update' }, diff: '' })),
+  });
+
+  it('变更文件数跨轮次去重', () => {
+    const state = reduceAll(initialState(), [
+      { type: 'threadStarted', threadId: 'th1', cwd: '/w' },
+      {
+        type: 'changeSetReplaced',
+        threadId: 'th1',
+        turnId: 'tu1',
+        changeSet: mkChangeSet('th1', 'tu1', ['a.ts', 'b.ts']),
+      },
+      // 第二轮又改了 a.ts —— 去重后应是 3 个不同文件
+      {
+        type: 'changeSetReplaced',
+        threadId: 'th1',
+        turnId: 'tu2',
+        changeSet: mkChangeSet('th1', 'tu2', ['a.ts', 'c.ts']),
+      },
+    ]);
+    expect(changedFileCount(state, 'th1')).toBe(3);
+    expect(changedFileCount(state, '不存在')).toBe(0);
+  });
+
+  it('模型短名去掉 provider 前缀并截断', () => {
+    expect(shortModelName('anthropic/claude-sonnet-4')).toBe('claude-sonnet-4');
+    expect(shortModelName('deepseek-flash')).toBe('deepseek-flash');
+    expect(shortModelName(null)).toBeNull();
+    expect(shortModelName('  ')).toBeNull();
+    expect(shortModelName('provider/' + 'x'.repeat(40))).toBe('x'.repeat(20) + '…');
+  });
+
+  it('threadMeta 记住服务端名字与模型，且不覆盖已有值', () => {
+    let state = reduce(initialState(), { type: 'threadStarted', threadId: 'th1', cwd: '/w' });
+    state = reduce(state, { type: 'threadMeta', threadId: 'th1', name: '修黑屏', model: 'gpt-x' });
+    expect(state.threads['th1'].name).toBe('修黑屏');
+    expect(state.threads['th1'].model).toBe('gpt-x');
+
+    // 后续只带 model 的事件不得清掉已有的 name
+    state = reduce(state, { type: 'threadMeta', threadId: 'th1', model: 'gpt-y' });
+    expect(state.threads['th1'].name).toBe('修黑屏');
+    expect(state.threads['th1'].model).toBe('gpt-y');
+  });
+
+  it('用户命名优先于首条消息派生的标题', () => {
+    let state = reduce(initialState(), { type: 'threadStarted', threadId: 'th1', cwd: '/w' });
+    state = reduceAll(state, [
+      {
+        type: 'itemUpserted',
+        threadId: 'th1',
+        turnId: 'tu1',
+        completed: true,
+        item: {
+          id: 'i1',
+          turnId: 'tu1',
+          createdAtMs: 1,
+          body: { kind: 'userMessage', text: '这是一条很长的首条消息，用来验证标题派生逻辑' },
+        },
+      },
+      { type: 'threadMeta', threadId: 'th1', name: '我的任务' },
+    ]);
+    expect(threadTitle(state, 'th1')).toBe('我的任务');
+  });
+});
+
+describe('AP-07 作用域 → 决策映射', () => {
+  it('session 映射到 acceptForSession，其余回落到最窄授权', () => {
+    expect(decisionForScope('session')).toBe('acceptForSession');
+    expect(decisionForScope('once')).toBe('accept');
+  });
+
+  it('协议未支持的粒度不得放大授权', () => {
+    // turn / project 是领域预留值：协议没有对应决策，
+    // 必须回落到 accept（多问一次），而不是放行整个会话。
+    expect(decisionForScope('turn')).toBe('accept');
+    expect(decisionForScope('project')).toBe('accept');
+  });
+});
+
+describe('护栏信号（05 章硬约束 / CH-08）', () => {
+  const usage = (over: Partial<ThreadTokenUsage> = {}): ThreadTokenUsage => ({
+    last: {
+      inputTokens: 100,
+      cachedInputTokens: 0,
+      outputTokens: 20,
+      reasoningOutputTokens: 0,
+      totalTokens: 120,
+    },
+    total: {
+      inputTokens: 900,
+      cachedInputTokens: 0,
+      outputTokens: 300,
+      reasoningOutputTokens: 0,
+      totalTokens: 1200,
+    },
+    modelContextWindow: 1000,
+    ...over,
+  });
+
+  it('上下文余量按最近一轮算，而不是累计值', () => {
+    // total=1200 已超过 window=1000。若误用 total，比例会是 1.2（>100%）。
+    const u = contextUsage(usage());
+    expect(u).not.toBeNull();
+    expect(u!.used).toBe(120);
+    expect(u!.ratio).toBeCloseTo(0.12);
+    expect(u!.remaining).toBe(880);
+    expect(u!.level).toBe('ok');
+  });
+
+  it('窗口未知或无效时返回 null，不猜一个默认值', () => {
+    expect(contextUsage(null)).toBeNull();
+    expect(contextUsage(usage({ modelContextWindow: null }))).toBeNull();
+    // 0 会让比例变成 Infinity，界面显示「已用 ∞%」
+    expect(contextUsage(usage({ modelContextWindow: 0 }))).toBeNull();
+    expect(contextUsage(usage({ modelContextWindow: -5 }))).toBeNull();
+  });
+
+  it('档位阈值与上游压缩线对齐（70% / 90%）', () => {
+    const at = (used: number, window = 1000) =>
+      contextUsage(
+        usage({
+          modelContextWindow: window,
+          last: {
+            inputTokens: used,
+            cachedInputTokens: 0,
+            outputTokens: 0,
+            reasoningOutputTokens: 0,
+            totalTokens: used,
+          },
+        }))!.level;
+    expect(at(699)).toBe('ok');
+    expect(at(700)).toBe('near'); // 上游压缩线
+    expect(at(899)).toBe('near');
+    expect(at(900)).toBe('critical');
+    expect(at(1000)).toBe('critical');
+  });
+
+  it('护栏警告累积而非覆盖，摘要取最后一条并标注次数', () => {
+    let state = reduce(initialState(), { type: 'threadStarted', threadId: 'th', cwd: '/w' });
+    state = reduce(state, { type: 'guardianWarning', threadId: 'th', message: '检测到重复调用' });
+    state = reduce(state, { type: 'guardianWarning', threadId: 'th', message: '仍然重复' });
+    const warnings = state.threads['th'].guardianWarnings;
+    expect(warnings).toHaveLength(2);
+    expect(warnings[1].message).toBe('仍然重复');
+    expect(guardianSummary(warnings)).toBe('仍然重复（共 2 次）');
+  });
+
+  it('无警告时摘要为 null（不渲染空横幅）', () => {
+    expect(guardianSummary([])).toBeNull();
+  });
+
+  it('空白警告不产生摘要（避免渲染出空框）', () => {
+    expect(guardianSummary([{ message: '   ' }])).toBeNull();
+  });
+
+  it('归约不引入非确定性——警告事件重放结果相同', () => {
+    // 归约是纯函数（重放要得到同一状态），因此不能在内部调 Date.now()。
+    // 这条用同一输入跑两次并比较结果来钉住它。
+    const events: AppEvent[] = [
+      { type: 'threadStarted', threadId: 'th', cwd: '/w' },
+      { type: 'guardianWarning', threadId: 'th', message: '重复调用' },
+    ];
+    expect(JSON.stringify(reduceAll(initialState(), events))).toBe(
+      JSON.stringify(reduceAll(initialState(), events)),
+    );
+  });
+
+  it('护栏警告独立于 errors 存放——不被杂项错误淹没', () => {
+    let state = reduce(initialState(), { type: 'threadStarted', threadId: 'th', cwd: '/w' });
+    state = reduce(state, { type: 'error', message: '模型列表加载失败' });
+    state = reduce(state, { type: 'guardianWarning', threadId: 'th', message: '检测到异常' });
+    expect(state.errors).toHaveLength(1);
+    expect(state.threads['th'].guardianWarnings).toHaveLength(1);
+  });
+
+  it('tokenUsage 事件写入对应线程，不串到别的线程', () => {
+    let state = reduceAll(initialState(), [
+      { type: 'threadStarted', threadId: 'a', cwd: '/a' },
+      { type: 'threadStarted', threadId: 'b', cwd: '/b' },
+    ]);
+    state = reduce(state, { type: 'tokenUsageUpdated', threadId: 'a', turnId: 't', usage: usage() });
+    expect(state.threads['a'].tokenUsage).not.toBeNull();
+    expect(state.threads['b'].tokenUsage).toBeNull();
+  });
+});
+
 describe('错误与输出增量', () => {
   it('错误被记录而不是吞掉', () => {
     const state = reduce(initialState(), { type: 'error', message: '连接中断' });
@@ -282,11 +485,15 @@ describe('ThreadState 构造完整性', () => {
       [
         'changeSets',
         'cwd',
+        'guardianWarnings',
         'id',
         'info',
         'items',
+        'model',
+        'name',
         'pendingApprovals',
         'streamBuffer',
+        'tokenUsage',
         'turnDiffFiles',
         'turnDiffs',
         'turnOrder',

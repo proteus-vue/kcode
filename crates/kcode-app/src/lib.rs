@@ -18,5 +18,6 @@ pub use service::{
     should_mark_unknown, summarize_threads, AgentService, AppEvent, DirEntry, ExecStarted,
     ModelOption, PermissionMode,
     PermissionProfile, ServiceConfig, SettingsSnapshot,
-    PluginInfo, SkillInfo, TextChannel, ThreadInfo, ThreadSnapshot, ThreadSummary, TurnSnapshot,
+    PluginInfo, SkillInfo, TextChannel, ThreadInfo, ThreadSnapshot, ThreadSummary,
+    ThreadTokenUsage, TokenUsageBreakdown, TurnSnapshot,
 };

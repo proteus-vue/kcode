@@ -29,7 +29,7 @@
 import { useState } from 'react';
 import { Icon } from './Icon';
 import { STATUS_LABEL, stepIcon, stepLabel } from './ProcessPanel';
-import { isDeclined, turnDisplayStatus } from '../stores/store';
+import { isDeclined, contextUsage, guardianSummary, turnDisplayStatus } from '../stores/store';
 import { changedCount, dockSections } from './dockVisibility';
 import type { RootState } from '../stores/store';
 import type { GitStatus, PermissionMode } from '../types/domain';
@@ -259,21 +259,27 @@ export function StatusDock({
 
   // 分段条件在 dockVisibility 里（带测试）。放在这里内联的话，
   // 「干净仓库不该显示 Git 段」这类规则只能靠特定数据组合手点验证。
+  const usage = contextUsage(thread?.tokenUsage ?? null);
   const sections = dockSections({
     hasThread: Boolean(thread),
     git,
     stepCount: steps.length,
+    contextRatio: usage?.ratio ?? null,
   });
-  const { git: showGit, steps: showSteps, env: showEnv } = sections;
+  const { git: showGit, steps: showSteps, context: showContext, env: showEnv } = sections;
   const changed = changedCount(git);
+  const guardian = guardianSummary(thread?.guardianWarnings ?? []);
 
-  // 没有任何可展示内容 → 不渲染空卡片
-  if (!sections.any) return null;
+  // 没有任何可展示内容 → 不渲染空卡片。
+  // 例外：护栏警告本身就构成「可展示内容」——它可能在任何段都为空时到达。
+  if (!sections.any && !guardian) return null;
 
   const lastStep = steps[steps.length - 1];
   const summary = lastStep ? stepLabel(lastStep.body as never) : '';
   const running = display === 'running' || display === 'awaiting_approval';
-  const expanded = userOpen ?? running;
+  // 护栏警告存在时强制展开：安全信号不能被收进胶囊里——
+  // 用户收起了浮层却发生异常，那正是他最需要看到提示的时候。
+  const expanded = guardian ? true : (userOpen ?? running);
 
   if (!expanded) {
     return (
@@ -292,6 +298,11 @@ export function StatusDock({
           {showSteps && (
             <span className="capsule-count">
               {done}/{steps.length}
+            </span>
+          )}
+          {showContext && usage && (
+            <span className={`capsule-count is-${usage.level}`}>
+              {Math.round(usage.ratio * 100)}%
             </span>
           )}
           <span className="capsule-summary">{summary || projectName}</span>
@@ -315,6 +326,22 @@ export function StatusDock({
         >
           <Icon name="collapse" size={12} />
         </button>
+
+        {/* 护栏警告：**置顶**渲染，不折叠进任何段。
+            它是安全信号（上游刹车已介入），被随手的展开/收起藏起来
+            就失去了意义；出现时必须在扫视的第一落点。 */}
+        {guardian && (
+          <div className="guardian-banner" role="alert">
+            <Icon name="shield" size={13} />
+            <div className="guardian-body">
+              <span className="guardian-title">执行异常提醒</span>
+              <span className="guardian-text">{guardian}</span>
+              <span className="guardian-hint">
+                这是上游 Agent 的循环检测提示，不是你的操作错误。可考虑停止当前轮次或换一种说法。
+              </span>
+            </div>
+          </div>
+        )}
 
         {showGit && git && (
           <GitSection
@@ -369,6 +396,36 @@ export function StatusDock({
                 <p className="panel-note">其中 {declinedCount} 项被你拒绝，未执行。</p>
               )}
             </div>
+          </div>
+        )}
+
+        {/* 上下文余量：只在接近上限时出现（阈值在 dockVisibility 里）。
+            用一根细条表达比例——数字（如「78%」）需要心算才能判断
+            严重程度，而长度是直接可读的。 */}
+        {showContext && usage && (
+          <div className="status-block">
+            <div className="status-card-head">
+              <Icon name="layers" size={13} />
+              <span className="status-card-title">上下文</span>
+              <span className={`context-pct is-${usage.level}`}>
+                {Math.round(usage.ratio * 100)}%
+              </span>
+            </div>
+            <div className="context-bar" title={`${usage.used} / ${usage.window} tokens`}>
+              <span
+                className={`context-fill is-${usage.level}`}
+                style={{ width: `${Math.min(100, Math.round(usage.ratio * 100))}%` }}
+              />
+            </div>
+            <p className="context-note">
+              {usage.level === 'critical'
+                ? '接近模型上限，建议开新会话或压缩上下文。'
+                : '已用较多，再聊下去上游会自动压缩上下文。'}
+              <span className="context-detail">
+                {' '}
+                剩约 {usage.remaining.toLocaleString()} / {usage.window.toLocaleString()}
+              </span>
+            </p>
           </div>
         )}
 

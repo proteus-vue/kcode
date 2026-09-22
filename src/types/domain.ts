@@ -219,6 +219,8 @@ export interface Approval {
 
 export type AppEvent =
   | { type: 'threadStarted'; threadId: string; cwd: string }
+  /** 线程元数据（服务端 thread/list 的 name/model，或 start 的 model）。 */
+  | { type: 'threadMeta'; threadId: string; name?: string | null; model?: string | null }
   | { type: 'turnStarted'; threadId: string; turnId: string }
   | { type: 'itemUpserted'; threadId: string; turnId: string; item: Item; completed: boolean }
   | { type: 'approvalRequired'; approval: Approval }
@@ -247,7 +249,38 @@ export type AppEvent =
   | { type: 'processExited'; code: number | null }
   /** 终端输出增量。text 已在后端解码（协议用 base64 传）。 */
   | { type: 'terminalDelta'; processId: string; text: string; capReached: boolean }
-  | { type: 'terminalExited'; processId: string; exitCode: number | null };
+  | { type: 'terminalExited'; processId: string; exitCode: number | null }
+  /** 护栏警告（协议 guardianWarning）——上游检测到异常执行模式。 */
+  | { type: 'guardianWarning'; threadId: string; message: string }
+  /** 线程 token 用量更新（协议 thread/tokenUsage/updated）。 */
+  | { type: 'tokenUsageUpdated'; threadId: string; turnId: string; usage: ThreadTokenUsage };
+
+/** 单次计量的 token 明细（协议 TokenUsageBreakdown）。 */
+export interface TokenUsageBreakdown {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+}
+
+/**
+ * 线程级 token 用量（协议 ThreadTokenUsage）。
+ *
+ * `last` 是最近一轮的用量，**上下文占用按它估算**：`total` 是跨轮累加值，
+ * 拿它跟上下文窗口比会得出「已用 300%」这种错误结论。
+ */
+export interface ThreadTokenUsage {
+  last: TokenUsageBreakdown;
+  total: TokenUsageBreakdown;
+  /** 模型上下文窗口大小。null 表示协议未提供，此时无法计算余量。 */
+  modelContextWindow: number | null;
+}
+
+/** 一次护栏警告。 */
+export interface GuardianWarning {
+  message: string;
+}
 
 /** 从事件日志重建的线程概要（启动时填充侧栏）。 */
 export interface ThreadSummary {
@@ -259,6 +292,12 @@ export interface ThreadSummary {
   turnCount: number;
   /** 存在无完成记录的轮次（崩溃残留）——UI 应提示结果未知。 */
   hasUnfinishedTurn: boolean;
+  /** 服务端给出的首条消息摘要（thread/list 的 preview）。 */
+  preview?: string | null;
+  /** 用户或系统给线程起的名字（thread/name/set 之后由服务端返回）。 */
+  name?: string | null;
+  /** 该线程使用的模型。 */
+  model?: string | null;
 }
 
 export interface TurnSnapshot {

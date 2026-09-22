@@ -13,6 +13,7 @@
 import { useState } from 'react';
 import type { Item } from '../types/domain';
 import { changeKindLabel, fileStats, isDeclined } from '../stores/store';
+import { foldOutput } from './outputFold';
 import { Icon } from './Icon';
 
 export function ToolRow({
@@ -64,7 +65,9 @@ export function ToolRow({
                 该命令未被执行——你拒绝了它。轮次的其他部分仍会继续。
               </p>
             )}
-            {b.aggregatedOutput && <pre className="tool-output">{b.aggregatedOutput}</pre>}
+            {b.aggregatedOutput && (
+              <pre className="tool-output">{foldOutput(b.aggregatedOutput).text}</pre>
+            )}
           </div>
         )}
       </div>

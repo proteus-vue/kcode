@@ -58,6 +58,14 @@ pub mod event_kind {
     pub const APPROVAL_RESOLVED: &str = "approval_resolved";
     pub const SERVER_REQUEST_RESOLVED: &str = "server_request_resolved";
     pub const PROCESS_EXITED: &str = "process_exited";
+    /// 护栏警告（上游循环/异常检测）。**必须落库**——事故复盘时
+    /// 「上游当时有没有示警」是第一个要回答的问题。
+    pub const GUARDIAN_WARNING: &str = "guardian_warning";
+    /// 线程 token 用量快照。
+    pub const TOKEN_USAGE: &str = "token_usage";
+    /// 上下文压缩（协议已标记 deprecated，由 `contextCompaction` item 取代；
+    /// 这里保留落库路径，使审计日志不丢事件）。
+    pub const CONTEXT_COMPACTED: &str = "context_compacted";
     /// 用户对某个变更文件的接受/拒绝决策（需持久化）。
     pub const CHANGE_FILE_DECISION: &str = "change_file_decision";
 }

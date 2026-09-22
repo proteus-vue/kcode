@@ -9,12 +9,12 @@
 
 | 类别 | 数量 | 失败 | 状态 |
 |---|---|---|---|
-| Rust（`cargo test -p <crate>`，四个 crate） | 225 | 0 | ✅ 全部通过 |
-| 前端（`vitest run`） | 170 | 0 | ✅ 全部通过 |
+| Rust（`cargo test -p <crate>`，四个 crate） | 233 | 0 | ✅ 全部通过 |
+| 前端（`vitest run`） | 243 | 0 | ✅ 全部通过 |
 | 协议契约（真实 codex 二进制端到端） | 56 | 0 | ✅ 全部通过 |
 
-Rust 按 crate 分布：kcode-bridge 53 / kcode-domain 113 / kcode-app 38 / kcode-desktop 21。
-前端覆盖 14 个测试文件；Rust 另有 1 项被显式忽略（`#[ignore]` 或文档测试，不计入通过数）。
+Rust 按 crate 分布：kcode-bridge 53 / kcode-domain 113 / kcode-app 46 / kcode-desktop 21。
+前端覆盖 21 个测试文件；Rust 另有 1 项被显式忽略（`#[ignore]` 或文档测试，不计入通过数）。
 
 ## Rust 明细
 
@@ -26,10 +26,10 @@ Rust 按 crate 分布：kcode-bridge 53 / kcode-domain 113 / kcode-app 38 / kcod
 | `kcode-bridge` | 文档测试 | 1 | 0 | 1 |
 | `kcode-domain` | src/lib.rs（单元测试） | 109 | 0 | 0 |
 | `kcode-domain` | tests/integration.rs | 4 | 0 | 0 |
-| `kcode-app` | src/lib.rs（单元测试） | 5 | 0 | 0 |
+| `kcode-app` | src/lib.rs（单元测试） | 8 | 0 | 0 |
 | `kcode-app` | tests/acceptance.rs | 12 | 0 | 0 |
-| `kcode-app` | tests/e2e.rs | 12 | 0 | 0 |
-| `kcode-app` | tests/wire_contract.rs | 9 | 0 | 0 |
+| `kcode-app` | tests/e2e.rs | 16 | 0 | 0 |
+| `kcode-app` | tests/wire_contract.rs | 10 | 0 | 0 |
 | `kcode-desktop` | src/lib.rs（单元测试） | 21 | 0 | 0 |
 
 ## 协议契约明细

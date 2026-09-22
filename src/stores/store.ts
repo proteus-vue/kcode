@@ -16,16 +16,19 @@ import type {
   AppEvent,
   Approval,
   ApprovalDecision,
+  ApprovalScope,
   ChangeSet,
   DiffLine,
   DiffStats,
   FileChangeEntry,
   FileDecision,
   FileDiffSlice,
+  GuardianWarning,
   Item,
   ParsedDiff,
   ReviewState,
   ThreadInfo,
+  ThreadTokenUsage,
   TurnStatus,
 } from '../types/domain';
 
@@ -39,6 +42,10 @@ export interface ThreadState {
   id: string;
   cwd: string;
   info: ThreadInfo | null;
+  /** 服务端名字（thread/name/set 之后由 thread/list 返回）。 */
+  name: string | null;
+  /** 该线程的模型（start_thread 的返回，或 thread/list 的 model）。 */
+  model: string | null;
   turnOrder: string[];
   turns: Record<string, TurnState>;
   items: Record<string, Item>;
@@ -58,6 +65,16 @@ export interface ThreadState {
    * Item 文本之上即可。
    */
   streamBuffer: Record<string, string>;
+  /**
+   * 护栏警告（上游检测到异常执行模式）。
+   *
+   * 单独成列而非并进 `errors`：`errors` 是「哪里出错了」的杂项列表，
+   * 而这是**安全信号**——它意味着上游刹车已介入。混在一起会被
+   * 「模型列表加载失败」这类噪音淹没。
+   */
+  guardianWarnings: GuardianWarning[];
+  /** 最近一次 token 用量上报。null 表示尚未收到。 */
+  tokenUsage: ThreadTokenUsage | null;
 }
 
 export interface RootState {
@@ -106,6 +123,8 @@ export function newThreadState(threadId: string, cwd = ''): ThreadState {
     id: threadId,
     cwd,
     info: null,
+    name: null,
+    model: null,
     turnOrder: [],
     turns: {},
     items: {},
@@ -114,6 +133,8 @@ export function newThreadState(threadId: string, cwd = ''): ThreadState {
     turnDiffs: {},
     turnDiffFiles: {},
     streamBuffer: {},
+    guardianWarnings: [],
+    tokenUsage: null,
   };
 }
 
@@ -141,6 +162,39 @@ export function reduce(state: RootState, event: AppEvent): RootState {
         ? state.threadOrder
         : [...state.threadOrder, event.threadId];
       if (!next.activeThreadId) next.activeThreadId = event.threadId;
+      break;
+    }
+
+    case 'threadMeta': {
+      next.threads = { ...state.threads };
+      const base = getOrCreateThread(state, event.threadId);
+      next.threads[event.threadId] = {
+        ...base,
+        name: event.name ?? base.name,
+        model: event.model ?? base.model,
+      };
+      break;
+    }
+
+    case 'guardianWarning': {
+      next.threads = { ...state.threads };
+      const base = getOrCreateThread(state, event.threadId);
+      next.threads[event.threadId] = {
+        ...base,
+        // 保留全部历史：同一轮可能多次示警，而「示警了几次」本身
+        // 就是判断严重程度的依据。
+        //
+        // 刻意不记时间戳：归约必须是纯函数（重放要得到同一结果），
+        // `Date.now()` 会破坏这一点。需要时间时由后端随事件带上。
+        guardianWarnings: [...base.guardianWarnings, { message: event.message }],
+      };
+      break;
+    }
+
+    case 'tokenUsageUpdated': {
+      next.threads = { ...state.threads };
+      const base = getOrCreateThread(state, event.threadId);
+      next.threads[event.threadId] = { ...base, tokenUsage: event.usage };
       break;
     }
 
@@ -525,6 +579,82 @@ export function isBlockingRisk(tier: string): boolean {
   return tier === 'high' || tier === 'critical';
 }
 
+/**
+ * 作用域 → 协议决策（AP-07）。
+ *
+ * 协议只提供两个「允许」决策：`accept`（本次）与 `acceptForSession`
+ * （本会话内同类请求不再询问）。`turn`/`project` 是领域层的预留粒度——
+ * 协议没有对应的独立字段，因此 UI 不提供这两个选项。
+ *
+ * **未支持的作用域一律回落到最窄授权（`accept`）**：权限判断出现
+ * 不确定时，正确的默认是收紧而不是放大——宁可多问一次，也不能因为
+ * 一个没被支持的枚举值就把整个会话放行。
+ */
+export function decisionForScope(scope: ApprovalScope): ApprovalDecision {
+  return scope === 'session' ? 'acceptForSession' : 'accept';
+}
+
+/** 上下文占用档位。 */
+export type ContextLevel = 'ok' | 'near' | 'critical';
+
+export interface ContextUsage {
+  /** 最近一轮的上下文占用量（估算值）。 */
+  used: number;
+  /** 模型上下文窗口。 */
+  window: number;
+  /** 占用比例 0–1。 */
+  ratio: number;
+  level: ContextLevel;
+  /** 还剩多少 token。 */
+  remaining: number;
+}
+
+/**
+ * 由 token 用量推算上下文余量（CH-08 / 文档 05 第 9 条）。
+ *
+ * # 三个必须做对的地方
+ *
+ * 1. **用 `last` 而不是 `total`。** `total` 是线程跨轮累加值——拿它除以
+ *    上下文窗口会得出「已用 300%」这种荒谬结论，因为每轮的输入都会被
+ *    **重新**计入。只有最近一轮的用量才近似当前上下文占用。
+ * 2. **窗口未知时返回 null，不猜。** 没有窗口就算不出比例；用一个
+ *    默认值（比如 128k）充数，会让用户在完全不同的量级上做判断。
+ * 3. **档位阈值与上游压缩线对齐。** 上游在 70% 附近开始压缩上下文，
+ *    所以 `near` 取 0.7——那正是用户该知道「我的对话快要被压缩了」的点。
+ */
+export function contextUsage(usage: ThreadTokenUsage | null): ContextUsage | null {
+  if (!usage) return null;
+  const window = usage.modelContextWindow;
+  // 0 与负数都是无效窗口：算出的比例会是 Infinity，显示成「已用 ∞%」
+  if (window == null || window <= 0) return null;
+
+  const used = usage.last.totalTokens;
+  const ratio = used / window;
+  const level: ContextLevel = ratio >= 0.9 ? 'critical' : ratio >= 0.7 ? 'near' : 'ok';
+
+  return {
+    used,
+    window,
+    ratio,
+    level,
+    remaining: Math.max(0, window - used),
+  };
+}
+
+/**
+ * 护栏警告的展示摘要。
+ *
+ * 去重是必要的：上游在持续异常时可能连续推送同一条警告，而侧栏/横幅
+ * 上重复十遍同样的句子只会让人忽略它。保留**最后一次**——那是最新的状态。
+ */
+export function guardianSummary(warnings: GuardianWarning[]): string | null {
+  if (warnings.length === 0) return null;
+  const last = warnings[warnings.length - 1].message.trim();
+  if (!last) return null;
+  const extra = warnings.length > 1 ? `（共 ${warnings.length} 次）` : '';
+  return `${last}${extra}`;
+}
+
 /** 风险信号的可读描述。 */
 export function describeSignal(signal: unknown): string {
   if (typeof signal !== 'object' || signal === null) return '';
@@ -849,6 +979,10 @@ export function lineNumberLabel(line: DiffLine): string {
 
 /** 线程标题：取首条用户消息，退回线程 id 前缀。 */
 export function threadTitle(state: RootState, threadId: string): string {
+  // 服务端名字优先：用户显式命名过就不该被首条消息覆盖。
+  const named = state.threads[threadId]?.name?.trim();
+  if (named) return named;
+
   const items = threadItems(state, threadId);
   const firstUser = items.find((i) => i.body.kind === 'userMessage');
   if (firstUser && firstUser.body.kind === 'userMessage') {
@@ -856,6 +990,36 @@ export function threadTitle(state: RootState, threadId: string): string {
     if (t) return t.length > 42 ? `${t.slice(0, 42)}…` : t;
   }
   return threadId.slice(0, 8);
+}
+
+/**
+ * 线程的变更文件数（跨轮次去重）。
+ *
+ * 同一文件多轮改动只计一次——侧栏徽章要回答的是
+ * 「这条线程动过多少个文件」，不是「改了多少次」。
+ */
+export function changedFileCount(state: RootState, threadId: string): number {
+  const th = state.threads[threadId];
+  if (!th) return 0;
+  const paths = new Set<string>();
+  for (const cs of Object.values(th.changeSets)) {
+    for (const f of cs.files) paths.add(f.path);
+  }
+  return paths.size;
+}
+
+/**
+ * 模型徽标的短名：去掉 provider 前缀，只留对用户有意义的标识。
+ *
+ * 侧栏宽度有限，`anthropic/claude-sonnet-4` 这类全名会挤掉标题；
+ * 而斜杠后的部分已经能区分「用的是哪个模型」。
+ */
+export function shortModelName(model: string | null | undefined): string | null {
+  if (!model) return null;
+  const tail = model.split('/').pop() ?? model;
+  const trimmed = tail.trim();
+  if (!trimmed) return null;
+  return trimmed.length > 20 ? `${trimmed.slice(0, 20)}…` : trimmed;
 }
 
 /** 线程最近活动时间（毫秒）。无 Item 时返回 null。 */

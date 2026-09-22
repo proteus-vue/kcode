@@ -13,10 +13,17 @@
  *    用户无法预知自己的选择会不会终止整个任务。
  * 2. **风险分级必须展示来源。** 协议不提供风险字段，等级是客户端推断的；
  *    若只显示「高风险」而不给理由，用户无法判断该不该信这个判断。
+ *
+ * # AP-07 作用域
+ *
+ * 协议决策只有 accept / acceptForSession / decline / cancel。
+ * 「仅本次 / 本会话」是作用域选择器：once→accept，session→acceptForSession。
+ * turn/project 是领域层预留粒度，协议未暴露独立字段，UI 不提供假选项。
  */
 
-import type { Approval, ApprovalDecision } from '../types/domain';
-import { decisionLabel, describeSignal, isBlockingRisk } from '../stores/store';
+import { useState } from 'react';
+import type { Approval, ApprovalDecision, ApprovalScope } from '../types/domain';
+import { decisionForScope, decisionLabel, describeSignal, isBlockingRisk } from '../stores/store';
 
 interface Props {
   approval: Approval;
@@ -54,6 +61,7 @@ export function redact(text: string): string {
 
 export function ApprovalModal({ approval, onDecide }: Props) {
   const blocking = isBlockingRisk(approval.risk.tier);
+  const [scope, setScope] = useState<ApprovalScope>('once');
 
   return (
     <div className="approval-backdrop" role="dialog" aria-modal="true" aria-label="需要审批">
@@ -77,12 +85,12 @@ export function ApprovalModal({ approval, onDecide }: Props) {
             <h3>为什么</h3>
             <p className="approval-reason">{redact(approval.reason)}</p>
             <p className="approval-note">
-              原因由 Agent 自述，**不作为风险判断的依据**。
+              原因由 Agent 自述，<strong>不作为风险判断的依据</strong>。
             </p>
           </section>
         )}
 
-        {/* 在哪里 */}
+        {/* 在哪里：工作目录 + thread/turn/item 调用链（AP-08 可追溯） */}
         <section className="approval-section">
           <h3>在哪里</h3>
           <dl className="approval-paths">
@@ -96,6 +104,12 @@ export function ApprovalModal({ approval, onDecide }: Props) {
             <dd className="mono-small">
               {approval.threadId} / {approval.turnId} / {approval.itemId}
             </dd>
+            {approval.method && (
+              <>
+                <dt>协议方法</dt>
+                <dd className="mono-small">{approval.method}</dd>
+              </>
+            )}
           </dl>
         </section>
 
@@ -117,21 +131,34 @@ export function ApprovalModal({ approval, onDecide }: Props) {
           </p>
         </section>
 
-        {/* 如何决策 */}
+        {/* 如何决策：作用域 + 允许 / 拒绝 / 拒绝并停止 */}
         <footer className="approval-actions">
-          <button
-            className="btn btn-primary"
-            onClick={() => onDecide(approval.requestId, 'accept')}
-          >
-            {decisionLabel('accept')}
-          </button>
+          <div className="approval-scope" role="radiogroup" aria-label="允许范围">
+            <button
+              role="radio"
+              aria-checked={scope === 'once'}
+              className={`scope-btn ${scope === 'once' ? 'is-active' : ''}`}
+              onClick={() => setScope('once')}
+              title="只放行这一次（协议 accept）"
+            >
+              仅本次
+            </button>
+            <button
+              role="radio"
+              aria-checked={scope === 'session'}
+              className={`scope-btn ${scope === 'session' ? 'is-active' : ''}`}
+              onClick={() => setScope('session')}
+              title="本会话内同类请求不再询问（协议 acceptForSession）"
+            >
+              本会话
+            </button>
+          </div>
 
           <button
-            className="btn"
-            onClick={() => onDecide(approval.requestId, 'acceptForSession', 'session')}
-            title="本会话内同类请求不再询问"
+            className="btn btn-primary"
+            onClick={() => onDecide(approval.requestId, decisionForScope(scope), scope)}
           >
-            {decisionLabel('acceptForSession')}
+            {decisionLabel(decisionForScope(scope))}
           </button>
 
           {/* decline 与 cancel 必须分开：后者会中断整个 Turn */}

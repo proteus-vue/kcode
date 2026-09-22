@@ -275,10 +275,17 @@ export function useKcode(): KcodeApi {
       // 若事件订阅尚未建立（启动竞态），用户仍能立刻看到新线程。
       // 覆盖式写入是安全的——reduce 对同一线程是幂等的。
       setState((prev) => {
-        const next = reduce(prev, {
+        const started = reduce(prev, {
           type: 'threadStarted',
           threadId: info.threadId,
           cwd: info.cwd,
+        });
+        // start_thread 的返回里带 model——存下来供侧栏徽标显示，
+        // 否则要等下一次 thread/list 才知道用的是什么模型。
+        const next = reduce(started, {
+          type: 'threadMeta',
+          threadId: info.threadId,
+          model: info.model ?? null,
         });
         return { ...next, activeThreadId: info.threadId };
       });
@@ -304,6 +311,12 @@ export function useKcode(): KcodeApi {
         let next = prev;
         for (const t of list) {
           next = reduce(next, { type: 'threadStarted', threadId: t.threadId, cwd: t.cwd });
+          next = reduce(next, {
+            type: 'threadMeta',
+            threadId: t.threadId,
+            name: t.name ?? null,
+            model: t.model ?? null,
+          });
         }
         return next;
       });
@@ -391,6 +404,12 @@ export function useKcode(): KcodeApi {
         let next = prev;
         for (const t of list) {
           next = reduce(next, { type: 'threadStarted', threadId: t.threadId, cwd: t.cwd });
+          next = reduce(next, {
+            type: 'threadMeta',
+            threadId: t.threadId,
+            name: t.name ?? null,
+            model: t.model ?? null,
+          });
         }
         // 崩溃残留的轮次需要提示用户「结果未知」
         const warnings = list

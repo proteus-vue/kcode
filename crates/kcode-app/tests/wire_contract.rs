@@ -240,6 +240,25 @@ fn app_events_wire_format_is_camel_case() {
             delta: "out".into(),
         },
         AppEvent::Error { message: "boom".into() },
+        AppEvent::GuardianWarning {
+            thread_id: "th".into(),
+            message: "检测到重复调用".into(),
+        },
+        AppEvent::TokenUsageUpdated {
+            thread_id: "th".into(),
+            turn_id: "tu".into(),
+            usage: kcode_app::ThreadTokenUsage {
+                last: kcode_app::TokenUsageBreakdown {
+                    input_tokens: 100,
+                    cached_input_tokens: 0,
+                    output_tokens: 20,
+                    reasoning_output_tokens: 0,
+                    total_tokens: 120,
+                },
+                total: kcode_app::TokenUsageBreakdown::default(),
+                model_context_window: Some(200_000),
+            },
+        },
         AppEvent::ProcessExited { code: Some(1) },
     ];
 
@@ -254,6 +273,54 @@ fn app_events_wire_format_is_camel_case() {
             "事件 tag 应以小写字母开头，实际 `{tag}`"
         );
     }
+}
+
+/// token 用量字段必须逐项可读——前端靠它算「上下文余量」。
+///
+/// 字段名错一处不会报错，只会让余量恒为 null（用户永远看不到接近上限），
+/// 因此这里逐字段断言，而不是只查有没有 snake_case。
+#[test]
+fn token_usage_wire_format_is_readable_by_frontend() {
+    let usage = kcode_app::ThreadTokenUsage {
+        last: kcode_app::TokenUsageBreakdown {
+            input_tokens: 1500,
+            cached_input_tokens: 900,
+            output_tokens: 250,
+            reasoning_output_tokens: 40,
+            total_tokens: 1750,
+        },
+        total: kcode_app::TokenUsageBreakdown {
+            input_tokens: 3000,
+            cached_input_tokens: 1000,
+            output_tokens: 500,
+            reasoning_output_tokens: 80,
+            total_tokens: 3500,
+        },
+        model_context_window: Some(200_000),
+    };
+    let v = serde_json::to_value(&usage).unwrap();
+    assert_no_snake_case_keys(&v, "ThreadTokenUsage");
+
+    assert_eq!(v["last"]["inputTokens"], 1500);
+    assert_eq!(v["last"]["cachedInputTokens"], 900);
+    assert_eq!(v["last"]["outputTokens"], 250);
+    assert_eq!(v["last"]["reasoningOutputTokens"], 40);
+    assert_eq!(v["last"]["totalTokens"], 1750);
+    assert_eq!(v["total"]["totalTokens"], 3500);
+    assert_eq!(v["modelContextWindow"], 200_000);
+
+    // 窗口缺失时必须序列化为 null 而不是漏字段——
+    // 漏字段在 TS 侧是 undefined，`?? null` 之外的地方会踩空。
+    let no_window = kcode_app::ThreadTokenUsage {
+        model_context_window: None,
+        ..usage
+    };
+    let v2 = serde_json::to_value(&no_window).unwrap();
+    assert!(
+        v2.as_object().unwrap().contains_key("modelContextWindow"),
+        "modelContextWindow 缺失时应显式为 null：{v2}"
+    );
+    assert!(v2["modelContextWindow"].is_null());
 }
 
 /// ChangeSet 与 ParsedDiff 的线格式。
