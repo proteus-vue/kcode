@@ -31,7 +31,7 @@ import {
 import { useKcode, extractErrorMessage } from './stores/useKcode';
 import { usePanelLayout } from './hooks/usePanelLayout';
 import { matchPanelShortcut } from './hooks/panelShortcut';
-import { onTitlebarDoubleClick } from './hooks/titlebarZoom';
+import { onColumnBandDoubleClick, onTitlebarDoubleClick } from './hooks/titlebarZoom';
 import { reviewDataFor, threadTitle } from './stores/store';
 import { Icon } from './components/Icon';
 
@@ -396,7 +396,10 @@ export default function App() {
         title="拖动调整宽度"
       />
 
-      <main className="main">
+      {/* 容器上的 dblclick 只处理「顶部让位带的空白」（target 为容器自身
+          且 y < --titlebar）——head 本体的双击冒泡上来时 target 是 head 内
+          元素，被 self-target 守卫放行，不会二次 toggle。见 titlebarZoom.ts。 */}
+      <main className="main" onDoubleClick={onColumnBandDoubleClick}>
         <header className="main-head" onDoubleClick={onTitlebarDoubleClick}>
           <div className="head-left">
             {thread ? (
@@ -510,7 +513,7 @@ export default function App() {
         title="拖动调整宽度"
       />
 
-      <aside className="inspector">
+      <aside className="inspector" onDoubleClick={onColumnBandDoubleClick}>
         <Workbench
           open={openAvailable}
           active={effectiveScene}

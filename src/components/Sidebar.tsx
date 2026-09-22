@@ -35,7 +35,7 @@ import {
   threadTitle,
 } from '../stores/store';
 import { Icon } from './Icon';
-import { onTitlebarDoubleClick } from '../hooks/titlebarZoom';
+import { onColumnBandDoubleClick, onTitlebarDoubleClick } from '../hooks/titlebarZoom';
 
 export function Sidebar({
   state,
@@ -71,7 +71,7 @@ export function Sidebar({
   };
 
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" onDoubleClick={onColumnBandDoubleClick}>
       {/* 导航条双击缩放窗口（与系统标题栏双击对齐）。品牌头刻意用 div
           而非 button：它没有任何 click 行为，无行为的 button 会误导
           辅助技术；div 同时让它被判定为「非交互目标」，双击即缩放。 */}

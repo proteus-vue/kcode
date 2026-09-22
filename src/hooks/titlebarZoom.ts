@@ -36,6 +36,16 @@ export interface TitlebarDoubleClickLike {
 }
 
 /**
+ * 栏容器（`.sidebar` / `.main` / `.inspector`）双击所需的事件形状：
+ * 除 target 外还要 currentTarget（判定「点在容器自身的空白上」）与
+ * clientY（判定落在顶部标题栏让位带内）。React.MouseEvent 结构上满足。
+ */
+export interface ColumnBandDoubleClickLike extends TitlebarDoubleClickLike {
+  currentTarget: EventTarget | null;
+  clientY: number;
+}
+
+/**
  * 双击目标是否落在可交互控件上。
  *
  * 是 → 归控件自己处理，不缩放；否（导航条空白、标题文字）→ 应当缩放。
@@ -54,8 +64,10 @@ export function isInteractiveTarget(target: EventTarget | null): boolean {
 /**
  * 导航条 dblclick：非交互目标上双击 → 切换窗口最大化。
  *
- * `preventDefault` 阻掉双击选词——缩放窗口的同时把标题文字选中一片，
- * 看起来像出了错。
+ * 注意 `preventDefault` **拦不住双击选词**：选词是 mousedown 的默认行为，
+ * 在 dblclick 派发之前就已经完成——这里的 preventDefault 只是顺手取消
+ * dblclick 自身的默认动作。真正阻止选词靠导航条上的 `user-select: none`
+ * （见 styles.css；真机实测双击标题文字会选中一片词，就是漏了它）。
  */
 export function onTitlebarDoubleClick(e: TitlebarDoubleClickLike): void {
   if (isInteractiveTarget(e.target)) return;
@@ -65,6 +77,40 @@ export function onTitlebarDoubleClick(e: TitlebarDoubleClickLike): void {
     // verify-tauri-capabilities.sh 要防的那类缺陷，控制台要留痕。
     console.error('切换窗口最大化失败', err);
   });
+}
+
+/** 读 `--titlebar`（读不到回退 40）——与 styles.css 的让位带同源。 */
+function titlebarBandHeight(): number {
+  if (typeof document === 'undefined') return 40;
+  const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--titlebar'));
+  return Number.isFinite(v) && v > 0 ? v : 40;
+}
+
+/**
+ * 栏容器顶部空白带（y < --titlebar 的标题栏让位区）dblclick → 缩放。
+ *
+ * # 为什么还需要这个
+ *
+ * 三个导航条本体（head，y≥40）已各自挂了 handler，但**head 上方那条
+ * 0..40px 的让位带**没有：真机判别矩阵实测，双击中栏该带 x>470 处
+ * 毫无反应（N1），而 x<470 处能缩放——因为 `.window-drag-strip` 宽 470px，
+ * 左栏只占 340px，它往中栏底下伸了 130px，那截是**系统原生**双击缩放。
+ * 用户看到的「只有偏左才能缩放」就是这条断层：左边原生、右边没人管。
+ *
+ * # 为什么不会与 head 的 handler 双触发
+ *
+ * 事件冒泡到容器时，`e.target` 是 head 内的元素而非容器自身——
+ * `target !== currentTarget` 直接放行给 head 的 handler，容器 handler 跳过。
+ * 反之点在空白带上时 target 就是容器自身，只有容器 handler 会处理。
+ * 无需 stopPropagation，也不可能一次双击触发两次 toggle。
+ *
+ * `clientY < --titlebar` 进一步把范围限死在顶部让位带：容器下方的
+ * 空白（内容没填满时）双击不该缩放，那已经是正文区域了。
+ */
+export function onColumnBandDoubleClick(e: ColumnBandDoubleClickLike): void {
+  if (e.target !== e.currentTarget) return;
+  if (e.clientY >= titlebarBandHeight()) return;
+  onTitlebarDoubleClick(e);
 }
 
 /** 与 Tauri 窗口 API 的接缝，抽出来便于测试注入。 */

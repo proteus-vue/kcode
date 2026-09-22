@@ -6,8 +6,8 @@
  * 若判定只看 target 不看祖先，双击按钮里的图标（target 是内层 span）
  * 就会把缩放叠到按钮的两次点击上。
  */
-import { describe, expect, it } from 'vitest';
-import { isInteractiveTarget } from './titlebarZoom';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { isInteractiveTarget, onColumnBandDoubleClick, onTitlebarDoubleClick } from './titlebarZoom';
 
 /** 造一个带层级的真实 DOM 片段：容器 > 目标元素。 */
 function dom(html: string): HTMLElement {
@@ -53,5 +53,67 @@ describe('isInteractiveTarget', () => {
   it('null / 非 Element（文本节点）→ 非交互', () => {
     expect(isInteractiveTarget(null)).toBe(false);
     expect(isInteractiveTarget(document.createTextNode('t'))).toBe(false);
+  });
+});
+
+describe('双击 handler 的触发边界', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  // jsdom 里没有 Tauri internals：handler 真的走到缩放调用时会被 catch
+  // 接住并打 console.error('切换窗口最大化失败')。反过来，没打 = 没触发。
+  // 用它区分「触发了但环境缺 Tauri」与「根本没触发」。
+  const spy = () => vi.spyOn(console, 'error').mockImplementation(() => {});
+
+  const bandEvent = (over: Partial<ColumnBandEvent> = {}) => {
+    const el = document.createElement('div');
+    return {
+      target: el,
+      currentTarget: el,
+      clientY: 16,
+      preventDefault: vi.fn(),
+      ...over,
+    } as unknown as ColumnBandEvent;
+  };
+  type ColumnBandEvent = Parameters<typeof onColumnBandDoubleClick>[0];
+
+  it('容器自身 + 顶部带内 → 触发缩放', async () => {
+    const s = spy();
+    const e = bandEvent();
+    onColumnBandDoubleClick(e);
+    expect(e.preventDefault).toHaveBeenCalled();
+    // 走到了异步调用链才会产生的报错（jsdom 无 Tauri）。
+    // 动态 import 落定不止一个微任务，用 waitFor 等它。
+    await vi.waitFor(
+      () => {
+        expect(s).toHaveBeenCalledWith('切换窗口最大化失败', expect.anything());
+      },
+      { timeout: 1000 },
+    );
+  });
+
+  it('target 是子元素（head 冒泡上来）→ 不触发，交给 head 的 handler', () => {
+    const s = spy();
+    const parent = document.createElement('div');
+    const child = document.createElement('span');
+    onColumnBandDoubleClick(bandEvent({ target: child, currentTarget: parent }));
+    expect(s).not.toHaveBeenCalled();
+  });
+
+  it('在顶部带下方（正文空白）→ 不触发', () => {
+    const s = spy();
+    onColumnBandDoubleClick(bandEvent({ clientY: 88 }));
+    expect(s).not.toHaveBeenCalled();
+  });
+
+  it('head handler：交互控件上不触发', () => {
+    const s = spy();
+    const btn = document.createElement('button');
+    document.body.appendChild(btn);
+    onTitlebarDoubleClick({
+      target: btn,
+      preventDefault: vi.fn(),
+    });
+    expect(s).not.toHaveBeenCalled();
+    btn.remove();
   });
 });

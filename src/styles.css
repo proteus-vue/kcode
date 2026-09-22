@@ -333,6 +333,10 @@ body {
   min-height: 46px; padding: 10px 18px; border-bottom: 1px solid var(--edge-soft);
   background: transparent; box-shadow: none; border-left: none; border-right: none; border-top: none;
   border-radius: 0; backdrop-filter: none; -webkit-backdrop-filter: none;
+  /* 同 .sb-head：双击缩放窗口时不该选中标题文字。
+     注意这会同时让 cwd 路径（head-sub）不可选中——标题栏语义下
+     选中路径本来也不是预期操作，需要复制路径走环境面板。 */
+  user-select: none; -webkit-user-select: none;
 }
 .head-left { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 /* 标题与路径都截断，不换行。换行会把 46px 的顶栏撑成两行，
@@ -1001,6 +1005,10 @@ body {
   display: flex; align-items: center; gap: 6px;
   min-height: 46px; padding: 8px 10px 8px 14px;
   border-bottom: 1px solid var(--edge-soft);
+  /* 导航条是「窗口标题栏」等价物：双击缩放窗口时不该顺手选中一片文字。
+     必须用 user-select 而非 dblclick 的 preventDefault——选词发生在
+     mousedown，默认动作在 dblclick 派发前就完成了（真机实测拦不住）。 */
+  user-select: none; -webkit-user-select: none;
 }
 .sb-brand {
   display: flex; align-items: center; gap: 8px;
@@ -2049,6 +2057,8 @@ body {
   /* 高度对齐 --titlebar：标签栏占的就是窗口顶部那条，
      其下沿与主区头部上沿齐平。 */
   min-height: var(--titlebar);
+  /* 同 .sb-head：双击标签条空白缩放窗口时不该选中标签文字。 */
+  user-select: none; -webkit-user-select: none;
   /* 右侧留出折叠开关的位置（开关固定在窗口右上角）。
      不留的话「…」「+」与开关重叠在同一个位置（实测三者叠在一起，
      既看不清也点不准）。 */
