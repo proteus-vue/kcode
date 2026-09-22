@@ -515,32 +515,11 @@ body {
 }
 @keyframes blink { 50% { opacity: 0; } }
 
-/* ── 推理折叠 ───────────────────────────────────────────────────────── */
-
-/* 推理过程：与工具行同等弱化。
-   此前是带边框与渐变底的盒子，而一次任务里它出现得比工具调用还频繁
-   （每轮一条），整屏下来盒子比内容多。推理是**过程性**信息，
-   默认收起的它只需一行弱文字提示「这里可以展开」。 */
-.thinking {
-  margin: 2px 0; border-radius: var(--r-xs);
-  overflow: hidden;
-}
-.thinking:hover { background: rgba(255,255,255,0.028); }
-.thinking summary {
-  display: flex; align-items: center; gap: 8px;
-  padding: 3px 8px; cursor: pointer; list-style: none;
-  font-size: 11.5px; color: var(--t4);
-}
-.thinking summary::-webkit-details-marker { display: none; }
-.thinking-label { flex: 1; }
-/* caret 用图标而非 `▸`/`▾` 两套字符：两个字形在开合时会跳变，
-   而图标是同一个 glyph 靠旋转表达（与工具行、文件树一致）。 */
-.thinking-toggle { display: flex; color: var(--t4); transition: transform .15s; }
-.thinking[open] .thinking-toggle { transform: rotate(90deg); }
-.thinking-body {
-  /* 用缩进表达从属关系，不用分隔线：线会把它重新变成一个「盒子」 */
-  padding: 2px 8px 8px 30px; color: var(--t3); font-size: 12.5px;
-}
+/* ── 推理内容不渲染 ───────────────────────────────────────────────────
+   推理曾有一个可展开的「推理过程」区块，现按参照客户端（Codex.app 完全
+   不展示推理内容，实测其 asar 里 reasoning 只出现在模型配置中）移除：
+   它每轮一条、与工具调用交替出现，展开会让时间线长度翻倍，
+   而信息价值远低于命令与 diff。相关样式随之删除，避免留下孤儿规则。 */
 
 /* ── 计划块 ─────────────────────────────────────────────────────────── */
 

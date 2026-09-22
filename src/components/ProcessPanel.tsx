@@ -35,8 +35,6 @@ export function stepLabel(body: { kind: string; [k: string]: unknown }): string 
       return String(body.query ?? '');
     case 'agentMessage':
       return String(body.text ?? '').replace(/\s+/g, ' ').slice(0, 70);
-    case 'reasoning':
-      return '推理';
     case 'plan':
       return '计划';
     default:
@@ -54,8 +52,6 @@ export function stepIcon(kind: string) {
       return <Icon name="layers" size={12} />;
     case 'webSearch':
       return <Icon name="search" size={12} />;
-    case 'reasoning':
-      return <Icon name="cpu" size={12} />;
     default:
       return <Icon name="dot" size={12} />;
   }

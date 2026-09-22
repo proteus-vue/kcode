@@ -326,6 +326,12 @@ export function reduce(state: RootState, event: AppEvent): RootState {
     case 'textDelta': {
       // 空增量不入缓冲：避免制造无意义的键（会让「是否在流式」判断失真）
       if (event.delta === '') break;
+      // **推理增量不进缓冲**：推理内容不展示（与参照客户端一致，理由是
+      // 它每轮一条、把时间线撑成两倍长，而信息价值远低于工具调用）。
+      // 若仍写进缓冲，它会经「尚未产生 Item 的流式内容」那条渲染路径
+      // 漏出来被当成正文显示——那比不展示更糟：用户看到一段没有出处、
+      // 也不属于任何消息的文字。
+      if (event.channel === 'reasoning' || event.channel === 'reasoningSummary') break;
       next.threads = { ...state.threads };
       const base = getOrCreateThread(state, event.threadId);
       next.threads[event.threadId] = {

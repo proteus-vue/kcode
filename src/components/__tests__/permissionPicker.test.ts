@@ -309,15 +309,22 @@ describe('工具行的视觉层级', () => {
     expect(body3('.tool-row:hover .tool-chevron'), 'hover 应显形').toMatch(/opacity:\s*1/);
   });
 
-  it('推理行同样弱化（它是过程性信息，比工具调用还频繁）', () => {
-    const th = body3('.thinking');
-    expect(th, '推理行不应有边框').not.toMatch(/border\s*:/);
-    expect(th, '推理行不应有常驻背景').not.toMatch(/background\s*:/);
+  it('推理内容不再渲染（与参照客户端一致）', () => {
+    const cardSrc = readFileSync(join(root3, 'src/components/ItemCard.tsx'), 'utf8');
+    // 推理曾是可展开区块；参照客户端（Codex.app）完全不展示推理内容
+    // ——实测其 asar 里 reasoning 只出现在模型配置中。
+    expect(cardSrc, '不应再有推理折叠区块').not.toContain('thinking-label');
+    expect(c3, '相关样式应一并删除，不留孤儿规则').not.toContain('.thinking');
   });
 
-  it('开合箭头用同一个 glyph 旋转，不用两套字符', () => {
-    // `▸`/`▾` 是两个字形，切换时会跳变
-    expect(c3, '不应再用 ▸ / ▾ 字符').not.toMatch(/content:\s*'[▸▾]'/);
-    expect(body3('.thinking-toggle'), '应靠 transform 旋转').toContain('transform');
+  it('推理的流式增量不得进入 streamBuffer（否则会漏成正文）', () => {
+    // 这是删掉渲染后最容易出的问题：缓冲不区分通道，推理增量会经
+    // 「尚未产生 Item 的流式内容」那条渲染路径被当成正文显示出来。
+    const storeSrc = readFileSync(join(root3, 'src/stores/store.ts'), 'utf8');
+    const i = storeSrc.indexOf("case 'textDelta'");
+    const block = storeSrc.slice(i, i + 900);
+    expect(block, '必须按 channel 过滤推理增量').toMatch(
+      /event\.channel === 'reasoning'/,
+    );
   });
 });

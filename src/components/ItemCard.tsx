@@ -10,7 +10,6 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { Item } from '../types/domain';
-import { Icon } from './Icon';
 import { Markdown } from './Markdown';
 import { ToolRow } from './ToolRow';
 
@@ -64,19 +63,21 @@ export function ItemCard({
       );
 
     case 'reasoning':
-      return (
-        <details className="thinking" open={streaming}>
-          <summary>
-            <span className="thinking-label">推理过程{streaming ? ' · 生成中' : ''}</span>
-            <span className="thinking-toggle">
-              <Icon name="chevron" size={11} />
-            </span>
-          </summary>
-          <div className="thinking-body">
-            <Markdown>{text}</Markdown>
-          </div>
-        </details>
-      );
+      // 推理内容不渲染。
+      //
+      // # 为什么删掉（这曾经是一个可展开的「推理过程」区块）
+      //
+      // 实测参照客户端（Codex.app）：整个 asar 里 `reasoning` **只出现在
+      // 模型配置**（`reasoning_effort` 等），没有任何展示推理内容的文案、
+      // 组件或类名——它完全不展示推理。
+      //
+      // 理由也成立：推理是**每轮一条**的，与工具调用交替出现，展开后
+      // 时间线长度翻倍；而它的信息价值远低于工具调用（用户要判断
+      // 「它做了什么、对不对」，看的是命令与 diff，不是它的内心独白）。
+      //
+      // 注意上游仍会推送推理增量（`item/reasoning/textDelta`），
+      // reducer 里已按 channel 过滤，不会从「未归位内容」那条渲染路径漏出来。
+      return null;
 
     case 'plan':
       return (

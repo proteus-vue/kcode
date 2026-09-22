@@ -502,3 +502,42 @@ describe('ThreadState 构造完整性', () => {
     );
   });
 });
+
+describe('推理增量不进流式缓冲', () => {
+  /**
+   * 删掉推理展示后，最容易出的问题是：`streamBuffer` 不区分通道，
+   * 推理增量会经「尚未产生 Item 的流式内容」那条渲染路径被当成正文显示
+   * ——用户看到一段没有出处、也不属于任何消息的文字，比不展示更糟。
+   */
+  const delta = (channel: 'agentMessage' | 'reasoning' | 'reasoningSummary' | 'plan') => ({
+    type: 'textDelta' as const,
+    threadId: 'th',
+    itemId: 'i1',
+    turnId: 'tu1',
+    channel,
+    delta: 'x',
+  });
+
+  it('推理两个通道都被过滤掉', () => {
+    let s = reduce(initialState(), { type: 'threadStarted', threadId: 'th', cwd: '/w' });
+    s = reduce(s, delta('reasoning'));
+    s = reduce(s, delta('reasoningSummary'));
+    expect(s.threads['th'].streamBuffer).toEqual({});
+  });
+
+  it('正文与计划通道照常入缓冲（过滤不能误伤）', () => {
+    let s = reduce(initialState(), { type: 'threadStarted', threadId: 'th', cwd: '/w' });
+    s = reduce(s, delta('agentMessage'));
+    s = reduce(s, delta('plan'));
+    expect(s.threads['th'].streamBuffer['i1']).toBe('xx');
+  });
+
+  it('混合到达时只留下正文增量', () => {
+    let s = reduce(initialState(), { type: 'threadStarted', threadId: 'th', cwd: '/w' });
+    s = reduce(s, delta('reasoning'));
+    s = reduce(s, delta('agentMessage'));
+    s = reduce(s, delta('reasoningSummary'));
+    s = reduce(s, { ...delta('agentMessage'), delta: 'y' });
+    expect(s.threads['th'].streamBuffer['i1']).toBe('xy');
+  });
+});
