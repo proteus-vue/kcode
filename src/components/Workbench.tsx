@@ -26,6 +26,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Icon } from './Icon';
 import { availableScenes, type SceneAvailability, type WorkbenchScene } from './scenes';
+import { onTitlebarDoubleClick } from '../hooks/titlebarZoom';
 
 export function Workbench({
   open,
@@ -239,7 +240,7 @@ function TabBar({
   const ref = useRef<HTMLDivElement | null>(null);
 
   return (
-    <div className="workbench-bar" ref={ref}>
+    <div className="workbench-bar" ref={ref} onDoubleClick={onTitlebarDoubleClick}>
       {/* 标签在可滚动容器里，操作按钮留在容器外。
           全放在同一个 nowrap 容器里时，标签一多就把「…」与「+」
           推出可视区（实测：按钮被滚出右边界，用户点不到）。 */}

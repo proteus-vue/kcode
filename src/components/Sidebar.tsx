@@ -35,6 +35,7 @@ import {
   threadTitle,
 } from '../stores/store';
 import { Icon } from './Icon';
+import { onTitlebarDoubleClick } from '../hooks/titlebarZoom';
 
 export function Sidebar({
   state,
@@ -71,12 +72,15 @@ export function Sidebar({
 
   return (
     <aside className="sidebar">
-      <header className="sb-head">
-        <button className="sb-brand" title={env?.workspace ?? ''}>
+      {/* 导航条双击缩放窗口（与系统标题栏双击对齐）。品牌头刻意用 div
+          而非 button：它没有任何 click 行为，无行为的 button 会误导
+          辅助技术；div 同时让它被判定为「非交互目标」，双击即缩放。 */}
+      <header className="sb-head" onDoubleClick={onTitlebarDoubleClick}>
+        <div className="sb-brand" title={env?.workspace ?? ''}>
           <span className="brand-mark">K</span>
           <span className="brand-name">{projectName}</span>
           <span className="sb-caret"><Icon name="chevron" size={11} /></span>
-        </button>
+        </div>
         <div className="sb-head-actions">
           <button
             className={`icon-btn ${searching ? 'on' : ''}`}

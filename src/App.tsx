@@ -31,6 +31,7 @@ import {
 import { useKcode, extractErrorMessage } from './stores/useKcode';
 import { usePanelLayout } from './hooks/usePanelLayout';
 import { matchPanelShortcut } from './hooks/panelShortcut';
+import { onTitlebarDoubleClick } from './hooks/titlebarZoom';
 import { reviewDataFor, threadTitle } from './stores/store';
 import { Icon } from './components/Icon';
 
@@ -396,7 +397,7 @@ export default function App() {
       />
 
       <main className="main">
-        <header className="main-head">
+        <header className="main-head" onDoubleClick={onTitlebarDoubleClick}>
           <div className="head-left">
             {thread ? (
               <>

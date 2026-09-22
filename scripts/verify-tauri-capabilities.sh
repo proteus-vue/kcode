@@ -46,8 +46,8 @@ FAIL=0
 
 # 必需权限：事件监听是前端接收领域事件的唯一通道
 REQUIRED=("core:default" "core:event:default")
-# 建议包含（缺失会导致 listen 失败）
-ADVISED=("core:event:allow-listen")
+# 建议包含（缺失会导致对应功能被静默拒绝：listen 失败、双击缩放无反应）
+ADVISED=("core:event:allow-listen" "core:window:allow-toggle-maximize")
 
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
