@@ -205,6 +205,25 @@ pub struct ThreadTokenUsage {
     pub model_context_window: Option<i64>,
 }
 
+/// 模糊文件搜索命中的一条结果（协议 `fuzzyFileSearch`）。
+///
+/// 用于输入框的 `@` 引用：模型看不到工作区，用户必须能把具体文件
+/// 指给它，而手打路径既慢又容易错。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileMatch {
+    pub path: String,
+    /// 文件名（不含目录），UI 主行显示它。
+    pub file_name: String,
+    /// `"file"` 或 `"directory"`——目录要显示成可继续深入的形态。
+    pub match_type: String,
+    /// 匹配得分（越大越相关）。服务端已排序，这里原样透传供 UI 兜底。
+    pub score: u32,
+    /// 命中字符在文件名中的下标。UI 可选地高亮它们。
+    #[serde(default)]
+    pub indices: Vec<u32>,
+}
+
 /// 一个可用技能（来自 `skills/list`）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -436,6 +455,17 @@ enum Command {
     ListSkills {
         cwd: String,
         reply: oneshot::Sender<Result<Vec<SkillInfo>, String>>,
+    },
+    /// 模糊搜索工作区文件（协议 `fuzzyFileSearch`），供输入框 `@` 引用。
+    FuzzySearchFiles {
+        cwd: String,
+        query: String,
+        reply: oneshot::Sender<Result<Vec<FileMatch>, String>>,
+    },
+    /// 触发上下文压缩（协议 `thread/compact/start`）。
+    CompactThread {
+        thread_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// 列出插件市场与已安装插件。
     ListPlugins {
@@ -780,6 +810,27 @@ impl AgentService {
     /// 列出插件市场与已安装插件（`plugin/list`）。
     pub async fn list_plugins(&self) -> Result<Vec<PluginInfo>, String> {
         self.call(|reply| Command::ListPlugins { reply }).await
+    }
+
+    /// 模糊搜索工作区文件（`fuzzyFileSearch`）。
+    ///
+    /// `roots` 取工作区本身：让服务端在沙箱边界内搜索，而不是让前端
+    /// 自己遍历——后者会绕过沙箱配置，也会把大目录拖进 UI 线程。
+    pub async fn fuzzy_search_files(
+        &self,
+        cwd: impl Into<String>,
+        query: impl Into<String>,
+    ) -> Result<Vec<FileMatch>, String> {
+        let (cwd, query) = (cwd.into(), query.into());
+        self.call(|reply| Command::FuzzySearchFiles { cwd, query, reply }).await
+    }
+
+    /// 请求压缩该线程的上下文（`thread/compact/start`）。
+    ///
+    /// 压缩由服务端执行，我们只负责发起；完成情况通过事件流回传。
+    pub async fn compact_thread(&self, thread_id: impl Into<String>) -> Result<(), String> {
+        let thread_id = thread_id.into();
+        self.call(|reply| Command::CompactThread { thread_id, reply }).await
     }
 
     /// 重建单个线程的时间线与轮次状态。
@@ -1189,6 +1240,65 @@ async fn handle_command(
             let params = json!({ "threadId": thread_id });
             let out = match transport.request(method, params).await {
                 Ok(_) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(out);
+        }
+
+        Command::CompactThread { thread_id, reply } => {
+            let params = json!({ "threadId": thread_id });
+            let out = match transport.request("thread/compact/start", params).await {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(out);
+        }
+
+        Command::FuzzySearchFiles { cwd, query, reply } => {
+            let params = json!({ "query": query, "roots": [cwd] });
+            let out = match transport.request("fuzzyFileSearch", params).await {
+                Ok(result) => {
+                    // 注意：`fuzzyFileSearch` 的字段是 **snake_case**
+                    // （`file_name` / `match_type`），与协议里多数方法的
+                    // camelCase 不同——实测报文如此，schema 的
+                    // FuzzyFileSearchResult 定义也写作 file_name。
+                    // 读成 fileName 不会报错，只会让文件名静默变空串。
+                    let arr = result
+                        .get("files")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    Ok(arr
+                        .iter()
+                        .filter_map(|m| {
+                            let path = m.get("path")?.as_str()?.to_owned();
+                            Some(FileMatch {
+                                path,
+                                file_name: m
+                                    .get("file_name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                match_type: m
+                                    .get("match_type")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("file")
+                                    .to_owned(),
+                                score: m.get("score").and_then(Value::as_u64).unwrap_or(0) as u32,
+                                indices: m
+                                    .get("indices")
+                                    .and_then(Value::as_array)
+                                    .map(|a| {
+                                        a.iter()
+                                            .filter_map(Value::as_u64)
+                                            .map(|n| n as u32)
+                                            .collect()
+                                    })
+                                    .unwrap_or_default(),
+                            })
+                        })
+                        .collect())
+                }
                 Err(e) => Err(e.to_string()),
             };
             let _ = reply.send(out);

@@ -164,6 +164,30 @@ approvalPolicy: anyOf, approvalsReviewer: anyOf, baseInstructions: string|null, 
 - **TurnStartResponse**：`*turn: Turn`
 - **ThreadResumeResponse**：`*approvalPolicy: AskForApproval, *approvalsReviewer: allOf, *cwd: AbsolutePathBuf, instructionSources: array, itemsBackwardsCursor: string|null, *model: string, *modelProvider: string, reasoningEffort: anyOf, *sandbox: allOf, serviceTier: string|null, *thread: Thread, turnsBackwardsCursor: string|null`
 
+### ⚠️ `fuzzyFileSearch` 用 snake_case（与其余方法不同）
+
+实测报文（codex 0.155.1；由 `crates/kcode-app/tests/e2e.rs` 的
+`fuzzy_search_returns_matches_in_files_key` 复现）：
+
+```json
+{"files":[{"file_name":"probe.txt","indices":[12,13],
+           "match_type":"file","path":"probe.txt","root":"/tmp/xxx","score":200}]}
+```
+
+- **命中列表在 `files` 键下**（不是 `data`，也不是数组直出）。
+- **字段是 snake_case**：`file_name` / `match_type`。协议里绝大多数方法是
+  camelCase，这里不是——读成 `fileName` 不报错，只会让文件名**静默变成空串**。
+- 该方法的响应**没有**独立 definitions 条目（`ClientRequest.oneOf` 只给了请求侧），
+  冻结 schema 里只有一个会话式通知 `FuzzyFileSearchSessionUpdatedNotification`
+  （带 `sessionId`）。因此形态**只能实测**，推不出来。
+- 参数：`{"query": string, "roots": [string]}`，两者皆必填。
+
+### `thread/compact/start` 参数形状
+
+`{"threadId": string}`，仅此一项。服务端接受后压缩结果经 `thread/compacted`
+通知回传（该通知已被协议标记 deprecated，改由 `contextCompaction` item 承载
+——我们两条路径都接）。
+
 ## 客户端方法全集（102）
 
 - `account/login/cancel`

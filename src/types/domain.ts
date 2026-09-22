@@ -453,3 +453,19 @@ export interface WebElementAttachment {
   color?: string;
   font?: string;
 }
+
+/**
+ * 模糊文件搜索命中的一条结果（协议 `fuzzyFileSearch`）。
+ *
+ * 用于输入框的 `@` 引用：模型看不到工作区，用户必须能把具体文件指给它。
+ */
+export interface FileMatch {
+  path: string;
+  /** 文件名（不含目录），列表主行显示它。 */
+  fileName: string;
+  /** `'file'` 或 `'directory'`。 */
+  matchType: string;
+  score: number;
+  /** 命中字符在文件名中的下标（可选高亮）。 */
+  indices: number[];
+}

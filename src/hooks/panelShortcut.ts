@@ -43,3 +43,25 @@ export function matchPanelShortcut(e: {
 
   return e.altKey ? 'right' : 'left';
 }
+
+/**
+ * ⌘L → 聚焦输入框（规格 03 §3.4 要求）。
+ *
+ * 同样用 `e.code` 而非 `e.key`：macOS 上这些字母键在被 Option 改写时
+ * 会变成别的字符，只有物理键位可靠。
+ *
+ * 没有输入框可聚焦时返回 false——**不要 preventDefault**：抢掉系统里
+ * ⌘L 的默认行为（浏览器是「定位到地址栏」）却什么也不做，比不响应更糟。
+ */
+export function matchFocusComposerShortcut(e: {
+  metaKey?: boolean;
+  ctrlKey?: boolean;
+  altKey?: boolean;
+  shiftKey?: boolean;
+  key?: string;
+  code?: string;
+}): boolean {
+  const primary = e.metaKey || e.ctrlKey;
+  if (!primary || e.altKey || e.shiftKey) return false;
+  return e.code === 'KeyL' || (!e.code && (e.key ?? '').toLowerCase() === 'l');
+}

@@ -31,7 +31,7 @@ import {
 import { useKcode, extractErrorMessage } from './stores/useKcode';
 import { usePanelLayout } from './hooks/usePanelLayout';
 import { useAutoScroll } from './hooks/useAutoScroll';
-import { matchPanelShortcut } from './hooks/panelShortcut';
+import { matchPanelShortcut, matchFocusComposerShortcut } from './hooks/panelShortcut';
 import { onColumnBandDoubleClick, onTitlebarDoubleClick } from './hooks/titlebarZoom';
 import { reviewDataFor, threadTitle } from './stores/store';
 import { Icon } from './components/Icon';
@@ -208,10 +208,24 @@ export default function App() {
       // （macOS 的 Option 会把 e.key 改写成 "∫"，导致右栏快捷键失效，
       // 而合成事件不会复现这一点）。
       const target = matchPanelShortcut(e);
-      if (!target) return;
-      e.preventDefault();
-      if (target === 'right') toggleRight();
-      else toggleLeft();
+      if (target) {
+        e.preventDefault();
+        if (target === 'right') toggleRight();
+        else toggleLeft();
+        return;
+      }
+      // ⌘L 聚焦输入框（规格 03 §3.4）。输入框不存在时不做任何事，
+      // 更不 preventDefault——抢掉系统默认行为却无响应比不响应更糟。
+      if (matchFocusComposerShortcut(e)) {
+        const ta = document.querySelector<HTMLTextAreaElement>('.composer-box textarea');
+        if (ta && !ta.disabled) {
+          e.preventDefault();
+          ta.focus();
+          // 光标移到末尾：聚焦后直接续写，而不是回到开头
+          const n = ta.value.length;
+          ta.setSelectionRange(n, n);
+        }
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -529,6 +543,8 @@ export default function App() {
           configuredModel={api.settings?.model ?? null}
           pendingInput={api.pendingInput}
           onConsumePending={api.clearPendingInput}
+          onSearchFiles={api.searchFiles}
+          onCompact={() => void api.compactThread()}
         />
       </main>
 

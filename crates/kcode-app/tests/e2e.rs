@@ -925,3 +925,74 @@ async fn guardian_warning_kind_is_persistable_and_replayable() {
         "警告原文必须可读回，否则复盘时只剩一个空事件"
     );
 }
+
+/// `fuzzyFileSearch` 的响应形态必须对照真实报文确定（输入框 @ 引用）。
+///
+/// # 为什么不能照着 schema 写
+///
+/// 冻结的 schema 里 `fuzzyFileSearch` **没有响应定义**——只有一个会话式通知
+/// （`FuzzyFileSearchSessionUpdatedNotification`，带 sessionId）。也就是说它的
+/// 返回形态无法从类型定义推出，只能实测。
+///
+/// 这条测试同时是「形态探针」：它断言命中列表确实在 `files` 键下，
+/// 且 `path` / `fileName` 字段名如实现所假设。若上游改了形态，
+/// 这里会失败而不是让 @ 引用静默返回空列表。
+#[tokio::test(flavor = "multi_thread")]
+async fn fuzzy_search_returns_matches_in_files_key() {
+    let Some(h) = Harness::start(vec![]).await else {
+        eprintln!("跳过：未安装 codex 二进制");
+        return;
+    };
+
+    // 在工作区里放一个已知文件，否则搜索必然为空、断言失去意义
+    let probe = h.cwd_path().join("kcode-probe-searchme.txt");
+    std::fs::write(&probe, "probe").unwrap();
+
+    let out = h
+        .service
+        .fuzzy_search_files(h.cwd_path().display().to_string(), "searchme")
+        .await
+        .expect("fuzzyFileSearch 调用失败");
+
+    assert!(
+        !out.is_empty(),
+        "搜索已知文件却无命中 —— 要么响应形态假设错了（不在 files 键下），\
+         要么字段名不同（期望 path/fileName）"
+    );
+    let hit = out
+        .iter()
+        .find(|m| m.file_name.contains("searchme") || m.path.contains("searchme"))
+        .expect("命中列表里没有刚创建的文件");
+    assert!(!hit.path.is_empty(), "path 不应为空");
+    assert!(!hit.file_name.is_empty(), "fileName 不应为空");
+
+    h.service.shutdown();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+/// `thread/compact/start` 必须能被真实服务端接受（输入框 /compact 命令）。
+#[tokio::test(flavor = "multi_thread")]
+async fn compact_thread_is_accepted_by_server() {
+    let Some(h) = Harness::start(vec![]).await else { return };
+    let thread_id = h.start_thread().await;
+
+    // 未跑轮次的线程上下文很短，服务端可能直接接受或拒绝；
+    // 关键是不能因为**方法名/参数错**而失败。
+    match h.service.compact_thread(&thread_id).await {
+        Ok(()) => {}
+        Err(e) => {
+            let lower = e.to_lowercase();
+            assert!(
+                !lower.contains("unknown method") && !lower.contains("method not found"),
+                "compact 方法不被识别 —— 方法名错了: {e}"
+            );
+            assert!(
+                !lower.contains("missing") && !lower.contains("required"),
+                "参数形状不对（期望仅 threadId）: {e}"
+            );
+        }
+    }
+
+    h.service.shutdown();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}

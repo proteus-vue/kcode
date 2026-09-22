@@ -68,7 +68,8 @@ type IconName =
   | 'devices'
   | 'more'
   | 'arrow-left'
-  | 'arrow-right';
+  | 'arrow-right'
+  | 'arrow-up';
 
 const ICONS: Record<IconName, ReactNode> = {
   // ── 基础操作 ─────────────────────────────────────────────────────────
@@ -180,6 +181,8 @@ const ICONS: Record<IconName, ReactNode> = {
   // ── 方向 ─────────────────────────────────────────────────────────────
   'arrow-left': <path d="M12.6 8H3.4M7.2 4.2L3.4 8l3.8 3.8" />,
   'arrow-right': <path d="M3.4 8h9.2M8.8 4.2L12.6 8l-3.8 3.8" />,
+  /** 向上箭头。用于发送键——比字符 `↑` 更锐利，且线宽与整套图标一致。 */
+  'arrow-up': <path d="M8 12.6V3.4M4.2 7.2L8 3.4l3.8 3.8" />,
   /**
    * 展开：箭头指向外的对角线（↗ ↙）。
    * 每个箭头 = 一条斜线 + 两条直角边构成的箭尖，箭尖在外端。

@@ -1407,6 +1407,49 @@ body {
 .composer {
   padding: 10px 16px 14px;
   border-top: 1px solid var(--edge-soft);
+  position: relative;
+}
+
+/* ── `@` 引用候选 ───────────────────────────────────────────────────────
+   贴在输入框上方。向上弹出是必然选择：输入框在窗口底部，下方没有空间。 */
+.at-menu {
+  position: absolute;
+  left: 16px; right: 16px;
+  bottom: calc(100% - 6px);
+  z-index: 60;
+  max-height: 260px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 5px;
+  background: var(--glass-3);
+  border: 1px solid var(--edge-strong);
+  border-radius: var(--r-sm);
+  box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+}
+.at-menu-head {
+  display: flex; align-items: center; gap: 5px;
+  padding: 4px 8px 5px;
+  font-size: 10.5px; color: var(--t4);
+  border-bottom: 1px solid var(--edge-soft);
+  margin-bottom: 3px;
+}
+.at-item {
+  display: flex; align-items: center; gap: 7px;
+  width: 100%; padding: 5px 8px;
+  border: 0; border-radius: var(--r-xs);
+  background: transparent; color: var(--t2);
+  font: inherit; font-size: 12px; text-align: left; cursor: pointer;
+}
+.at-item.is-active { background: rgba(255, 255, 255, 0.08); color: var(--t1); }
+.at-item .icon { flex-shrink: 0; color: var(--t3); }
+.at-name { flex-shrink: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 路径靠右且更淡：主行是文件名，路径是消歧用的次要信息 */
+.at-path {
+  margin-left: auto; min-width: 0;
+  font-size: 10.5px; color: var(--t4); font-family: var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; text-align: left;
 }
 
 .composer-box {
@@ -1485,37 +1528,93 @@ body {
 
 .composer-right { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 
-.model-picker select, .effort-picker select {
-  appearance: none; background: none; border: none; outline: none;
-  color: var(--t3); font: inherit; font-size: 11.5px; cursor: pointer;
-  padding: 4px 6px; border-radius: var(--r-xs); max-width: 190px;
-  transition: color .13s, background .13s;
+/* ── 自绘下拉选择器（模型 / 推理强度）───────────────────────────────────
+   原生 <select> 展开后的面板由操作系统绘制（macOS 上是浅色面板 + 蓝色
+   高亮条），CSS 碰不到那一层，与整套深色玻璃语言完全不搭。这里的浮层
+   通过 portal 挂到 body（原因见 MenuSelect.tsx：容器 overflow: hidden 会裁掉它）。 */
+.menu-select { position: relative; }
+
+.menu-select-trigger {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: none; border: 1px solid transparent; outline: none;
+  /* 与芯片同级的可读性：模型与推理强度是「当前会在什么条件下运行」，
+     提交前必须能看清——用 --t3 太淡（实测在深底上要凑近才读得出）。 */
+  color: var(--t2); font: inherit; font-size: 11.5px; cursor: pointer;
+  padding: 4px 6px; border-radius: var(--r-xs);
+  max-width: 200px;
+  transition: color .13s, background .13s, border-color .13s;
 }
-.model-picker select:hover, .effort-picker select:hover {
-  background: rgba(255, 255, 255, 0.06); color: var(--t1);
+.menu-select-trigger:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.07); color: var(--t1);
+  border-color: var(--edge-soft);
 }
-.model-picker select option, .effort-picker select option {
-  background: #1a1e26; color: var(--t1);
+.menu-select-trigger:disabled { opacity: .5; cursor: default; }
+/* 前缀只在悬停/展开时露出：常态下把空间留给模型名本身 */
+.menu-select-prefix { color: var(--t4); }
+.menu-select-label {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 150px;
 }
-.effort-picker select { max-width: 74px; }
+.menu-select-label.is-danger { color: var(--danger); }
+.menu-select-caret {
+  display: grid; place-items: center; color: var(--t4);
+  transform: rotate(90deg); /* chevron 默认指向右，转成向下 */
+  transition: transform .16s var(--ease-out);
+}
+.menu-select-trigger[aria-expanded='true'] .menu-select-caret { transform: rotate(-90deg); }
+
+.menu-select-menu {
+  position: fixed;
+  z-index: 200;
+  display: flex; flex-direction: column;
+  padding: 4px;
+  background: var(--glass-3);
+  border: 1px solid var(--edge-strong);
+  border-radius: var(--r-sm);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  outline: none;
+  max-height: 320px; overflow-y: auto;
+}
+
+.menu-select-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 8px; border: 0; border-radius: var(--r-xs);
+  background: transparent; color: var(--t2); font: inherit; font-size: 12px;
+  text-align: left; cursor: pointer;
+}
+/* 高亮同时覆盖鼠标悬停与键盘导航——两者是同一个状态，
+   分两套会让用户看不出「按回车会选中哪一项」。 */
+.menu-select-item.is-active { background: rgba(255, 255, 255, 0.08); color: var(--t1); }
+.menu-select-item.is-danger .menu-select-item-label { color: var(--danger); }
+.menu-select-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.menu-select-item-label {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.menu-select-hint { font-size: 10.5px; color: var(--t4); }
+.menu-select-check { display: grid; place-items: center; color: var(--accent); flex-shrink: 0; }
 
 .send-btn {
   width: 30px; height: 30px; border-radius: 50%;
   display: grid; place-items: center; margin-left: 2px;
   background: linear-gradient(180deg, #7fb2ff, #5b8ef0); color: #08121f;
   border: 1px solid rgba(140, 185, 255, 0.6);
-  font-size: 15px; font-weight: 700; line-height: 1; cursor: pointer;
+  cursor: pointer;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
   transition: opacity .13s, transform .07s;
 }
+/* 发送/停止都用图标（此前发件键是字符 `↑`、停止键是 CSS 方块）：
+   字符随字体渲染，字重与线宽无法与其他图标对齐。 */
+.send-btn .icon { stroke-width: 1.9; }
 .send-btn:hover:not(:disabled) { transform: translateY(-1px); }
 .send-btn:active:not(:disabled) { transform: translateY(0); }
 .send-btn:disabled { opacity: .3; cursor: default; }
 .send-btn.stop {
   background: rgba(248, 113, 113, 0.16);
   border-color: rgba(248, 113, 113, 0.5);
+  color: var(--danger);
 }
-.stop-glyph { width: 9px; height: 9px; background: var(--danger); border-radius: 2px; }
 
 /* 欢迎卡片的图标色随类型变化，避免整片同色 */
 .welcome-card:nth-child(1) .welcome-card-icon { color: #7fb2ff; }

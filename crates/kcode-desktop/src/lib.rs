@@ -627,6 +627,27 @@ async fn thread_archive(
     svc.archive_thread(thread_id, archived).await.map_err(CommandError::from)
 }
 
+/// 模糊搜索工作区文件，供输入框 `@` 引用。
+#[tauri::command]
+async fn fuzzy_search_files(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<kcode_app::FileMatch>, CommandError> {
+    let svc = require_service(&state).await?;
+    let cwd = state.paths.workspace.display().to_string();
+    svc.fuzzy_search_files(cwd, query).await.map_err(CommandError::from)
+}
+
+/// 请求压缩线程上下文（协议 `thread/compact/start`）。
+#[tauri::command]
+async fn compact_thread(
+    state: State<'_, AppState>,
+    thread_id: String,
+) -> Result<(), CommandError> {
+    let svc = require_service(&state).await?;
+    svc.compact_thread(thread_id).await.map_err(CommandError::from)
+}
+
 /// 列出当前工作区可见的技能。
 #[tauri::command]
 async fn list_skills(state: State<'_, AppState>) -> Result<Vec<kcode_app::SkillInfo>, CommandError> {
@@ -823,6 +844,8 @@ pub fn run() {
             decide_file,
             list_threads_remote,
             list_skills,
+            fuzzy_search_files,
+            compact_thread,
             list_plugins,
             export_audit,
             environment_info,

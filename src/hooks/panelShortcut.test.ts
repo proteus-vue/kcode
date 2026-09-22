@@ -7,7 +7,7 @@
  * 被改写的 key 才能覆盖。
  */
 import { describe, expect, it } from 'vitest';
-import { matchPanelShortcut } from './panelShortcut';
+import { matchFocusComposerShortcut, matchPanelShortcut } from './panelShortcut';
 
 /** 真机 ⌘⌥B 的事件形状：code 仍是 KeyB，key 被 Option 改写为 ∫。 */
 const macOptionB = { metaKey: true, altKey: true, code: 'KeyB', key: '∫' };
@@ -50,5 +50,30 @@ describe('matchPanelShortcut', () => {
     expect(matchPanelShortcut({ metaKey: true, altKey: true, key: 'b' })).toBe('right');
     // 但被 Option 改写过、又没有 code 时无法识别——这是已知边界
     expect(matchPanelShortcut({ metaKey: true, altKey: true, key: '∫' })).toBeNull();
+  });
+});
+
+describe('⌘L 聚焦输入框', () => {
+  it('⌘L 命中', () => {
+    expect(matchFocusComposerShortcut({ metaKey: true, code: 'KeyL' })).toBe(true);
+    expect(matchFocusComposerShortcut({ ctrlKey: true, code: 'KeyL' })).toBe(true);
+  });
+
+  it('大小写与 key 后备都能命中', () => {
+    expect(matchFocusComposerShortcut({ metaKey: true, key: 'L' })).toBe(true);
+    expect(matchFocusComposerShortcut({ metaKey: true, key: 'l' })).toBe(true);
+  });
+
+  it('无修饰键不命中（裸 L 是正常打字）', () => {
+    expect(matchFocusComposerShortcut({ code: 'KeyL' })).toBe(false);
+  });
+
+  it('带 Shift / Alt 不命中（那些组合另有含义）', () => {
+    expect(matchFocusComposerShortcut({ metaKey: true, shiftKey: true, code: 'KeyL' })).toBe(false);
+    expect(matchFocusComposerShortcut({ metaKey: true, altKey: true, code: 'KeyL' })).toBe(false);
+  });
+
+  it('其他字母不命中', () => {
+    expect(matchFocusComposerShortcut({ metaKey: true, code: 'KeyK' })).toBe(false);
   });
 });

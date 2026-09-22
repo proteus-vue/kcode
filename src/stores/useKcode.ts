@@ -10,6 +10,7 @@ import type {
   AppEvent,
   ApprovalDecision,
   EnvironmentInfo,
+  FileMatch,
   ThreadInfo,
   GitStatus,
   ModelOption,
@@ -132,6 +133,10 @@ export interface KcodeApi {
   setPermissionMode: (mode: PermissionMode) => Promise<void>;
   /** 重新读取设置。 */
   reloadSettings: () => Promise<void>;
+  /** 模糊搜索工作区文件（输入框 `@` 引用）。失败时返回空列表。 */
+  searchFiles: (query: string) => Promise<FileMatch[]>;
+  /** 请求压缩当前线程上下文（`/compact`）。 */
+  compactThread: () => Promise<void>;
   /** 订阅连接级事件（终端输出）。返回取消订阅函数。 */
   subscribe: (fn: (e: AppEvent) => void) => () => void;
   /** 把选中的网页元素作为附件加入输入框。 */
@@ -375,6 +380,33 @@ export function useKcode(): KcodeApi {
     if (!inTauri()) return;
     try {
       setSkills(await invoke<SkillInfo[]>('list_skills'));
+    } catch (e) {
+      setState((prev) => ({ ...prev, errors: [...prev.errors, extractErrorMessage(e)] }));
+    }
+  }, []);
+
+  /**
+   * 模糊搜索工作区文件（输入框 `@` 引用）。
+   *
+   * **失败时返回空列表而不抛错**：搜索随每次按键触发，中途失败
+   * （服务未就绪等）若弹错误会把界面刷满噪音；用户看到「无匹配」
+   * 继续打字是更合理的降级。
+   */
+  const searchFiles = useCallback(async (query: string): Promise<FileMatch[]> => {
+    if (!inTauri() || !query.trim()) return [];
+    try {
+      return await invoke<FileMatch[]>('fuzzy_search_files', { query: query.trim() });
+    } catch {
+      return [];
+    }
+  }, []);
+
+  /** 请求压缩当前线程上下文（`/compact`）。 */
+  const compactThread = useCallback(async () => {
+    const threadId = activeRef.current;
+    if (!inTauri() || !threadId) return;
+    try {
+      await invoke('compact_thread', { threadId });
     } catch (e) {
       setState((prev) => ({ ...prev, errors: [...prev.errors, extractErrorMessage(e)] }));
     }
@@ -637,6 +669,8 @@ export function useKcode(): KcodeApi {
     settings,
     setPermissionMode,
     reloadSettings,
+    searchFiles,
+    compactThread,
     rightContent,
     openInRight: setRightContent,
     appendComposer: useCallback((el: WebElementAttachment) => setPendingInput(el), []),

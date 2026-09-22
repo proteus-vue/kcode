@@ -13,16 +13,44 @@
  * 这些信息必须常驻可见——用户在提交前需要知道任务将在哪个目录、
  * 哪个分支、以什么权限运行。放进设置页会让这些前提变得不可见。
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icon';
+import { MenuSelect, type MenuItem } from './MenuSelect';
 import { PermissionPicker } from './PermissionPicker';
 import { serializeWebElements } from './attachmentSerialize';
+import {
+  INITIAL_CURSOR,
+  historyNext,
+  historyPrev,
+  moveIndex,
+  pushHistory,
+  type HistoryCursor,
+} from './composerHistory';
 import type {
+  FileMatch,
   GitStatus,
   ModelOption,
   PermissionMode,
   WebElementAttachment,
 } from '../types/domain';
+
+/**
+ * 从光标位置往前找 `@` 开头的查询词。
+ *
+ * 只认「行首或空白之后的 @」：`user@example.com` 这种不该触发文件搜索。
+ * 返回 `null` 表示当前不在引用输入状态。
+ */
+export function atQueryAt(text: string, cursor: number): string | null {
+  const before = text.slice(0, cursor);
+  const at = before.lastIndexOf('@');
+  if (at < 0) return null;
+  // @ 前必须是行首或空白
+  if (at > 0 && !/\s/.test(before[at - 1])) return null;
+  const q = before.slice(at + 1);
+  // 查询词内不允许空白或换行——出现即说明用户已经在写别的了
+  if (/[\s\n]/.test(q)) return null;
+  return q;
+}
 
 const EFFORT_LABEL: Record<string, string> = {
   minimal: '最低',
@@ -50,6 +78,8 @@ export function Composer({
   configuredModel,
   pendingInput,
   onConsumePending,
+  onSearchFiles,
+  onCompact,
 }: {
   disabled: boolean;
   onSubmit: (text: string) => void;
@@ -79,6 +109,10 @@ export function Composer({
   pendingInput: WebElementAttachment | null;
   /** 消费完通知外部清空，避免重复追加。 */
   onConsumePending: () => void;
+  /** `@` 引用：按查询词模糊搜索工作区文件。 */
+  onSearchFiles?: (query: string) => Promise<FileMatch[]>;
+  /** `/compact`：请求压缩当前线程上下文。 */
+  onCompact?: () => void;
 }) {
   const [text, setText] = useState('');
   /** 已附加的引用材料。发送时随正文一起提交。 */
@@ -86,6 +120,14 @@ export function Composer({
   /** 展开预览的附件（看完整内容）。 */
   const [preview, setPreview] = useState<number | null>(null);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+  /** 已提交输入的历史（↑ 回溯，规格 04 §4.5）。 */
+  const [history, setHistory] = useState<string[]>([]);
+  const [cursor, setCursor] = useState<HistoryCursor>(INITIAL_CURSOR);
+  /** `@` 引用：当前候选文件与高亮项。 */
+  const [fileMatches, setFileMatches] = useState<FileMatch[]>([]);
+  const [fileActive, setFileActive] = useState(0);
+  /** 当前 `@` 查询词在文本中的起始下标；null 表示不在引用状态。 */
+  const [atStart, setAtStart] = useState<number | null>(null);
 
   /**
    * 高度自适应内容。
@@ -113,6 +155,77 @@ export function Composer({
     onConsumePending();
   }, [pendingInput, onConsumePending]);
 
+  /**
+   * `@` 引用：文本或光标变化时重算查询词并拉取候选。
+   *
+   * 需要防抖：每次按键都发一次搜索会把服务端打满，而用户打字期间
+   * 只有最后一次的结果有意义。120ms 是「感觉不出延迟」与「明显少发请求」
+   * 之间的常见取值。
+   */
+  useEffect(() => {
+    if (!onSearchFiles) return;
+    const el = taRef.current;
+    const pos = el?.selectionStart ?? text.length;
+    const q = atQueryAt(text, pos);
+    if (q === null) {
+      setAtStart(null);
+      setFileMatches([]);
+      return;
+    }
+    // 记下 @ 的下标，选中后据此替换掉「@查询词」这一段
+    setAtStart(pos - q.length - 1);
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void onSearchFiles(q).then((ms) => {
+        // 竞态守卫：慢请求返回时用户可能已经改了输入
+        if (!cancelled) {
+          setFileMatches(ms);
+          setFileActive(0);
+        }
+      });
+    }, 120);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [text, onSearchFiles]);
+
+  /** 选中一个候选：把「@查询词」替换成文件路径引用。 */
+  const pickFile = (m: FileMatch) => {
+    if (atStart === null) return;
+    const el = taRef.current;
+    const caret = el?.selectionStart ?? text.length;
+    // 引用写成 `@路径`：模型能直接读到，用户也能看懂指向哪里
+    const inserted = `@${m.path} `;
+    const next = text.slice(0, atStart) + inserted + text.slice(caret);
+    setText(next);
+    setFileMatches([]);
+    setAtStart(null);
+    // 光标落到插入内容之后
+    const pos = atStart + inserted.length;
+    requestAnimationFrame(() => {
+      taRef.current?.focus();
+      taRef.current?.setSelectionRange(pos, pos);
+    });
+  };
+
+  /**
+   * 斜杠命令（规格 04 §4.5）。
+   *
+   * 只实现协议真正支持的：`/compact` 对应 `thread/compact/start`。
+   * 不去做「看起来能用但改了本地状态」的假命令——那类命令比没有更糟。
+   */
+  const runSlashCommand = (raw: string): boolean => {
+    const cmd = raw.trim();
+    if (!cmd.startsWith('/')) return false;
+    if (cmd === '/compact' && onCompact) {
+      onCompact();
+      setText('');
+      return true;
+    }
+    return false;
+  };
+
   const submit = () => {
     const t = text.trim();
     // 只有附件、没有正文时也应可发送：用户可能就只想说「看这个元素」
@@ -120,7 +233,12 @@ export function Composer({
     // 序列化在 attachmentSerialize 里（带测试）：模型看不到界面，
     // 只收到这段文本，字段缺一个它就定位不到用户指的是什么
     const attached = serializeWebElements(attachments);
-    onSubmit(attached ? (t ? `${t}\n\n${attached}` : attached) : t);
+    const full = attached ? (t ? `${t}\n\n${attached}` : attached) : t;
+    onSubmit(full);
+    // 历史记「用户实际打的话」而不是拼上附件后的全文：
+    // 回溯出来再发一次时不该把上次的引用材料又带一遍。
+    setHistory((h) => pushHistory(h, t));
+    setCursor(INITIAL_CURSOR);
     setText('');
     setAttachments([]);
     setPreview(null);
@@ -130,8 +248,63 @@ export function Composer({
   const efforts = current?.reasoningEfforts ?? [];
   const branch = git?.isRepo ? git.branch ?? 'HEAD 分离' : null;
 
+  /**
+   * 下拉项在每次渲染时重建（列表很短，无需缓存）。
+   *
+   * 模型列表首项是「跟随配置」：它必须**显示实际模型名**——
+   * 只写「默认」的话用户无法知道真正会跑什么，而那正是
+   * 「界面描述与行为不一致」最容易出问题的地方。
+   */
+  const modelItems: MenuItem[] = useMemo(
+    () => [
+      {
+        value: '',
+        label: configuredModel ?? '默认模型',
+        hint: '跟随 config.toml',
+      },
+      ...models.map((m) => ({ value: m.id, label: m.displayName })),
+    ],
+    [models, configuredModel],
+  );
+
+  const effortItems: MenuItem[] = useMemo(
+    () => efforts.map((e) => ({ value: e, label: EFFORT_LABEL[e] ?? e })),
+    [efforts],
+  );
+
   return (
     <div className="composer">
+      {/* `@` 引用候选：贴在输入框上方。向上弹出是刻意的——
+          输入框在窗口底部，向下没有空间。 */}
+      {fileMatches.length > 0 && atStart !== null && (
+        <div className="at-menu" role="listbox" aria-label="引用文件">
+          <div className="at-menu-head">
+            <Icon name="search" size={11} />
+            <span>引用工作区文件</span>
+          </div>
+          {fileMatches.map((m, i) => (
+            <button
+              key={m.path}
+              role="option"
+              aria-selected={i === fileActive}
+              className={`at-item ${i === fileActive ? 'is-active' : ''}`}
+              onMouseEnter={() => setFileActive(i)}
+              onMouseDown={(e) => {
+                // mousedown 选中：click 会先让 textarea 失焦，
+                // 而失焦会触发 blur 上的清理逻辑把候选清掉。
+                e.preventDefault();
+                pickFile(m);
+              }}
+            >
+              <Icon name={m.matchType === 'directory' ? 'folder' : 'file'} size={12} />
+              <span className="at-name">{m.fileName}</span>
+              <span className="at-path" title={m.path}>
+                {m.path}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
       <div className={`composer-box ${running ? 'is-running' : ''}`}>
         {/* 附件区：在文本域之上。放在上面而不是下面，是因为它属于
             「这次要发送的内容」，视线应当先看到内容再看到操作。 */}
@@ -204,11 +377,71 @@ export function Composer({
             disabled ? '请先新建对话…' : running ? '任务进行中，可继续输入以追加指令' : '随心输入'
           }
           disabled={disabled}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value);
+            // 一旦手动编辑就退出历史回溯：否则用户改完历史项再按 ↑，
+            // 会从改前的下标继续走，光标位置与内容对不上。
+            setCursor(INITIAL_CURSOR);
+          }}
           onKeyDown={(e) => {
+            // `@` 候选列表的键盘导航优先于其他绑定：此时 ↑↓/Enter
+            // 的语义是「在候选里选」，不是「翻历史」或「发送」。
+            if (fileMatches.length > 0 && atStart !== null) {
+              if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setFileActive((i) => moveIndex(i, fileMatches.length, 1));
+                return;
+              }
+              if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setFileActive((i) => moveIndex(i, fileMatches.length, -1));
+                return;
+              }
+              if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault();
+                const m = fileMatches[fileActive];
+                if (m) pickFile(m);
+                return;
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                // 只关候选列表，不关整个输入——用户通常想继续打字
+                setFileMatches([]);
+                setAtStart(null);
+                return;
+              }
+            }
+
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
+              // 斜杠命令先于普通提交：`/compact` 是命令而不是要发给模型的话
+              if (runSlashCommand(text)) return;
               submit();
+              return;
+            }
+            // ↑ / ↓ 回溯历史，但**只在光标处于首/末行时**接管：
+            // 多行输入里光标在中间时，方向键属于文本导航，
+            // 抢占它会让用户无法在已输入内容中上下移动。
+            if (e.key === 'ArrowUp' && !e.shiftKey && !e.altKey && !e.metaKey) {
+              const el = taRef.current;
+              // 光标之前没有换行 = 在第一行 → 才把 ↑ 解释为「翻历史」
+              if (!el || el.value.slice(0, el.selectionStart).includes('\n')) return;
+              if (history.length === 0 && cursor.index === null) return;
+              e.preventDefault();
+              const r = historyPrev(history, cursor, text);
+              setCursor(r.cursor);
+              setText(r.text);
+              return;
+            }
+            if (e.key === 'ArrowDown' && !e.shiftKey && !e.altKey && !e.metaKey) {
+              const el = taRef.current;
+              // 光标之后没有换行 = 在最后一行
+              if (!el || el.value.slice(el.selectionStart).includes('\n')) return;
+              if (cursor.index === null) return;
+              e.preventDefault();
+              const r = historyNext(history, cursor);
+              setCursor(r.cursor);
+              setText(r.text);
             }
           }}
           rows={1}
@@ -243,42 +476,29 @@ export function Composer({
 
           {/* 右：模型 + 发送 */}
           <div className="composer-right">
-            <label className="model-picker" title="模型">
-              <select
-                value={selectedModel ?? ''}
-                onChange={(e) => onSelectModel(e.target.value)}
-                disabled={disabled}
-              >
-                {/* 「跟随配置」是默认项，且它必须**显示实际模型名**——
-                    只写「默认」的话用户无法知道真正会跑什么。 */}
-                <option value="">{configuredModel ?? '默认模型'}（配置）</option>
-                {models.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.displayName}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <MenuSelect
+              items={modelItems}
+              value={selectedModel ?? ''}
+              onChange={onSelectModel}
+              disabled={disabled}
+              title="模型"
+              ariaLabel="模型"
+            />
 
             {efforts.length > 0 && (
-              <label className="effort-picker" title="推理强度">
-                <select
-                  value={selectedEffort ?? ''}
-                  onChange={(e) => onSelectEffort(e.target.value || null)}
-                  disabled={disabled}
-                >
-                  {efforts.map((e) => (
-                    <option key={e} value={e}>
-                      {EFFORT_LABEL[e] ?? e}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <MenuSelect
+                items={effortItems}
+                value={selectedEffort ?? ''}
+                onChange={(v) => onSelectEffort(v || null)}
+                disabled={disabled}
+                title="推理强度"
+                ariaLabel="推理强度"
+              />
             )}
 
             {running && onStop ? (
-              <button className="send-btn stop" onClick={onStop} title="停止">
-                <span className="stop-glyph" />
+              <button className="send-btn stop" onClick={onStop} title="停止（Esc）">
+                <Icon name="stop" size={13} />
               </button>
             ) : (
               <button
@@ -287,7 +507,7 @@ export function Composer({
                 onClick={submit}
                 title="发送（Enter）"
               >
-                ↑
+                <Icon name="arrow-up" size={15} />
               </button>
             )}
           </div>

@@ -19,5 +19,6 @@ pub use service::{
     ModelOption, PermissionMode,
     PermissionProfile, ServiceConfig, SettingsSnapshot,
     PluginInfo, SkillInfo, TextChannel, ThreadInfo, ThreadSnapshot, ThreadSummary,
+    FileMatch,
     ThreadTokenUsage, TokenUsageBreakdown, TurnSnapshot,
 };

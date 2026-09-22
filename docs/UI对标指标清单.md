@@ -75,12 +75,15 @@
 | ID | 指标 | 参照 | KCode | 状态 | 优先级 |
 |---|---|---|---|---|---|
 | CS-01 | 底行上下文芯片 | 前提可见 | chips | ✅ | — |
+| CS-01b | 输入框：多行自适应 + ↑ 历史回溯 | 规格 04 §4.5 | **已落地**：`composerHistory.ts`（纯函数，20 项测试含草稿往返/边界）；方向键**只在光标处于首/末行时接管**，不抢多行文本导航 | ✅ | P1 |
+| CS-01c | 输入框视觉：图标化发送/停止 + 自绘下拉 | — | **已落地**：发送键由字符 `↑` 改为 `arrow-up` 图标、停止键由 CSS 方块改为 `stop` 图标；模型/强度由原生 `<select>`（macOS 浅色系统面板）改为自绘 `MenuSelect`（portal + 键盘导航）；`menu-select.test` 与 composer DOM 测试覆盖 | ✅ | P1 |
 | CS-02 | 模型后端查询 | 非硬编码 | models | ✅ | — |
 | CS-03 | effort 与模型并列 | 深度 | EFFORT_LABEL | ✅ | — |
 | CS-04 | 运行中停止 | 可中断 | onStop | ✅ | — |
 | CS-05 | 附件结构化发给模型 | 上下文 | serialize+测试 | ✅ | — |
-| CS-06 | Slash `/review` `/commit`… | 命令映射 | **无** | ❌ | P1 |
+| CS-06 | Slash `/review` `/commit`… | 命令映射 | **`/compact` 已落地**（`thread/compact/start`，e2e 对真 app-server 验证参数形状）；未知命令按普通文本发送（不做假命令，见 CS-11） | 🟡 | P1 |
 | CS-07 | AGENTS.md 预览 | 扩展层 | **无** | ❌ | P1 |
+| CS-06b | `@` 引用工作区文件 | 规格 04 §4.5 | **已落地**：`fuzzyFileSearch` → `searchFiles` → 输入框 `@` 候选（防抖 120ms、键盘导航、Esc 只关列表）；`atQueryAt` 纯函数 8 项测试**专防邮箱地址误触发**；协议细节见 `protocol-facts.md`（该方法用 snake_case，与其余方法不同） | ✅ | P1 |
 | CS-08 | Skills user/repo 分组 | skills/list | Library | ✅ | — |
 | CS-09 | 插件列表 | plugin/list | Library | ✅ | — |
 | CS-10 | 设置=实际生效+路径 | 可排查 | Settings | ✅ | — |
