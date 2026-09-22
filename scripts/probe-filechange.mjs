@@ -18,6 +18,7 @@ import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
+import { withLoopbackNoProxy } from './no-proxy-env.mjs';
 
 const BIN = process.argv[2];
 const DECISION = process.argv[4] ?? 'accept';
@@ -67,7 +68,7 @@ experimental_bearer_token = "x"
 `);
 
 const child = spawn(BIN, ['app-server', '--stdio'], {
-  cwd, env: { ...process.env, CODEX_HOME: home }, stdio: ['pipe', 'pipe', 'pipe'],
+  cwd, env: withLoopbackNoProxy({ ...process.env, CODEX_HOME: home }), stdio: ['pipe', 'pipe', 'pipe'],
 });
 
 const timeline = [];

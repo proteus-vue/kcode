@@ -13,6 +13,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { withLoopbackNoProxy } from './no-proxy-env.mjs';
 
 const BIN = process.argv[2] ?? 'codex';
 const home = mkdtempSync(join(tmpdir(), 'kcode-wb-home-'));

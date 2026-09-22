@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { withLoopbackNoProxy } from './no-proxy-env.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
@@ -189,7 +190,7 @@ try {
   section('1. 进程与握手');
   child = spawn(codexBin, ['app-server', '--stdio'], {
     cwd: workdir,
-    env: { ...process.env, CODEX_HOME: codexHome },
+    env: withLoopbackNoProxy({ ...process.env, CODEX_HOME: codexHome }),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   child.on('error', (e) => { console.error('子进程启动失败:', e.message); });

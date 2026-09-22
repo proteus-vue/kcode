@@ -78,7 +78,7 @@ impl JsonlTransport {
             .current_dir(&cfg.cwd)
             // 用独立 CODEX_HOME 隔离配置与历史，绝不触碰用户真实 ~/.codex
             .env("CODEX_HOME", &cfg.codex_home)
-            .envs(cfg.extra_env.iter())
+            .envs(cfg.child_env())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

@@ -926,6 +926,11 @@ pub fn request_id_from_key(key: &str) -> RequestId {
 }
 
 /// owner 循环：独占 transport，交替处理命令与事件。
+///
+/// 参数多是有意的：每一项都是 actor 拥有的**独占**资源（transport、两条消息
+/// 通道、事件广播、日志、投影器、两个路径）。打包成结构体只是把同样的字段
+/// 换个地方写，反而掩盖了「它们被同一个循环独占」这件事。
+#[allow(clippy::too_many_arguments)]
 async fn owner_loop(
     mut transport: JsonlTransport,
     mut inbound: InboundReceiver,

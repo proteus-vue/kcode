@@ -16,6 +16,12 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# 回环地址不该交给代理：codex 会使用系统代理，但不读系统代理设置里的例外列表。
+# 用本地 provider（KCODE_MODEL_BASE_URL 指向 127.0.0.1）时请求会被代理回 502，
+# 本脚本就会把「模型没跑起来」误判成「沙箱边界生效」。见 docs/协议勘误与修正.md §3.21。
+export NO_PROXY="127.0.0.1,localhost,::1${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="$NO_PROXY"
+
 BIN=""
 for c in \
   "$ROOT/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex" \

@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { withLoopbackNoProxy } from './no-proxy-env.mjs';
 
 const BIN = process.argv[2] ?? 'codex';
 const home = mkdtempSync(join(tmpdir(), 'kcode-settings-home-'));
@@ -54,7 +55,7 @@ const ok = (name, cond, detail = '') => {
 
 const child = spawn(BIN, ['app-server', '--stdio'], {
   cwd,
-  env: { ...process.env, CODEX_HOME: home },
+  env: withLoopbackNoProxy({ ...process.env, CODEX_HOME: home }),
   stdio: ['pipe', 'pipe', 'pipe'],
 });
 
@@ -134,7 +135,7 @@ try {
   {
     const bad = spawn(BIN, ['app-server', '--stdio'], {
       cwd,
-      env: { ...process.env, CODEX_HOME: brokenHome },
+      env: withLoopbackNoProxy({ ...process.env, CODEX_HOME: brokenHome }),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let b2 = '', i2 = 0;

@@ -18,6 +18,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { withLoopbackNoProxy } from './no-proxy-env.mjs';
 
 const BIN = process.argv[2] ?? 'codex';
 
@@ -48,7 +49,7 @@ experimental_bearer_token = "tok-beta"
 
 const child = spawn(BIN, ['app-server', '--stdio'], {
   cwd,
-  env: { ...process.env, CODEX_HOME: home },
+  env: withLoopbackNoProxy({ ...process.env, CODEX_HOME: home }),
   stdio: ['pipe', 'pipe', 'pipe'],
 });
 

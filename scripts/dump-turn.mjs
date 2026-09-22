@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { withLoopbackNoProxy } from './no-proxy-env.mjs';
 
 const BIN = process.argv[2];
 const DECISION = process.argv[3] ?? 'accept';
@@ -66,7 +67,7 @@ experimental_bearer_token = "x"
 
 // ── 启动 app-server 并记录全部报文 ────────────────────────────────
 const child = spawn(BIN, ['app-server', '--stdio'], {
-  cwd, env: { ...process.env, CODEX_HOME: home }, stdio: ['pipe', 'pipe', 'pipe'],
+  cwd, env: withLoopbackNoProxy({ ...process.env, CODEX_HOME: home }), stdio: ['pipe', 'pipe', 'pipe'],
 });
 
 const t0 = Date.now();

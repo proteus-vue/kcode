@@ -100,6 +100,11 @@ fn apply_bounds(view: &tauri::Webview<tauri::Wry>, x: f64, y: f64, w: f64, h: f6
 /// 复用同一个子 webview 而不是每次重建：重建会丢失页面状态
 /// （登录、滚动位置、未提交的表单），用户点开一个链接再点回来
 /// 发现要重新登录，会认为这个功能不可用。
+///
+/// `x/y/w/h` 是渲染矩形，刻意不并成结构体：它们直接对应前端量出的
+/// DOM 矩形字段，包一层只是多一次转换，还会让 Tauri 命令的参数结构
+/// 与前端不再逐字对应。
+#[allow(clippy::too_many_arguments)]
 pub fn open_browser(
     window: &Window<tauri::Wry>,
     state: &BrowserState,

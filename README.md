@@ -13,26 +13,33 @@
 
 **Phase 0（协议验证）与 Phase 1（最小可恢复闭环）的骨架已完成**，全部由本仓库脚本与测试自动执行：
 
-| 层 | 内容 | 测试 |
+| 层 | 内容 | 状态 |
 |---|---|---|
 | — | CLI 版本锁定 + 哈希校验（安全基线 0.39.0） | ✅ 0.155.1 |
 | — | 协议 schema + TS 绑定冻结、漂移检测 | ✅ 313 + 721 文件 |
-| — | 端到端协议契约（Node） | ✅ 22/22 |
-| **L1** | 适配层 `codex-bridge`：JSONL 拆包、三类报文分流、审批应答 | ✅ 34 |
-| **L2** | 领域层 `kcode-domain`：模型、风险分级、事件溯源、审计 | ✅ 62 |
-| **L0** | 编排层 `kcode-app`：actor 服务、领域事件、崩溃恢复 | ✅ 16 |
-| **—** | 变更集与 Diff：两通道解析、kind-aware 统计、审阅状态机 | ✅ 33 |
-| **—** | 验收测试：崩溃恢复、审批语义、长输出、并发隔离 | ✅ 12 |
+| — | 端到端协议契约（Node，3 个脚本） | ✅ |
+| **L1** | 适配层 `codex-bridge`：JSONL 拆包、三类报文分流、审批应答 | ✅ |
+| **L2** | 领域层 `kcode-domain`：模型、风险分级、事件溯源、审计 | ✅ |
+| **L0** | 编排层 `kcode-app`：actor 服务、领域事件、崩溃恢复 | ✅ |
+| — | 变更集与 Diff：两通道解析、kind-aware 统计、审阅状态机 | ✅ |
+| — | 验收测试：崩溃恢复、审批语义、长输出、并发隔离 | ✅ |
 | **L0** | 宿主层 `kcode-desktop`：Tauri 2 薄壳 + commands/events | ✅ 编译通过 |
-| **L3** | React 前端：**液态玻璃三栏 UI**、审批弹窗、Diff 审阅、流式输出、Markdown、模型选择 | ✅ 58 |
+| **L3** | React 前端：**液态玻璃三栏 UI**、审批弹窗、Diff 审阅、流式输出、Markdown、模型选择 | ✅ |
 
-合计 **198 项 Rust 测试 + 60 项前端测试 + 22 项协议契约**。
+<!-- test-stats:begin -->
+合计 **225 项 Rust 测试 + 160 项前端测试 + 56 项协议契约断言**——
+数字由 `scripts/test-stats.mjs` 实际运行统计，明细见 [`docs/test-stats.md`](docs/test-stats.md)。
+<!-- test-stats:end -->
+
+测试数字不在本文件里手工维护：`scripts/test-stats.mjs` 会真的跑一遍全部测试再统计，
+CI 比对其结果与本文、`docs/test-stats.md` 是否一致（与协议事实清单同一套做法）。
 
 **Phase 1 验收报告**见 [`docs/Phase1验收报告.md`](docs/Phase1验收报告.md)——
 含已验证项、**未执行项（如实记录）**，以及一处与预期不符的安全发现。
 
-下一步：真实模型验收（需凭据，见下方脚本）、worktree 管理、ChangeSet 审阅面板。
-实施计划见 [`docs/KCode落地方案.md`](docs/KCode落地方案.md)。
+尚未做的：真实模型验收（需凭据，见下方脚本）、worktree 创建与分支状态、
+`thread/archive`·`resume`·`fork` 生命周期，以及 Phase 2 的 granular approvals、
+`auto_review`、MCP、命令面板。实施计划见 [`docs/KCode落地方案.md`](docs/KCode落地方案.md)。
 
 ---
 
@@ -41,13 +48,14 @@
 ```bash
 npm install                  # 安装锁定依赖（含 codex 平台二进制）
 npm test                     # 版本校验 + 协议契约 + 前端单测
-cargo test --workspace       # Rust 全量测试（198 项）
+cargo test --workspace       # Rust 全量测试
 npm run tauri dev            # 启动桌面应用
 ```
 
 **全程离线、零凭据**：契约测试用本地 mock provider 冒充模型，不访问外网、不需要 API key、不污染你真实的 `~/.codex`（通过 `CODEX_HOME` 隔离，并校验 `initialize` 回传的 `codexHome`）。
 
-预期输出：Node 侧 `22/22 通过`，Rust 侧 198 项测试全绿，前端 60 项通过。
+预期输出：三个契约脚本各自 `N/N 通过`，Rust 与前端全绿——具体数字见
+[`docs/test-stats.md`](docs/test-stats.md)（自动生成）。
 
 ---
 
@@ -167,6 +175,7 @@ kcode/
 ├─ docs/
 │  ├─ KCode落地方案.md        实现规格书（修正版）
 │  ├─ protocol-facts.md       协议事实清单（自动生成，对账基准）
+│  ├─ test-stats.md           测试统计（自动生成，数字的单一来源）
 │  ├─ 协议勘误与修正.md        勘误记录与依据
 │  └─ archive/               v1.0 原始调研材料（溯源用）
 ├─ crates/
@@ -188,8 +197,10 @@ kcode/
 │  ├─ verify-codex-version.sh  CLI 版本 + SHA256 + 安全基线
 │  ├─ gen-schema.sh            schema 生成 / 漂移检测
 │  ├─ protocol-facts.mjs       生成协议事实清单
-│  ├─ contract-test.mjs        端到端契约测试（Node 参考实现）
-│  └─ mock-provider.mjs        本地 mock model provider
+│  ├─ contract-*.mjs           端到端契约测试（Node 参考实现，三套）
+│  ├─ mock-provider.mjs        本地 mock model provider
+│  ├─ no-proxy-env.mjs         让本地 provider 不被系统代理截走（见勘误 §3.21）
+│  └─ test-stats.mjs           测试数量统计 / 漂移检查
 ├─ schemas/                  冻结的协议 schema
 ├─ src/types/protocol/       generate-ts 冻结产物
 ├─ codex.lock.json           CLI 版本 + 哈希锁定
@@ -206,8 +217,10 @@ kcode/
 | `npm run verify:codex` | 校验 CLI 版本 ≥ 安全下限，且 SHA256 与锁定记录一致 |
 | `npm run gen:schema` | 重新生成 schema 与 TS 绑定 |
 | `npm run check:drift` | 检测协议是否相对冻结版本发生漂移（CI 用） |
-| `npm run contract` | 端到端契约测试（22 项断言） |
-| `npm test` | 版本校验 + 契约测试 + 前端单测 |
+| `npm run contract` | 端到端契约测试（需 codex 二进制） |
+| `npm test` | 版本校验 + 三个契约脚本 + 前端单测 |
+| `npm run stats` | **重新统计测试数量**并更新 `docs/test-stats.md` 与本文（会真的跑一遍全部测试） |
+| `npm run check:stats` | 比对测试数字是否漂移（CI 用） |
 | `bash scripts/verify-no-egress.sh` | **出站连接实时抓取**（验证零静默外发） |
 | `bash scripts/verify-tauri-capabilities.sh` | 校验 Tauri 权限声明（缺失会导致 IPC 静默失效） |
 | `bash scripts/verify-sandbox-boundary.sh` | **沙箱边界验收**（需模型凭据；验证临时目录写入面已关闭） |
@@ -254,10 +267,10 @@ initialize 握手（对象形态 + codexHome 校验）
 - **每个隐私开关都有可验证语义**，关闭后行为必须真正停止。
 - **默认关闭临时目录写入面**：`workspace-write` 默认把 `$TMPDIR` 也纳入可写集合
   且不弹审批，已在隔离配置中显式关闭（`exclude_tmpdir_env_var`）。
-- **一处上游出站已如实披露**：codex CLI 自身会尝试连接 OpenAI CDN 段
-  （模型元数据查询，无条件触发、无法关闭）。这不由 KCode 引入，
-  但已在 `SECURITY.md` 专节说明，且验收脚本单独计数报告——
-  详见 [`docs/Phase1验收报告.md`](docs/Phase1验收报告.md) §3。
+- **一处上游出站已如实披露**：codex CLI 自身会发起一次模型元数据拉取
+  （无条件触发、无法关闭；目标地址由本机 DNS 决定，实测未建立、无数据传输）。
+  这不由 KCode 引入，已在 `SECURITY.md` 专节说明，验收脚本**逐条归属**并单独计数——
+  详见 [`docs/协议勘误与修正.md`](docs/协议勘误与修正.md) §3.22。
 
 ---
 

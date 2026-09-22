@@ -24,6 +24,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE="${1:-$(mktemp -d)}"
 KEEP="${KEEP:-0}"
 
+# 回环地址不该交给代理：codex 会使用系统代理，但不读系统代理设置里的例外列表。
+# 用本地 relay / 本地模型（Ollama、LM Studio）时，请求会被代理回 502。
+# 见 docs/协议勘误与修正.md §3.21。
+export NO_PROXY="127.0.0.1,localhost,::1${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="$NO_PROXY"
+
 echo "════════ 真实模型验收 ════════"
 echo "工作区: $WORKSPACE"
 echo

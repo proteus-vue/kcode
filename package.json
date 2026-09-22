@@ -23,7 +23,9 @@
     "tauri": "tauri",
     "test": "npm run verify:codex && npm run contract && npm run contract:settings && npm run contract:workbench && npm run test:web",
     "contract:settings": "node scripts/contract-settings.mjs",
-    "contract:workbench": "node scripts/contract-workbench.mjs"
+    "contract:workbench": "node scripts/contract-workbench.mjs",
+    "stats": "node scripts/test-stats.mjs",
+    "check:stats": "node scripts/test-stats.mjs --check"
   },
   "devDependencies": {
     "@openai/codex": "0.155.1",
