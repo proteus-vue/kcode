@@ -1658,13 +1658,12 @@ body {
   background: rgba(255,255,255,0.07);
   border-color: var(--edge-soft);
 }
-.toggle-btn .icon { transition: transform .2s cubic-bezier(.4,0,.2,1); }
-/* 箭头指向「点下去之后面板会去哪」：
-   左栏展开时指向左（收起），折叠后指向右（弹出）。右栏相反。 */
-.toggle-left .icon { transform: rotate(180deg); }
-.toggle-left[aria-pressed='true'] .icon { transform: rotate(0deg); }
-.toggle-right .icon { transform: rotate(0deg); }
-.toggle-right[aria-pressed='true'] .icon { transform: rotate(180deg); }
+/* 面板开关图标自带方向（panel-left / panel-right 画出面板与高亮列），
+   **不再靠 CSS 旋转表达方向**——上一版用 chevron 旋转 180° 得到「收起」，
+   图标本身没有信息量。折叠态改由不透明度区分：展开时高亮列清晰，
+   折叠时整体压暗，一眼能看出「这一栏当前是收起的」。 */
+.toggle-btn .icon { transition: opacity .18s ease; }
+.toggle-btn[aria-pressed='true'] .icon { opacity: .55; }
 /* 折叠状态下按钮常亮：用户需要知道「这里能把面板叫回来」 */
 .toggle-btn[aria-pressed='true'] { color: var(--t2); }
 

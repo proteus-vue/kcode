@@ -131,7 +131,7 @@
 | VS-09 | 自动滚动不抢用户滚动条 | — | `autoScroll.ts` + `useAutoScroll`，上滑即停并出「回到底部」 | ✅ |
 | VS-10 | 工具调用卡片默认折叠 | — | ToolRow 默认折叠 | ✅ |
 | VS-11 | 内容沉浸到顶部导航之下 | Codex toolbar 在 y=0，内容从其下穿过 | 中栏顶栏改**浮动**（absolute + 底部渐隐 + backdrop 模糊），`.main` 不再让出 40px 标题栏带；顶部留白做在滚动容器内边距上（随内容滚走，内容才能穿过） | ✅ |
-| VS-12 | 自建图标集（非拼凑） | 三家均为自有图标 | `Icon.tsx` 30 枚全部重构：16×16 网格 + 统一描边 + JSX 片段（`rect rx`/`circle r` 保证圆角）；规范由 `__tests__/iconSet.test.ts` 9 项守卫；渲染实测修正 `edit`（曾像匕首）与 `wrench`（曾像放大镜/棒棒糖） | ✅ |
+| VS-12 | 自建图标集（非拼凑） | 三家均为自有图标 | `Icon.tsx` 35 枚（原 30 + `new-chat`/`chat`/`diff`/`panel-left`/`panel-right`）：16×16 网格 + 统一描边 + JSX 片段（`rect rx`/`circle r` 保证圆角）；规范由 `__tests__/iconSet.test.ts` 9 项守卫；每个图标均渲染成图目视核验（修正 `edit` 曾像匕首、`wrench` 曾像放大镜/棒棒糖、面板开关曾经的裸 chevron 旋转） | ✅ |
 
 **VS-06 偏离理由**：折叠到 0 是我们当前的行为，实测可用（顶栏有显式开关按钮
 与 ⌘B 快捷键，不会出现「关了就打不开」）。但确实不如 62px 图标栏——折叠后

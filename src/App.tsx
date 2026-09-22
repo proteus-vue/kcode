@@ -370,7 +370,7 @@ export default function App() {
             onClick={layout.toggleLeft}
             title={layout.leftCollapsed ? '展开侧栏（⌘B）' : '折叠侧栏（⌘B）'}
           >
-            <Icon name="chevron" size={12} />
+            <Icon name="panel-left" size={14} />
           </button>
         </div>
         <div className="toggle-group">
@@ -380,7 +380,7 @@ export default function App() {
             onClick={layout.toggleRight}
             title={layout.rightCollapsed ? '展开面板（⌘⌥B）' : '折叠面板（⌘⌥B）'}
           >
-            <Icon name="chevron" size={12} />
+            <Icon name="panel-right" size={14} />
           </button>
         </div>
       </div>

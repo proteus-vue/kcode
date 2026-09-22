@@ -107,7 +107,7 @@ export function Sidebar({
 
       <nav className="sb-nav">
         <button className="nav-item accent" onClick={onNewChat}>
-          <Icon name="plus" size={14} />
+          <Icon name="new-chat" size={14} />
           <span>新对话</span>
         </button>
         <button className="nav-item" disabled title="尚未实现">

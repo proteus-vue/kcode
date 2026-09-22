@@ -24,17 +24,20 @@ export type WorkbenchScene =
 export interface SceneMeta {
   id: WorkbenchScene;
   label: string;
-  icon: 'edit' | 'terminal' | 'compass' | 'folder' | 'plus';
+  icon: 'diff' | 'terminal' | 'compass' | 'folder' | 'chat';
   /** 快捷键提示（仅展示，不注册——注册了却与系统键冲突更糟）。 */
   shortcut: string;
 }
 
 export const SCENES: SceneMeta[] = [
-  { id: 'review', label: '审查', icon: 'edit', shortcut: '⌘⇧G' },
+  // 审查用「左右面板 + 增删号」而不是铅笔：铅笔与「编辑」撞义，
+  // 而这个面板展示的正是逐文件增删。
+  { id: 'review', label: '审查', icon: 'diff', shortcut: '⌘⇧G' },
   { id: 'terminal', label: '终端', icon: 'terminal', shortcut: '⌘`' },
   { id: 'browser', label: '浏览器', icon: 'compass', shortcut: '⌘T' },
   { id: 'files', label: '文件', icon: 'folder', shortcut: '⌘P' },
-  { id: 'chat', label: '侧边聊天', icon: 'plus', shortcut: '⌘⇧S' },
+  // 侧边聊天此前错用 plus（加号表示「新建」，与「聊天」无关）。
+  { id: 'chat', label: '侧边聊天', icon: 'chat', shortcut: '⌘⇧S' },
 ];
 
 /**

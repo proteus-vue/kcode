@@ -15,6 +15,11 @@ import { Icon, type IconName } from '../Icon';
 /** 全部图标名（与 Icon.tsx 的 IconName 联合类型一一对应）。 */
 const ALL: IconName[] = [
   'plus',
+  'new-chat',
+  'chat',
+  'diff',
+  'panel-left',
+  'panel-right',
   'search',
   'clock',
   'plugin',
@@ -114,9 +119,10 @@ describe('图标集规范', () => {
     }
   });
 
-  it('实心填充只用于点类图标（more / dot）', () => {
-    // 其余图标靠描边成形，一旦出现 fill 会被填成一坨
-    const solidOk = new Set<IconName>(['more', 'dot']);
+  it('实心填充只用于点类图标与面板高亮列', () => {
+    // 其余图标靠描边成形，一旦出现 fill 会被填成一坨。
+    // panel-left/right 是刻意例外：纯描边无法表达「这一列被选中」。
+    const solidOk = new Set<IconName>(['more', 'dot', 'panel-left', 'panel-right']);
     for (const name of ALL) {
       if (solidOk.has(name)) continue;
       for (const s of shapes(name)) {
@@ -129,8 +135,8 @@ describe('图标集规范', () => {
     }
   });
 
-  it('点类图标的填充色为 currentColor（能随状态变色）', () => {
-    for (const name of ['more', 'dot'] as IconName[]) {
+  it('点类与高亮列图标的填充色为 currentColor（能随状态变色）', () => {
+    for (const name of ['more', 'dot', 'panel-left', 'panel-right'] as IconName[]) {
       const filled = shapes(name).filter((s) => s.attrs.fill === 'currentColor');
       expect(filled.length, `图标 ${name} 应有实心形状`).toBeGreaterThan(0);
     }
