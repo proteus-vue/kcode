@@ -502,3 +502,38 @@ export interface ImageAttachment {
 
 /** 输入区可携带的附件。 */
 export type ComposerAttachment = WebElementAttachment | ImageAttachment;
+
+/** adb 可见的设备。 */
+export interface AdbDevice {
+  serial: string;
+  /** `device` / `offline` / `unauthorized` … */
+  state: string;
+  model: string | null;
+}
+
+/** iOS 侧可用性。不可用时 `reason` 含原因与安装指引。 */
+export interface IosStatus {
+  available: boolean;
+  reason: string | null;
+}
+
+/** Android 侧可用性。 */
+export interface AndroidStatus {
+  available: boolean;
+  reason: string | null;
+  avds: string[];
+  devices: AdbDevice[];
+}
+
+/** 模拟器整体可用性（由后端探测本机工具链得出）。 */
+export interface SimulatorStatus {
+  ios: IosStatus;
+  android: AndroidStatus;
+}
+
+/** 一帧画面及其设备尺寸（用于坐标换算）。 */
+export interface SimulatorFrame {
+  dataUrl: string;
+  width: number;
+  height: number;
+}

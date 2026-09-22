@@ -18,6 +18,7 @@ import type {
   PluginInfo,
   SettingsSnapshot,
   SkillInfo,
+  SimulatorStatus,
   RightContent,
   ThreadSnapshot,
   WebElementAttachment,
@@ -135,8 +136,13 @@ export interface KcodeApi {
   reloadSettings: () => Promise<void>;
   /** 模糊搜索工作区文件（输入框 `@` 引用）。失败时返回空列表。 */
   searchFiles: (query: string) => Promise<FileMatch[]>;
+
   /** 请求压缩当前线程上下文（`/compact`）。 */
   compactThread: () => Promise<void>;
+  /** 模拟器可用性（null = 未探测/不可用）。 */
+  simulator: SimulatorStatus | null;
+  /** 探测模拟器可用性。 */
+  probeSimulator: () => Promise<void>;
   /** 订阅连接级事件（终端输出）。返回取消订阅函数。 */
   subscribe: (fn: (e: AppEvent) => void) => () => void;
   /** 把选中的网页元素作为附件加入输入框。 */
@@ -179,6 +185,8 @@ export function useKcode(): KcodeApi {
   const [searchTerm, setSearchTerm] = useState('');
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
+  /** 模拟器可用性（null = 尚未探测或不可用）。 */
+  const [simulator, setSimulator] = useState<SimulatorStatus | null>(null);
   // 用 ref 持有 openThread，避免 startRuntime 与 openThread 的相互依赖
   const openThreadRef = useRef<((id: string) => Promise<void>) | null>(null);
   const activeRef = useRef<string | null>(null);
@@ -398,6 +406,23 @@ export function useKcode(): KcodeApi {
       return await invoke<FileMatch[]>('fuzzy_search_files', { query: query.trim() });
     } catch {
       return [];
+    }
+  }, []);
+
+  /**
+   * 探测模拟器可用性（Android 的 emulator+adb；iOS 的完整 Xcode）。
+   *
+   * **由后端探测而非前端猜**：可用性取决于本机装了什么工具。写死会让菜单
+   * 出现一个点开只有报错的入口——参照客户端在未装 Xcode 时给的是明确提示，
+   * 而不是假装可用（本机实测即此情形）。
+   * 失败时保持 null（= 不可用），不弹错：这是环境信息，不是操作失败。
+   */
+  const probeSimulator = useCallback(async () => {
+    if (!inTauri()) return;
+    try {
+      setSimulator(await invoke<SimulatorStatus>('simulator_probe'));
+    } catch {
+      setSimulator(null);
     }
   }, []);
 
@@ -657,6 +682,8 @@ export function useKcode(): KcodeApi {
     reloadSettings,
     searchFiles,
     compactThread,
+    simulator,
+    probeSimulator,
     rightContent,
     openInRight: setRightContent,
     appendComposer: useCallback((el: WebElementAttachment) => setPendingInput(el), []),

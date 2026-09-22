@@ -24,6 +24,7 @@ kcode-bridge = { path = "../kcode-bridge" }
 # （原生视图），不是 iframe。iframe 会被绝大多数站点的 X-Frame-Options /
 # CSP frame-ancestors 拒绝，做不到「内置浏览器」。
 tauri = { version = "2", features = ["unstable"] }
-tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
+# process：模拟器命令需要超时控制（adb 在设备 offline 时会一直阻塞）。
+tokio = { version = "1", features = ["sync", "time", "rt", "macros", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

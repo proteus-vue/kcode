@@ -21,6 +21,7 @@ import { useSlotRect } from './components/RightTabs';
 import { BrowserPanel } from './components/BrowserPanel';
 import { Workbench } from './components/Workbench';
 import { TerminalPanel } from './components/TerminalPanel';
+import { SimulatorPanel } from './components/SimulatorPanel';
 import { FileTree } from './components/FileTree';
 import { fitViewport } from './components/viewportSize';
 import {
@@ -100,6 +101,7 @@ export default function App() {
 
   useEffect(() => {
     void api.startRuntime();
+    void api.probeSimulator();
     // 仅在挂载时启动一次运行时
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -305,6 +307,11 @@ export default function App() {
     files: Boolean(api.env?.workspace),
     // 侧边聊天：有线程上下文才有意义（技能/插件/设置都依赖已连接的运行时）
     chat: Boolean(api.env?.workspace),
+    // 模拟器：**由后端探测本机工具链**决定。Android 需要 emulator+adb，
+    // iOS 需要完整 Xcode。不给空入口——不可用时不出现（本机未装完整
+    // Xcode，于是 iOS 侧不可用；Android 侧可用）。
+    // 注意判据含 `devices.length` 之外的 avds：能启动的才叫可用。
+    simulator: Boolean(api.simulator && (api.simulator.android.available || api.simulator.ios.available)),
   };
 
   /**
@@ -656,6 +663,10 @@ export default function App() {
               cwd={api.env?.workspace ?? null}
               events={{ subscribe: api.subscribe }}
             />
+          )}
+
+          {effectiveScene === 'simulator' && (
+            <SimulatorPanel status={api.simulator} onRefreshStatus={() => void api.probeSimulator()} />
           )}
 
           {effectiveScene === 'browser' && (

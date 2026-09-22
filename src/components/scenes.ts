@@ -19,12 +19,13 @@ export type WorkbenchScene =
   | 'terminal'
   | 'browser'
   | 'files'
-  | 'chat';
+  | 'chat'
+  | 'simulator';
 
 export interface SceneMeta {
   id: WorkbenchScene;
   label: string;
-  icon: 'diff' | 'terminal' | 'compass' | 'folder' | 'chat';
+  icon: 'diff' | 'terminal' | 'compass' | 'folder' | 'chat' | 'devices';
   /** 快捷键提示（仅展示，不注册——注册了却与系统键冲突更糟）。 */
   shortcut: string;
 }
@@ -38,6 +39,10 @@ export const SCENES: SceneMeta[] = [
   { id: 'files', label: '文件', icon: 'folder', shortcut: '⌘P' },
   // 侧边聊天此前错用 plus（加号表示「新建」，与「聊天」无关）。
   { id: 'chat', label: '侧边聊天', icon: 'chat', shortcut: '⌘⇧S' },
+  // 模拟器：Android 走 adb（实时截图 + 输入），iOS 需要完整 Xcode。
+  // 不可用时**不出现在菜单里**（与其它场景一致：不给空入口），
+  // 可用性由后端探测——本机没装完整 Xcode 时 iOS 侧就不可用。
+  { id: 'simulator', label: '模拟器', icon: 'devices', shortcut: '' },
 ];
 
 /**
@@ -53,6 +58,14 @@ export interface SceneAvailability {
   browser: boolean;
   files: boolean;
   chat: boolean;
+  /**
+   * 模拟器是否可用。
+   *
+   * 判据是**后端探测到的工具链是否齐全**（Android 需要 emulator + adb；
+   * iOS 需要完整 Xcode 的 simctl），不是写死的 `true`——
+   * 本机未装完整 Xcode，写死会让菜单出现一个点开只有报错的入口。
+   */
+  simulator: boolean;
 }
 
 export function availableScenes(a: SceneAvailability): SceneMeta[] {

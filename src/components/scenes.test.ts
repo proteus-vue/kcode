@@ -20,25 +20,44 @@ const none: SceneAvailability = {
   terminal: false,
   browser: false,
   files: false,
-  chat: false,
+  chat: false, simulator: false,
 };
 const all: SceneAvailability = {
   review: true,
   terminal: true,
   browser: true,
   files: true,
-  chat: true,
+  chat: true, simulator: true,
 };
 
 describe('工作台场景清单', () => {
-  it('包含参照里的五个场景', () => {
-    expect(SCENES.map((s) => s.label)).toEqual(['审查', '终端', '浏览器', '文件', '侧边聊天']);
+  it('包含参照里的六个场景（模拟器为参照之外的自有能力）', () => {
+    // 前五个对齐参照（Codex 右栏的「+」菜单）；模拟器取自 MiMo，
+    // 是我们用后端探测的工具链真做出来的能力，不是装饰性条目。
+    expect(SCENES.map((s) => s.label)).toEqual([
+      '审查',
+      '终端',
+      '浏览器',
+      '文件',
+      '侧边聊天',
+      '模拟器',
+    ]);
   });
 
-  it('每个场景都有图标与快捷键提示', () => {
+  it('每个场景都有图标', () => {
     for (const s of SCENES) {
-      expect(s.icon).toBeTruthy();
-      expect(s.shortcut).toBeTruthy();
+      expect(s.icon, `${s.label} 缺图标`).toBeTruthy();
+    }
+  });
+
+  it('除模拟器外都有快捷键提示（模拟器未注册快捷键，不该编一个）', () => {
+    for (const s of SCENES) {
+      if (s.id === 'simulator') {
+        // 没有注册的快捷键就不要写提示——写了会让人按了没反应
+        expect(s.shortcut, '模拟器没有快捷键，不该编一个').toBe('');
+        continue;
+      }
+      expect(s.shortcut, `${s.label} 缺快捷键提示`).toBeTruthy();
     }
   });
 });

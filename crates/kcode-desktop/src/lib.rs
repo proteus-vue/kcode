@@ -12,6 +12,7 @@
 
 pub mod browser;
 pub mod fileaccess;
+pub mod simulator;
 
 use kcode_app::{AgentService, AppEvent, ServiceConfig};
 use kcode_bridge::SpawnConfig;
@@ -725,6 +726,57 @@ fn store_attachment(
     })
 }
 
+/// 探测本机模拟器可用性（Android / iOS）。
+#[tauri::command]
+async fn simulator_probe() -> Result<simulator::SimulatorStatus, CommandError> {
+    Ok(simulator::probe().await)
+}
+
+/// 启动一个 Android 模拟器。
+#[tauri::command]
+async fn simulator_start(avd: String) -> Result<(), CommandError> {
+    simulator::start(&avd).await.map_err(CommandError::from)
+}
+
+/// 关闭一个运行中的模拟器。
+#[tauri::command]
+async fn simulator_stop(serial: String) -> Result<(), CommandError> {
+    simulator::stop(&serial).await.map_err(CommandError::from)
+}
+
+/// 取一帧模拟器画面（data URL + 设备尺寸）。
+#[tauri::command]
+async fn simulator_frame(serial: String) -> Result<SimulatorFrame, CommandError> {
+    let (data_url, width, height) = simulator::frame(&serial).await.map_err(CommandError::from)?;
+    Ok(SimulatorFrame { data_url, width, height })
+}
+
+/// 一帧画面及其设备尺寸（前端据此换算点击坐标）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SimulatorFrame {
+    data_url: String,
+    width: u32,
+    height: u32,
+}
+
+/// 向模拟器发送输入（tap / swipe / back / home），坐标为设备坐标。
+#[tauri::command]
+async fn simulator_input(
+    serial: String,
+    action: String,
+    x1: Option<i64>,
+    y1: Option<i64>,
+    x2: Option<i64>,
+    y2: Option<i64>,
+    duration_ms: Option<u64>,
+) -> Result<(), CommandError> {
+    let (x1, y1, x2, y2) = (x1.unwrap_or(0), y1.unwrap_or(0), x2.unwrap_or(0), y2.unwrap_or(0));
+    simulator::input(&serial, &action, x1, y1, x2, y2, duration_ms.unwrap_or(120))
+        .await
+        .map_err(CommandError::from)
+}
+
 /// 保存**粘贴**的图片附件（剪贴板只有字节，没有路径）。
 ///
 /// 协议的图片输入只有 `localImage`（本地路径）与 `image`（URL）两种，
@@ -1013,6 +1065,11 @@ pub fn run() {
             save_attachment,
             attach_local_image,
             read_attachment_image,
+            simulator_probe,
+            simulator_start,
+            simulator_stop,
+            simulator_frame,
+            simulator_input,
             fuzzy_search_files,
             compact_thread,
             list_plugins,

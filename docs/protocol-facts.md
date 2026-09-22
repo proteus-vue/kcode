@@ -402,3 +402,22 @@ approvalPolicy: anyOf, approvalsReviewer: anyOf, baseInstructions: string|null, 
 - `windows/worldWritableWarning`
 - `windowsSandbox/setupCompleted`
 
+## 模拟器（非协议能力，本机工具链）
+
+模拟器展示不经过 codex 协议，直接调用本机工具。实测（macOS 26.5，本机）：
+
+| 平台 | 工具 | 状态 |
+|---|---|---|
+| Android | `$ANDROID_HOME/emulator/emulator` + `platform-tools/adb` | **可用**：2 个 AVD；`adb -s <serial> exec-out screencap -p` 输出 1080×2340 PNG，单帧约 350ms |
+| iOS | `xcrun simctl` | **不可用**：只有 CommandLineTools，没有完整 Xcode（`simctl` 不存在） |
+
+### 两条踩到的命令细节
+
+1. **输入必须经 `shell` 转发**：`adb -s X input tap 100 200` 会被 adb 当成自己的
+   子命令，报 `adb: unknown command input`。正确形式是
+   `adb -s X shell input tap 100 200`。截图用 `exec-out` 没问题（那是 adb 自己的子命令）。
+   这个错误在纯单元测试里发现不了，由真机测试抓到。
+2. **`adb devices` 第一行是表头**（`List of devices attached`），必须跳过，
+   否则界面会多出一个叫 "List" 的假设备。
+3. `offline` / `unauthorized` 的设备上执行 `screencap` 会**一直阻塞**而不是失败，
+   所以：只选 `state == "device"` 的设备，且所有命令都设 3 秒超时。
