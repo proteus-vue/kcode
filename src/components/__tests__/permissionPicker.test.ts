@@ -55,3 +55,81 @@ describe('权限浮层不被祖先裁剪', () => {
     expect(menuIdx).toBeGreaterThan(portalIdx);
   });
 });
+
+/**
+ * 危险档位的悬浮态不得被通用 hover 压掉。
+ *
+ * # 这个测试在防什么
+ *
+ * `.perm-trigger:hover:not(:disabled)` 的特异性是 (0,3,0)——`:not()` 会把它
+ * 括号里的选择器计入，`:disabled` 白送一级。而 `.perm-trigger.is-danger`
+ * 只有 (0,2,0)。于是鼠标悬浮在「完全访问」上时：背景/文字/边框被换成常规
+ * 灰色，但 `.perm-trigger.is-danger .icon`（(0,3,0)，靠顺序胜出）仍是黄色
+ * ——出现「灰底 + 白字 + 黄图标」的混色态。真机截图确认过。
+ *
+ * 这类问题在 DOM 测试里完全看不出来（jsdom 不做样式计算），
+ * 只有真机悬停才暴露。因此这里做**特异性静态检查**：任何 `.X.is-danger`
+ * 的 hover 规则，其特异性必须不低于同元素的通用 `:hover` 规则。
+ */
+describe('危险态悬浮不被通用 hover 覆盖（特异性检查）', () => {
+  /** 粗略但可靠地数特异性：id(#)、类/属性/伪类(. : [)、元素。 */
+  function specificity(selector: string): [number, number, number] {
+    const s = selector.trim();
+    const ids = (s.match(/#[\w-]+/g) ?? []).length;
+    // 伪元素（::before）不计入类级
+    const classes = (s.match(/\.[\w-]+/g) ?? []).length + (s.match(/\[[^\]]+\]/g) ?? []).length;
+    // `:not(X)` 计入 X 的特异性；这里把 :not(...) 内的选择器内容也数进去
+    const notInner = [...s.matchAll(/:not\(([^)]*)\)/g)].map((m) => m[1]).join(' ');
+    const pseudoClasses =
+      (s.match(/:(?!:)[\w-]+/g) ?? []).length + (notInner.match(/\.[\w-]+/g) ?? []).length;
+    const elements = (s.match(/(^|[\s>+~])[a-zA-Z][\w-]*/g) ?? []).length;
+    return [ids, classes + pseudoClasses, elements];
+  }
+
+  function compare(a: [number, number, number], b: [number, number, number]): number {
+    for (let i = 0; i < 3; i++) {
+      if (a[i] !== b[i]) return a[i] - b[i];
+    }
+    return 0;
+  }
+
+  /** 收集所有匹配某模式的规则（选择器 + 声明块起始位置）。 */
+  function rulesMatching(re: RegExp): { selector: string; index: number }[] {
+    const out: { selector: string; index: number }[] = [];
+    // 选择器必须限制在**单行内**：`[^{]` 允许换行，会连同选择器上方的
+    // 注释块一起吞进来（注释里没有 `{`），导致匹配失败。
+    const lineRe = /^([^\n{][^\n{]*)\{/gm;
+    let m: RegExpExecArray | null;
+    while ((m = lineRe.exec(css))) {
+      const sel = m[1].trim();
+      if (re.test(sel)) out.push({ selector: sel, index: m.index });
+    }
+    return out;
+  }
+
+  it('危险触发按钮的 hover 特异性不低于通用 hover', () => {
+    const generic = rulesMatching(/^\.perm-trigger:hover/);
+    const danger = rulesMatching(/^\.perm-trigger\.is-danger:hover/);
+
+    expect(generic.length, '未找到通用 hover 规则').toBeGreaterThan(0);
+    expect(
+      danger.length,
+      '缺少危险态专用 hover 规则 —— 悬浮时会被通用 hover 换成灰色，与黄色图标混色',
+    ).toBeGreaterThan(0);
+
+    const g = specificity(generic[0].selector);
+    const d = specificity(danger[0].selector);
+    // 危险态必须 ≥ 通用态，且**顺序在后**（源码里更靠后）
+    expect(compare(d, g), `危险态 ${d} 必须不低于通用态 ${g}`).toBeGreaterThanOrEqual(0);
+    expect(danger[0].index, '危险态 hover 规则应写在通用 hover 之后').toBeGreaterThan(
+      generic[0].index,
+    );
+  });
+
+  it('危险态 hover 仍使用警示色（不是普通灰）', () => {
+    const danger = rulesMatching(/^\.perm-trigger\.is-danger:hover/);
+    const body = css.slice(danger[0].index, css.indexOf('}', danger[0].index));
+    expect(body, '危险态 hover 应保留 warn 色').toContain('var(--warn)');
+    expect(body).not.toContain('rgba(255, 255, 255');
+  });
+});

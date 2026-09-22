@@ -20,6 +20,7 @@
  */
 
 import { useMemo, useState } from 'react';
+import { Icon } from './Icon';
 import type { ChangeSet, FileChangeEntry, ParsedDiff } from '../types/domain';
 import {
   changeKindClass,
@@ -156,7 +157,12 @@ function FileRow({
   return (
     <div className={`diff-file decision-${decision}`}>
       <div className="diff-file-head" onClick={onToggle}>
-        <span className={`file-toggle ${expanded ? 'open' : ''}`}>{expanded ? '▾' : '▸'}</span>
+        {/* caret 用 chevron 图标而非 `▾`/`▸` 字符：字符是实心三角，
+            与文件树、工具行的 chevron 不同构；且两个字符是两套字形，
+            切换时形状会跳变——图标用同一个 glyph 靠旋转表达开合。 */}
+        <span className={`file-toggle ${expanded ? 'open' : ''}`}>
+          <Icon name="chevron" size={10} />
+        </span>
         <span className={`change-kind ${changeKindClass(entry.kind)}`}>
           {changeKindLabel(entry.kind)}
         </span>

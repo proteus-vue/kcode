@@ -22,6 +22,14 @@ import type { PermissionMode } from '../types/domain';
 interface ModeInfo {
   mode: PermissionMode;
   label: string;
+  /**
+   * 触发按钮上显示的短名（省略则用 `label`）。
+   *
+   * 只给「完全访问权限」配短名：它比另外两档长一半，把上下文条挤得很宽，
+   * 而「完全访问」四个字已经完整表达了意思。浮层里仍用全称——
+   * 那里有空间，且是用户做决定的地方，措辞值得完整。
+   */
+  shortLabel?: string;
   hint: string;
   /** 会导致不可逆后果的档位：用警示色，并在切换时二次确认。 */
   danger?: boolean;
@@ -47,6 +55,7 @@ const MODES: ModeInfo[] = [
   {
     mode: 'fullAccess',
     label: '完全访问权限',
+    shortLabel: '完全访问',
     hint: '不受限制地访问互联网和你电脑上的任何文件',
     danger: true,
   },
@@ -131,8 +140,13 @@ export function PermissionPicker({
             曾用 ✕ 表示危险档位——但 ✕ 的通用含义是「关闭/取消」，
             放在这里会被读成「点一下就关掉这个功能」。 */}
         <Icon name="shield" size={11} />
-        <span className="perm-trigger-label">{active?.label ?? '读取中…'}</span>
-        <span className="perm-caret">⌄</span>
+        {/* 触发按钮用短名，浮层里用全称（见 ModeInfo.shortLabel）。 */}
+        <span className="perm-trigger-label">{active?.shortLabel ?? active?.label ?? '读取中…'}</span>
+        {/* caret 用图标而非 `⌄` 字符：字符随字体渲染，字重与线宽与其他
+            图标对不齐，而且它与 Chevron 图标的形状本就不同。 */}
+        <span className="perm-caret">
+          <Icon name="chevron" size={10} />
+        </span>
       </button>
 
       {open &&
@@ -173,7 +187,11 @@ export function PermissionPicker({
                       <span className="perm-item-label">{m.label}</span>
                       <span className="perm-item-hint">{m.hint}</span>
                     </span>
-                    {isActive && <span className="perm-check">✓</span>}
+                    {isActive && (
+                      <span className="perm-check">
+                        <Icon name="check" size={13} />
+                      </span>
+                    )}
                   </button>
                 );
               })}

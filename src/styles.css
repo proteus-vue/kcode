@@ -846,7 +846,15 @@ body {
   padding: 8px 14px; cursor: pointer; transition: background .12s;
 }
 .diff-file-head:hover { background: rgba(255,255,255,0.035); }
-.file-toggle { color: var(--t4); width: 9px; font-size: 9px; }
+/* caret 现为 chevron 图标：与文件树 .tree-caret 同构——
+   同一个 glyph，靠旋转表达开合，展开时箭头向下（默认指向右）。 */
+.file-toggle {
+  color: var(--t4); width: 12px;
+  display: inline-flex; justify-content: center; align-items: center;
+  flex-shrink: 0;
+  transition: transform .14s;
+}
+.file-toggle.open { transform: rotate(90deg); }
 .change-kind {
   font-size: 10px; padding: 1px 7px; border-radius: var(--r-xs);
   font-weight: 600; flex-shrink: 0; font-family: var(--sans);
@@ -1791,7 +1799,10 @@ body {
 .perm-trigger:disabled { cursor: default; opacity: .6; }
 .perm-trigger .icon { color: var(--t3); flex-shrink: 0; }
 .perm-trigger-label { max-width: 96px; overflow: hidden; text-overflow: ellipsis; }
-.perm-caret { color: var(--t4); font-size: 10px; line-height: 1; }
+/* caret 现为 SVG 图标（原为 `⌄` 字符）：需要网格居中，
+   并旋转成「向下」。chevron 本身指向右，与 MenuSelect 的处理保持一致。 */
+.perm-caret { display: grid; place-items: center; color: var(--t4); }
+.perm-caret .icon { transform: rotate(90deg); }
 
 /* 危险档位用警示色常驻提示：用户忘了自己切过是最危险的 */
 .perm-trigger.is-danger {
@@ -1800,6 +1811,25 @@ body {
   border-color: rgba(251, 191, 36, 0.32);
 }
 .perm-trigger.is-danger .icon, .perm-trigger.is-danger .perm-caret { color: var(--warn); }
+
+/* 危险档位的 hover 必须**单独写**。
+ *
+ * 上面那条 `.perm-trigger:hover:not(:disabled)` 的特异性是 (0,3,0)——
+ * `:not()` 会把它括号里的选择器算进去，`:disabled` 白送一级——
+ * 而 `.perm-trigger.is-danger` 只有 (0,2,0)。于是 hover 时背景/文字/边框
+ * 被换成常规灰色，而 `.perm-trigger.is-danger .icon`（(0,3,0)，靠顺序胜出）
+ * 仍是黄色：出现「灰底 + 白字 + 黄图标」的混色态。
+ *
+ * 实测就是截图里那个异常悬浮态。修法不是加大 !important，而是让危险态
+ * 的 hover 与它同特异性（这里 (0,3,0) ≥ (0,3,0) 且顺序在后）。
+ */
+.perm-trigger.is-danger:hover:not(:disabled) {
+  color: var(--warn);
+  background: rgba(251, 191, 36, 0.22);
+  border-color: rgba(251, 191, 36, 0.48);
+}
+.perm-trigger.is-danger:hover:not(:disabled) .icon,
+.perm-trigger.is-danger:hover:not(:disabled) .perm-caret { color: var(--warn); }
 
 /* 浮层容器：portal 到 body，fixed 定位，坐标由 JS 按触发按钮测量。
    不能留在 .ctx-chips 内部——那里有 overflow: hidden，
