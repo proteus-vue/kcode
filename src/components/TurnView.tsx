@@ -68,14 +68,28 @@ export function TurnView({
             streaming={isStreaming(state, item)}
           />
         ))}
-        {/* 尚未产生 Item 但已有流式内容时，仍需显示——否则开头几秒是空白的 */}
+        {/* 尚未产生 Item 但已有流式内容时，仍需显示——否则开头几秒是空白的。
+            **必须同时排除属于其他轮次的内容**：只判 `!turn.itemIds.includes(id)`
+            的话，新轮次的流式内容会出现在**每一个**历史轮次下面——
+            用户看到已完成的对话跟着下面的新对话一起更新，
+            而且旧轮次看起来也在「运行中」。这是真实出现过的错乱。 */}
         {(() => {
           const tid = findThreadIdOf(state, threadId);
-          const pending = tid
-            ? Object.entries(state.threads[tid]?.streamBuffer ?? {}).filter(
-                ([id]) => !turn.itemIds.includes(id),
-              )
-            : [];
+          if (!tid) return null;
+          const th = state.threads[tid];
+          if (!th) return null;
+          // 全线程已归位的 item：出现在任意轮次里都算已归位
+          const placed = new Set<string>();
+          for (const t of th.turnOrder) {
+            for (const id of th.turns[t]?.itemIds ?? []) placed.add(id);
+          }
+          // 归属用 streamTurn 精确判断（协议增量里带了 turnId）。
+          // 只判 `!placed.has(id)` 不够——那样新轮次的流式内容会出现在
+          // 每一个历史轮次下面。
+          const pending = Object.entries(th.streamBuffer).filter(
+            ([id]) => !placed.has(id) && th.streamTurn[id] === turnId,
+          );
+          if (pending.length === 0) return null;
           return pending.map(([id, text]) => (
             <div key={id} className="item-card agent-message is-streaming">
               <MarkdownLite text={text} />

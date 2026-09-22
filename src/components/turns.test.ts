@@ -11,6 +11,8 @@
  *    否则用户从导航条完全看不出「这里出过问题」。
  */
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { MAX_TICKS, MIN_TICKS, buildTicks, turnPreview } from './turns';
 import { initialState, newThreadState, reduce, reduceAll, type RootState } from '../stores/store';
 import type { AppEvent, Item } from '../types/domain';
@@ -304,5 +306,53 @@ describe('性能护栏（用大状态证明复杂度可控）', () => {
     // 实测约 3ms。阈值取 50ms：留足 CI 波动空间，同时能抓住 O(n²)——那会到秒级。
     expect(ms, `5000 轮耗时 ${ms.toFixed(1)}ms，疑似 O(n²)`).toBeLessThan(50);
     expect(ticks.length).toBeLessThanOrEqual(MAX_TICKS);
+  });
+});
+
+/**
+ * 预览卡片的定位约束（一个极隐蔽的真实 bug）。
+ *
+ * # 这个测试在防什么
+ *
+ * 卡片用 `position: fixed` + JS 给的视口坐标。但 **`position: fixed` 会被
+ * 最近一个带 `transform` 的祖先劫持**——此时它不再相对视口，而是相对那个
+ * 祖先。实测：`.turnmap` 原本用 `transform: translateY(-50%)` 做垂直居中，
+ * 于是卡片的 top（视口坐标 350）被按 .turnmap 的坐标系解析，落点跑到
+ * y=645（屏幕下方、压在输入框上），横向也偏了 14px。
+ *
+ * 症状是「位置不太对」，但根因与「坐标算错」看起来一样——
+ * 只能靠这条约束区分：**承载 fixed 元素的容器链上不能有 transform**。
+ */
+describe('导航条容器的定位约束', () => {
+  const root4 = join(__dirname, '..', '..');
+  const c4 = readFileSync(join(root4, 'src/styles.css'), 'utf8');
+
+  function body4(sel: string): string {
+    const stripped = c4.replace(/\/\*[\s\S]*?\*\//g, '');
+    const m = new RegExp(
+      sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\{',
+    ).exec(stripped);
+    if (!m) throw new Error(`未找到规则 ${sel}`);
+    const start = m.index + m[0].length;
+    return stripped.slice(start, stripped.indexOf('}', start));
+  }
+
+  it('.turnmap 不得使用 transform（否则劫持内部的 fixed 卡片）', () => {
+    const map = body4('.turnmap');
+    expect(
+      map,
+      '容器上不能有 transform —— 会让内部 position:fixed 的预览卡片以它为参照，落点错位',
+    ).not.toMatch(/transform\s*:/);
+    // 垂直居中改用 flex（不引入新的包含块）
+    expect(map, '应用 flex 居中替代 transform').toMatch(/justify-content:\s*center/);
+  });
+
+  it('卡片坐标由 JS 给出（不在 CSS 里写死 left）', () => {
+    const card = body4('.turnmap-card');
+    expect(card, 'left 不该在 CSS 里写死').not.toMatch(/^\s*left\s*:/m);
+    const src = readFileSync(join(root4, 'src/components/TurnMinimap.tsx'), 'utf8');
+    // onEnter 里必须同时取 x 与 y
+    expect(src, '悬停时应同时记下 x 与 y 视口坐标').toMatch(/x:\s*r\.right\s*\+/);
+    expect(src, '卡片样式应使用这两个坐标').toMatch(/style=\{\{\s*top:\s*hover!\.y,\s*left:\s*hover!\.x/);
   });
 });

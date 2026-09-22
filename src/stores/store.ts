@@ -66,6 +66,16 @@ export interface ThreadState {
    */
   streamBuffer: Record<string, string>;
   /**
+   * 流式内容归属的轮次：itemId → turnId。
+   *
+   * **必须精确记录，不能靠推断**：`streamBuffer` 只按 itemId 索引，而
+   * `TurnView` 需要知道「这段未归位的内容属于哪一轮」。此前它只判
+   * `!turn.itemIds.includes(id)`——于是新轮次的流式内容会出现在**每一个**
+   * 历史轮次下面，用户看到已完成的对话跟着新对话一起变、旧轮次也显示
+   * 「运行中」。协议在增量事件里带了 turnId，直接记下来即可。
+   */
+  streamTurn: Record<string, string>;
+  /**
    * 护栏警告（上游检测到异常执行模式）。
    *
    * 单独成列而非并进 `errors`：`errors` 是「哪里出错了」的杂项列表，
@@ -133,6 +143,7 @@ export function newThreadState(threadId: string, cwd = ''): ThreadState {
     turnDiffs: {},
     turnDiffFiles: {},
     streamBuffer: {},
+    streamTurn: {},
     guardianWarnings: [],
     tokenUsage: null,
   };
@@ -234,6 +245,8 @@ export function reduce(state: RootState, event: AppEvent): RootState {
       // 且只有 completed 携带完整文本。若在 started 就清，随后的
       // 增量会全部丢失（这正是本次踩到的错误）。
       const buf = { ...base.streamBuffer };
+      const sturn = { ...base.streamTurn };
+      delete sturn[event.item.id];
       if (event.completed) {
         delete buf[event.item.id];
       }
@@ -242,6 +255,7 @@ export function reduce(state: RootState, event: AppEvent): RootState {
         ...base,
         items: { ...base.items, [event.item.id]: event.item },
         streamBuffer: buf,
+        streamTurn: sturn,
         turns: { ...base.turns, [event.turnId]: turn },
         turnOrder: base.turnOrder.includes(event.turnId)
           ? base.turnOrder
@@ -340,6 +354,8 @@ export function reduce(state: RootState, event: AppEvent): RootState {
           ...base.streamBuffer,
           [event.itemId]: (base.streamBuffer[event.itemId] ?? '') + event.delta,
         },
+        // 记录归属轮次：TurnView 据此判断「这段内容该显示在哪一轮下面」
+        streamTurn: { ...base.streamTurn, [event.itemId]: event.turnId },
       };
       next.threadOrder = state.threadOrder.includes(event.threadId)
         ? state.threadOrder

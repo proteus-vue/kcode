@@ -32,7 +32,7 @@ export function TurnMinimap({
   scrollRef: React.RefObject<HTMLElement | null>;
 }) {
   const ticks = buildTicks(state, threadId);
-  const [hover, setHover] = useState<{ tick: number; y: number } | null>(null);
+  const [hover, setHover] = useState<{ tick: number; y: number; x: number } | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
 
   /**
@@ -57,8 +57,10 @@ export function TurnMinimap({
   const onEnter = useCallback(
     (i: number, e: React.MouseEvent<HTMLButtonElement>) => {
       // **只读这一个元素的 rect**（不是全部 tick）。这是渲染期之外唯一的测量。
+      // 取 x 也一并记下：卡片用 fixed 定位，left 必须是视口坐标；
+      // 若只写死一个常量，导航条换位置（或折叠侧栏）时卡片会错位。
       const r = e.currentTarget.getBoundingClientRect();
-      setHover({ tick: i, y: r.top + r.height / 2 });
+      setHover({ tick: i, y: r.top + r.height / 2, x: r.right + 14 });
     },
     [],
   );
@@ -94,7 +96,7 @@ export function TurnMinimap({
       {hovered && preview && (
         // 预览卡片：坐标来自那一次 rect 读取。pointer-events: none，
         // 否则鼠标移向卡片时会离开 tick、卡片闪掉。
-        <div className="turnmap-card" style={{ top: hover!.y }} role="tooltip">
+        <div className="turnmap-card" style={{ top: hover!.y, left: hover!.x }} role="tooltip">
           <div className="turnmap-card-head">
             {hovered.count > 1 && <span className="turnmap-card-badge">{hovered.count} 轮</span>}
             <span className="turnmap-card-title">{preview.title}</span>

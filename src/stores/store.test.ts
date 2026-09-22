@@ -494,6 +494,7 @@ describe('ThreadState 构造完整性', () => {
         'name',
         'pendingApprovals',
         'streamBuffer',
+        'streamTurn',
         'tokenUsage',
         'turnDiffFiles',
         'turnDiffs',
@@ -614,5 +615,80 @@ describe('rebuildThread：长会话重建不得是 O(n²)', () => {
     const first = rebuildThread(initialState(), 'th', '/w', items, [{ turnId: 't0', status: 'completed' }], []);
     const again = rebuildThread(first, 'th', '/w', [], [], []);
     expect(Object.keys(again.threads['th'].items)).toHaveLength(3);
+  });
+});
+
+describe('流式内容的轮次归属（历史轮次不得被新轮次污染）', () => {
+  /**
+   * 实测过的错乱：新对话一开始，**上面已完成的对话内容也跟着变**，
+   * 且旧轮次显示成「运行中」。
+   *
+   * 根因：`TurnView` 渲染「尚未产生 Item 的流式内容」时只排除当前轮次的
+   * itemIds——于是新轮次的流式文本会出现在**每一个**历史轮次下面。
+   * 修法是精确记录归属（`streamTurn`：itemId → turnId），协议增量里本就带 turnId。
+   */
+  const delta = (turnId: string, itemId: string, text: string) => ({
+    type: 'textDelta' as const,
+    threadId: 'th',
+    itemId,
+    turnId,
+    channel: 'agentMessage' as const,
+    delta: text,
+  });
+
+  it('记录每个流式 item 归属的轮次', () => {
+    let s = reduceAll(initialState(), [
+      { type: 'threadStarted', threadId: 'th', cwd: '/w' },
+      { type: 'turnStarted', threadId: 'th', turnId: 't1' },
+      delta('t1', 'i1', '第一轮的内容'),
+      { type: 'turnCompleted', threadId: 'th', turnId: 't1', status: 'completed' },
+      { type: 'turnStarted', threadId: 'th', turnId: 't2' },
+      delta('t2', 'i2', '第二轮的内容'),
+    ]);
+    const th = s.threads['th'];
+    expect(th.streamTurn['i1']).toBe('t1');
+    expect(th.streamTurn['i2']).toBe('t2');
+  });
+
+  it('**历史轮次拿不到新轮次的流式内容**（核心断言）', () => {
+    let s = reduceAll(initialState(), [
+      { type: 'threadStarted', threadId: 'th', cwd: '/w' },
+      { type: 'turnStarted', threadId: 'th', turnId: 't1' },
+      delta('t1', 'i1', '旧的'),
+      { type: 'turnCompleted', threadId: 'th', turnId: 't1', status: 'completed' },
+      { type: 'turnStarted', threadId: 'th', turnId: 't2' },
+      delta('t2', 'i2', '新的'),
+    ]);
+    const th = s.threads['th'];
+    // 模拟 TurnView 的归属过滤：t1 那一轮不该看到 i2
+    const placedT1 = new Set(th.turns['t1'].itemIds);
+    const t1Streaming = Object.keys(th.streamBuffer).filter(
+      (id) => !placedT1.has(id) && th.streamTurn[id] === 't1',
+    );
+    expect(t1Streaming, 't1 轮不该持有 i2 的流式内容').not.toContain('i2');
+
+    // 而 t2 应当拿到它
+    const placedT2 = new Set(th.turns['t2'].itemIds);
+    const t2Streaming = Object.keys(th.streamBuffer).filter(
+      (id) => !placedT2.has(id) && th.streamTurn[id] === 't2',
+    );
+    expect(t2Streaming).toEqual(['i2']);
+  });
+
+  it('item 归位后清掉归属（不留过期映射）', () => {
+    let s = reduceAll(initialState(), [
+      { type: 'threadStarted', threadId: 'th', cwd: '/w' },
+      { type: 'turnStarted', threadId: 'th', turnId: 't1' },
+      delta('t1', 'i1', '流式中'),
+    ]);
+    expect(s.threads['th'].streamTurn['i1']).toBe('t1');
+    s = reduce(s, {
+      type: 'itemUpserted',
+      threadId: 'th',
+      turnId: 't1',
+      completed: true,
+      item: { id: 'i1', turnId: 't1', createdAtMs: 1, body: { kind: 'agentMessage', text: '完成' } },
+    });
+    expect(s.threads['th'].streamTurn['i1'], '归位后应清除归属').toBeUndefined();
   });
 });
