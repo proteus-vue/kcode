@@ -14,13 +14,17 @@ function MarkdownLite({ text }: { text: string }) {
   return <Markdown>{text}</Markdown>;
 }
 
-const DISPLAY_LABEL: Record<string, string> = {
-  running: '运行中',
-  awaiting_approval: '等待审批',
-  completed: '已完成',
+/**
+ * 非正常终态的文案。
+ *
+ * **`completed` 刻意不在表里**：它是默认状态，每轮都挂一个「已完成」
+ * 等于给时间线加了一层无信息量的标签（与工具行弱化是同一个判断）。
+ * 只有需要用户注意的终态才留标记。
+ */
+const OUTCOME_LABEL: Record<string, string> = {
   interrupted: '已中断',
   failed: '失败',
-  unknown: '状态未知',
+  unknown: '结果未知',
 };
 
 export function TurnView({
@@ -49,15 +53,6 @@ export function TurnView({
       // 元素的位置（点击时算一次），不值得为每个轮次维护一个 ref。
       data-turn-id={turnId}
     >
-      <div className="turn-head">
-        <span className={`status-chip status-${display}`}>{DISPLAY_LABEL[display] ?? display}</span>
-      </div>
-      {display === 'unknown' && (
-        <p className="unknown-note">
-          Agent 进程已退出，无法确定该轮次的真实结果。请核对工作区状态后再继续——
-          不要假定它成功或失败。
-        </p>
-      )}
       <div className="turn-items">
         {items.map((item) => (
           <ItemCard
@@ -96,6 +91,35 @@ export function TurnView({
             </div>
           ));
         })()}
+
+        {/* 状态标记放在**内容之后**。
+            此前它在内容之前（turn-head），于是「运行中」出现在用户消息
+            上方——读起来像在描述那条消息，而它描述的其实是「内容还在生成」，
+            语义上属于内容的尾部。参照客户端也是尾部转圈。 */}
+
+        {/* 进行中：一个转圈 + 极简文案。这是唯一的「活着」的指示。 */}
+        {(display === 'running' || display === 'awaiting_approval') && (
+          <div className={`turn-progress ${display === 'awaiting_approval' ? 'is-awaiting' : ''}`}>
+            <span className="spinner" />
+            <span>{display === 'awaiting_approval' ? '等待你批准' : '正在处理'}</span>
+          </div>
+        )}
+
+        {/* 非正常终态：必须留可见标记，不静默。
+            completed 不在此列——它是默认状态，无需标注。 */}
+        {OUTCOME_LABEL[display] && (
+          <>
+            <div className={`turn-outcome is-${display}`}>
+              {OUTCOME_LABEL[display]}
+            </div>
+            {display === 'unknown' && (
+              <p className="unknown-note">
+                Agent 进程已退出，无法确定该轮次的真实结果。请核对工作区状态后再继续——
+                不要假定它成功或失败。
+              </p>
+            )}
+          </>
+        )}
       </div>
     </div>
   );

@@ -88,11 +88,40 @@ describe('多轮渲染：流式内容只属于它自己那一轮', () => {
     expect(el.textContent ?? '').toContain('第二轮正在生成的内容');
   });
 
-  it('已完成轮次不显示「运行中」徽标', () => {
+  it('已完成轮次不显示任何状态文字（默认状态不该占视觉）', () => {
     const state = twoTurns();
     const el = renderTurn(state, 't1');
-    expect(el.textContent ?? '').toContain('已完成');
-    expect(el.textContent ?? '', 't1 不该显示运行中').not.toContain('运行中');
+    const text = el.textContent ?? '';
+    expect(text, 't1 不该显示运行中').not.toContain('运行中');
+    // 「已完成」刻意不显示：每轮都挂一个等于给时间线加一层无信息量的标签
+    expect(text, '完成是默认状态，不该有标记').not.toContain('已完成');
+  });
+
+  it('进行中的轮次在**内容之后**显示转圈（此前在内容之前）', () => {
+    const state = twoTurns();
+    const el = renderTurn(state, 't2');
+    const progress = el.querySelector('.turn-progress');
+    expect(progress, '进行中应有进度指示').not.toBeNull();
+    expect(progress!.querySelector('.spinner'), '进度指示应是转圈').not.toBeNull();
+
+    // 位置断言：进度指示必须排在内容之后（此前是 turn-head 在最前）
+    const items = el.querySelector('.turn-items')!;
+    const children = Array.from(items.children);
+    const progressIdx = children.indexOf(progress as Element);
+    const contentIdx = children.findIndex((c) => c.className.includes('item-card') || c.className.includes('agent-message'));
+    expect(contentIdx, '应有内容节点').toBeGreaterThanOrEqual(0);
+    expect(progressIdx, '转圈应在内容之后').toBeGreaterThan(contentIdx);
+  });
+
+  it('失败轮次留有可见标记（不静默）', () => {
+    const state = reduceAll(initialState(), [
+      { type: 'threadStarted', threadId: 'th', cwd: '/w' },
+      { type: 'turnStarted', threadId: 'th', turnId: 't1' },
+      { type: 'turnCompleted', threadId: 'th', turnId: 't1', status: 'failed' },
+    ]);
+    const el = renderTurn(state, 't1');
+    expect(el.textContent ?? '').toContain('失败');
+    expect(el.querySelector('.turn-outcome.is-failed')).not.toBeNull();
   });
 
   it('多个历史轮次并存时，每轮只显示自己的内容', () => {

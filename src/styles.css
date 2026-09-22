@@ -3368,3 +3368,51 @@ body {
   background: rgba(255,255,255,0.06); color: var(--t2);
   border: 1px solid var(--edge-soft);
 }
+
+/* ══ 轮次状态（在内容之后）════════════════════════════════════════════
+   此前状态标记在内容**之前**（.turn-head），于是「运行中」出现在用户
+   消息上方——读起来像在描述那条消息，而它描述的是「内容还在生成」。
+   参照客户端也是尾部转圈。故移到内容之后，并去掉每轮都挂的「已完成」
+   （默认状态，无信息量）。 */
+
+/* 进行中：转圈 + 极简文案。注意它不占满行宽，也不要背景——
+   它是「还有内容要来」的指示，不是一个卡片。 */
+.turn-progress {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 0 2px;
+  font-size: 12px; color: var(--t4);
+}
+/* 等待审批：改用警示色提示「球在你这边」 */
+.turn-progress.is-awaiting { color: var(--warn); }
+.turn-progress.is-awaiting .spinner {
+  border-color: rgba(251, 191, 36, 0.28);
+  border-top-color: var(--warn);
+}
+
+/* 非正常终态：留可见标记（失败/中断/结果未知必须能被扫到）。 */
+.turn-outcome {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-top: 6px;
+  padding: 1px 8px; border-radius: var(--r-xs);
+  font-size: 11px;
+  border: 1px solid transparent;
+}
+.turn-outcome.is-failed {
+  color: var(--danger);
+  border-color: rgba(248, 113, 113, 0.35);
+  background: var(--danger-dim);
+}
+.turn-outcome.is-interrupted {
+  color: var(--t3);
+  border-color: var(--edge-soft);
+}
+.turn-outcome.is-unknown {
+  color: var(--violet);
+  border-color: rgba(167, 139, 250, 0.35);
+  background: var(--violet-dim);
+}
+/* unknown 的解释文字：紧跟标记，弱化但不隐藏 */
+.unknown-note {
+  margin: 6px 0 0;
+  font-size: 11.5px; line-height: 1.5; color: var(--t4);
+}
