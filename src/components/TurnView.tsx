@@ -43,7 +43,12 @@ export function TurnView({
   const items = turn.itemIds.map((id) => thread.items[id]).filter(Boolean);
 
   return (
-    <div className={`turn ${display === 'awaiting_approval' ? 'is-awaiting' : ''}`}>
+    <div
+      className={`turn ${display === 'awaiting_approval' ? 'is-awaiting' : ''}`}
+      // 导航条据此定位与跳转。用属性而非 ref：导航条只需要极少数几个
+      // 元素的位置（点击时算一次），不值得为每个轮次维护一个 ref。
+      data-turn-id={turnId}
+    >
       <div className="turn-head">
         <span className={`status-chip status-${display}`}>{DISPLAY_LABEL[display] ?? display}</span>
       </div>

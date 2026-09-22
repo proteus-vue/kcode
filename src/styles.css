@@ -91,7 +91,15 @@
      用处：`.main-body` 设了 `scrollbar-gutter: stable`，正文的居中基准
      因此比输入区窄一个滚动条；输入区补上同样的右内边距后两者才对齐。 */
   --scrollbar-w: 9px;
+
+  /* 对话栏的左侧空白槽。有导航条时加宽——ticks 需要 ~34px，
+     不能让它们压在正文上。**正文与输入区共用这一个变量**，
+     所以两边永远对齐（此前是对齐测试盯着两个硬编码的 22px）。 */
+  --gutter-left: 22px;
 }
+
+/* 显示导航条时加宽左槽。由 App 在 .main 上切换。 */
+.main.has-turnmap { --gutter-left: 52px; }
 
 * { box-sizing: border-box; }
 
@@ -429,7 +437,7 @@ body {
   /* 顶部留白是**滚动容器自己的内边距**，不是外层容器的外边距——
      这是沉浸能成立的关键：留白随内容一起滚走，消息向上滚时能穿过
      浮动的顶栏；若做在外层容器上，内容会被永久挡在顶栏下方。 */
-  padding: calc(var(--head-h) + 16px) 22px 8px;
+  padding: calc(var(--head-h) + 16px) 22px 8px var(--gutter-left);
   /* 固定滚动条槽位：否则内容高度变化引起滚动条出现/消失，
      会让正文左右抖动——resize 时尤其明显。 */
   scrollbar-gutter: stable;
@@ -1491,7 +1499,7 @@ body {
      通栏分隔线，在深色底上呈现为一道看得见的白线，而输入框本身已是
      带边框的圆角块——两者叠在一起像「线下面挂了个盒子」。
      参照客户端的输入区是独立浮起的块，没有通栏线。 */
-  padding: 10px calc(22px + var(--scrollbar-w)) 14px 22px;
+  padding: 10px calc(22px + var(--scrollbar-w)) 14px var(--gutter-left);
 }
 
 /* 输入区与对话正文共用同一条阅读栏宽（--read-width）且同样居中：
@@ -3257,4 +3265,101 @@ body {
 .img-zoom-hint {
   position: absolute; bottom: 18px; margin: 0;
   font-size: 11px; color: var(--t4);
+}
+
+/* ══ 对话导航条（minimap）══════════════════════════════════════════════
+   贴在对话栏左侧的空白槽里，每轮一根短横条；悬停展开预览、点击跳转。
+
+   性能相关：长度用 transform: scaleX 而非 width——transform 走合成层，
+   不触发布局与重绘；width 每一帧都要重排。这是「丝滑」的关键。 */
+.turnmap {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 6;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 6px 4px;
+  /* 点击穿透到容器外时不该拦截正文；tick 自己恢复 auto */
+  pointer-events: none;
+}
+.turnmap-tick {
+  pointer-events: auto;
+  appearance: none; background: none; border: 0; padding: 0;
+  width: 26px; height: 4px;
+  display: flex; align-items: center;
+  cursor: pointer;
+}
+.turnmap-bar {
+  display: block;
+  width: 100%; height: 3px;
+  border-radius: 2px;
+  background: var(--t4);
+  transform-origin: left center;
+  /* 基础长度由 --r 给出（相对最长 tick 的比例）；悬停放大到 1。
+     两个属性都用 transform 之外的最小代价：transform 本身 + 颜色。 */
+  transform: scaleX(var(--r, 1));
+  transition: transform .24s cubic-bezier(.2,.7,.3,1), background .18s ease;
+}
+/* 悬停：**变长且提亮**——这是唯一的焦点反馈，因此做得明显。
+   注意 grow 只到 scaleX(1)，即「最长 tick 的长度」，不会溢出 26px 槽宽。 */
+.turnmap-tick.is-hover .turnmap-bar,
+.turnmap-tick:focus-visible .turnmap-bar {
+  transform: scaleX(1);
+  background: var(--t1);
+}
+/* 需要用户注意的段：用颜色区分，但**不放大**（放大留给悬停，
+   否则两种含义共用一个视觉通道，用户分不清「被指到」与「出问题了」）。 */
+.turnmap-tick.is-fail .turnmap-bar { background: var(--danger); }
+.turnmap-tick.is-awaiting .turnmap-bar { background: var(--warn); }
+.turnmap-tick.is-running .turnmap-bar { background: var(--accent); }
+.turnmap-tick.is-unknown .turnmap-bar { background: var(--violet); }
+.turnmap-tick.is-fail.is-hover .turnmap-bar,
+.turnmap-tick.is-awaiting.is-hover .turnmap-bar,
+.turnmap-tick.is-running.is-hover .turnmap-bar,
+.turnmap-tick.is-unknown.is-hover .turnmap-bar { filter: brightness(1.35); }
+
+/* ── 悬停预览卡片 ─────────────────────────────────────────────────────
+   坐标来自悬停那一刻对该 tick 的一次 rect 读取（不是全部 tick）。 */
+.turnmap-card {
+  position: fixed;
+  left: 52px;
+  transform: translateY(-50%);
+  z-index: 320;
+  width: 330px; max-width: calc(100vw - 120px);
+  padding: 11px 13px;
+  border-radius: var(--r-md);
+  background: var(--glass-2);
+  border: 1px solid var(--edge-strong);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  /* 鼠标移向卡片时会离开 tick；若卡片可交互，它会闪掉。
+     卡片只用于「看一眼」，不需要交互。 */
+  pointer-events: none;
+}
+.turnmap-card-head { display: flex; align-items: baseline; gap: 7px; margin-bottom: 5px; }
+.turnmap-card-badge {
+  flex-shrink: 0; font-size: 10px; padding: 1px 5px;
+  border-radius: var(--r-xs);
+  background: var(--accent-dim); color: var(--accent);
+  border: 1px solid rgba(106,165,255,0.3);
+}
+.turnmap-card-title {
+  font-size: 13px; font-weight: 600; color: var(--t1); line-height: 1.4;
+  overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.turnmap-card-body {
+  margin: 0; font-size: 12px; line-height: 1.55; color: var(--t3);
+  overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+}
+.turnmap-card-tools { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.turnmap-tool {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px; border-radius: var(--r-xs);
+  font-family: var(--mono); font-size: 10.5px;
+  background: rgba(255,255,255,0.06); color: var(--t2);
+  border: 1px solid var(--edge-soft);
 }

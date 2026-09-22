@@ -15,6 +15,8 @@ import { TurnView } from './components/TurnView';
 import { Welcome } from './components/Welcome';
 import { SettingsPanel } from './components/SettingsPanel';
 import { StatusDock } from './components/StatusDock';
+import { TurnMinimap } from './components/TurnMinimap';
+import { buildTicks } from './components/turns';
 import { useSlotRect } from './components/RightTabs';
 import { BrowserPanel } from './components/BrowserPanel';
 import { Workbench } from './components/Workbench';
@@ -232,6 +234,14 @@ export default function App() {
   }, [toggleLeft, toggleRight]);
 
   const thread = api.activeThreadId ? state.threads[api.activeThreadId] : undefined;
+  /**
+   * 是否显示对话导航条。
+   *
+   * 与 TurnMinimap 内部的判断同源（都由 buildTicks 决定）——**不能各判一套**：
+   * 这里决定要不要加宽左槽，那边决定要不要画 ticks；两者不一致时，
+   * 要么白留一条空槽，要么 ticks 压在正文上。
+   */
+  const showTurnmap = Boolean(thread && buildTicks(state, thread.id).length > 0);
 
   /** 当前工作区名——用于侧栏品牌区、欢迎语与输入区上下文芯片。 */
   const projectName = useMemo(() => {
@@ -431,7 +441,10 @@ export default function App() {
       {/* 容器上的 dblclick 只处理「顶部让位带的空白」（target 为容器自身
           且 y < --titlebar）——head 本体的双击冒泡上来时 target 是 head 内
           元素，被 self-target 守卫放行，不会二次 toggle。见 titlebarZoom.ts。 */}
-      <main className="main" onDoubleClick={onColumnBandDoubleClick}>
+      <main
+        className={`main ${showTurnmap ? 'has-turnmap' : ''}`}
+        onDoubleClick={onColumnBandDoubleClick}
+      >
         <header className="main-head" onDoubleClick={onTitlebarDoubleClick}>
           <div className="head-left">
             {thread ? (
@@ -495,6 +508,12 @@ export default function App() {
                 />
               ))}
           </div>
+
+          {/* 对话导航条：贴在左侧空白处，悬停出预览、点击跳转。
+              只读 state 构建 tick，渲染期不测 DOM——见 TurnMinimap 头部。 */}
+          {thread && (
+            <TurnMinimap state={state} threadId={thread.id} scrollRef={scroll.ref} />
+          )}
 
           {/* 「回到底部」只在用户上滑离开底部后出现。
               贴在流底部而非顶部：它替代的正是「滚到底」这个动作。 */}

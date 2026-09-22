@@ -21,6 +21,7 @@ import {
   isApproving,
   isBlockingRisk,
   isDeclined,
+  rebuildThread,
   reduce,
   reduceAll,
   shortModelName,
@@ -539,5 +540,79 @@ describe('推理增量不进流式缓冲', () => {
     s = reduce(s, delta('reasoningSummary'));
     s = reduce(s, { ...delta('agentMessage'), delta: 'y' });
     expect(s.threads['th'].streamBuffer['i1']).toBe('xy');
+  });
+});
+
+describe('rebuildThread：长会话重建不得是 O(n²)', () => {
+  /**
+   * 从事件日志打开长会话的路径。
+   *
+   * 旧实现对每条 item / turn 各调一次 `reduce`，而每次 reduce 内部都有
+   * `includes` 扫描 → O(n²)。实测 1000 条 104ms、3000 条 1066ms、
+   * 6000 条 4703ms，用户感受就是「打开会话卡住」。
+   * 改为一次扫描后 6000 条约 1.3ms。
+   */
+  const mk = (n: number): Item[] =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `i${i}`,
+      turnId: `t${i % 50}`,
+      createdAtMs: i,
+      body: { kind: 'agentMessage' as const, text: 'x' },
+    }));
+
+  it('6000 条在一次同步调用内完成（阈值抓 O(n²)，不是性能基准）', () => {
+    const items = mk(6000);
+    const turns = Array.from({ length: 50 }, (_, i) => ({
+      turnId: `t${i}`,
+      status: 'completed' as const,
+    }));
+    const t0 = performance.now();
+    const s = rebuildThread(initialState(), 'th', '/w', items, turns, []);
+    const ms = performance.now() - t0;
+    // 实测 ~1.3ms。阈值 100ms：留足 CI 波动，同时能抓住 O(n²)（那会到秒级）。
+    expect(ms, `6000 条耗时 ${ms.toFixed(0)}ms，疑似退回 O(n²)`).toBeLessThan(100);
+    expect(Object.keys(s.threads['th'].items)).toHaveLength(6000);
+  });
+
+  it('重建结果与逐条 reduce 等价（语义不能变）', () => {
+    const items = mk(30);
+    const turns = Array.from({ length: 5 }, (_, i) => ({
+      turnId: `t${i}`,
+      status: 'completed' as const,
+    }));
+    let inc = reduce(initialState(), { type: 'threadStarted', threadId: 'th', cwd: '/w' });
+    for (const it of items) {
+      inc = reduce(inc, { type: 'itemUpserted', threadId: 'th', turnId: it.turnId, item: it, completed: true });
+    }
+    for (const t of turns) {
+      inc = reduce(inc, { type: 'turnCompleted', threadId: 'th', turnId: t.turnId, status: t.status });
+    }
+    const batch = rebuildThread(initialState(), 'th', '/w', items, turns, []);
+
+    expect(Object.keys(batch.threads['th'].items).sort()).toEqual(
+      Object.keys(inc.threads['th'].items).sort(),
+    );
+    expect(batch.threads['th'].turnOrder).toEqual(inc.threads['th'].turnOrder);
+    for (const t of turns) {
+      expect(batch.threads['th'].turns[t.turnId].itemIds).toEqual(
+        inc.threads['th'].turns[t.turnId].itemIds,
+      );
+    }
+  });
+
+  it('只有 item、没有 turn 条目时也登记轮次（时间线不能漏内容）', () => {
+    const items: Item[] = [
+      { id: 'x', turnId: 'orphan', createdAtMs: 1, body: { kind: 'agentMessage', text: 'y' } },
+    ];
+    const s = rebuildThread(initialState(), 'th', '/w', items, [], []);
+    expect(s.threads['th'].turnOrder).toContain('orphan');
+    expect(s.threads['th'].turns['orphan'].itemIds).toEqual(['x']);
+  });
+
+  it('空快照不破坏既有状态（幂等）', () => {
+    const items = mk(3);
+    const first = rebuildThread(initialState(), 'th', '/w', items, [{ turnId: 't0', status: 'completed' }], []);
+    const again = rebuildThread(first, 'th', '/w', [], [], []);
+    expect(Object.keys(again.threads['th'].items)).toHaveLength(3);
   });
 });

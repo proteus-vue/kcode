@@ -23,7 +23,7 @@ import type {
   WebElementAttachment,
   ThreadSummary,
 } from '../types/domain';
-import { initialState, reduce, type RootState } from './store';
+import { initialState, rebuildThread, reduce, type RootState } from './store';
 import type { ChangeSet, FileDecision, ReviewState } from '../types/domain';
 
 /**
@@ -469,37 +469,21 @@ export function useKcode(): KcodeApi {
     try {
       const snap = await invoke<ThreadSnapshot>('load_thread', { threadId });
       setState((prev) => {
-        let next = reduce(prev, { type: 'threadStarted', threadId: snap.threadId, cwd: snap.cwd });
-        for (const item of snap.items) {
-          // 从日志重建的 Item 均已是落盘终态，因此标记 completed
-          next = reduce(next, {
-            type: 'itemUpserted',
-            threadId: snap.threadId,
-            turnId: item.turnId,
-            item,
-            completed: true,
-          });
-        }
-        for (const t of snap.turns) {
-          next = reduce(next, {
-            type: 'turnCompleted',
-            threadId: snap.threadId,
-            turnId: t.turnId,
-            status: t.status,
-          });
-        }
-        // 变更集（含已持久化的审阅决策）——不重建的话，
-        // 重启后 Diff 面板空白，用户以为自己的审阅结论丢了
-        for (const cs of snap.changeSets) {
-          next = reduce(next, {
-            type: 'changeSetReplaced',
-            threadId: snap.threadId,
-            turnId: cs.turnId,
-            changeSet: cs,
-          });
-        }
+        // **一次扫描重建**，不再逐条 reduce。
+        //
+        // 原先对每条 item / turn / changeSet 各调一次 reduce，而每次 reduce
+        // 内部都有 includes 扫描 → O(n²)。实测 1000 条 91ms、2000 条 448ms，
+        // 真实长会话（几千条）打开时明显卡顿。见 store.rebuildThread 的注释。
+        const next = rebuildThread(
+          prev,
+          snap.threadId,
+          snap.cwd,
+          snap.items,
+          snap.turns,
+          snap.changeSets,
+        );
         const warnings = snap.warnings.map((w) => `线程 ${snap.threadId.slice(0, 8)}: ${w}`);
-        return { ...next, errors: [...next.errors, ...warnings] };
+        return { ...next, errors: [...next.errors, ...warnings], activeThreadId: threadId };
       });
     } catch (e) {
       setState((prev) => ({ ...prev, errors: [...prev.errors, extractErrorMessage(e)] }));

@@ -186,19 +186,31 @@ describe('输入框与对话正文的栏宽对齐', () => {
     expect(hardcoded.map((m) => m[0]), '栏宽不应有硬编码 ch 值').toHaveLength(0);
   });
 
-  it('输入区水平内边距与正文容器同基准（22px）并让出滚动条宽度', () => {
-    const mb = body('.main-body');
-    // .main-body 的 padding 形如 `calc(var(--head-h) + 16px) 22px 8px`
-    // ——顶部是动态值，因此只能断言「水平两值为 22px」，不能要求 padding 后紧跟数值。
-    expect(mb, '.main-body 的水平内边距应为 22px').toMatch(/22px\s+22px|22px\s+8px/);
+  it('输入区与正文共用同一个左槽变量（不各写一个数值）', () => {
+    // 左槽宽度由 --gutter-left 统一给出（没有导航条时 22px，
+    // 有导航条时加宽到 52px 让出 ticks 的位置）。
+    // **两边必须引用同一个变量**——否则加宽左槽时正文与输入框会错位。
+    expect(css2, '缺少 --gutter-left 定义').toContain('--gutter-left:');
+    expect(body('.main-body'), '正文容器应用左槽变量').toContain('var(--gutter-left)');
+    expect(body('.composer'), '输入区应用同一个左槽变量').toContain('var(--gutter-left)');
 
-    const c = body('.composer');
-    // 左内边距必须是 22px（与正文同基准）——取 padding 简写的最后一个长度值
-    const shorthand = c.match(/padding:\s*([^;]+);/)?.[1] ?? '';
-    const parts = shorthand.trim().split(/\s+(?![^(]*\))/);
-    expect(parts[parts.length - 1], '输入区左内边距应为 22px').toBe('22px');
-    // 右内边距必须多出滚动条宽度，且引用变量而非写死数值
-    expect(c, '输入区右内边距应让出滚动条宽度').toContain('calc(22px + var(--scrollbar-w))');
+    // 右内边距必须多出滚动条宽度（正文容器有 scrollbar-gutter: stable），
+    // 且引用变量而非写死数值
+    expect(body('.composer'), '输入区右内边距应让出滚动条宽度').toContain(
+      'calc(22px + var(--scrollbar-w))',
+    );
+  });
+
+  it('加宽左槽时正文与输入区同步（导航条不压正文）', () => {
+    // 导航条显示时 App 给 .main 加 has-turnmap，两者一起加宽。
+    const root6 = join(__dirname, '..', '..', '..');
+    const appSrc = readFileSync(join(root6, 'src/App.tsx'), 'utf8');
+    expect(css2, '缺少 has-turnmap 的左槽加宽规则').toMatch(
+      /\.main\.has-turnmap\s*\{[^}]*--gutter-left/,
+    );
+    expect(appSrc, 'App 应切换 has-turnmap').toContain('has-turnmap');
+    // App 的显示判断必须与组件同源（都用 buildTicks），否则会白留空槽
+    expect(appSrc, '显示条件应与导航条同源').toContain('buildTicks');
   });
 
   it('滚动条宽度同源：变量与 ::-webkit-scrollbar 引用同一个值', () => {
