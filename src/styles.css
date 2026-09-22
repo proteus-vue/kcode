@@ -76,6 +76,19 @@
      与 UI 标签同号会让长回复变得难读。 */
   --text-chat: 15px;
   --text-code: 12.5px;
+
+  /* 阅读栏宽。**四处共用同一个变量**：对话正文、欢迎页、输入区、
+     `@` 候选列表。此前只有正文有约束，输入框撑满整个中栏——
+     宽窗口下正文被居中到 571px 而输入框 1366px，两者左边缘差 17px、
+     右边缘差 780px，视线从正文移到输入框要横向跳一大段（实测）。
+     写成变量是为了让它们不可能各自漂移。 */
+  --read-width: 82ch;
+
+  /* 滚动条宽度。**必须与 ::-webkit-scrollbar 的 width 一致**——
+     两处分开写就会出现「输入框与正文差几像素」这种没人能一眼归因的错位。
+     用处：`.main-body` 设了 `scrollbar-gutter: stable`，正文的居中基准
+     因此比输入区窄一个滚动条；输入区补上同样的右内边距后两者才对齐。 */
+  --scrollbar-w: 9px;
 }
 
 * { box-sizing: border-box; }
@@ -454,7 +467,7 @@ body {
    用户消息气泡（右对齐）与助手回复共用同一条栏宽，不会各宽各的。 */
 .turn {
   margin-bottom: 26px;
-  max-width: 82ch;
+  max-width: var(--read-width);
   /* 栏宽内居中：宽窗口下正文不会贴着左栏边缘，
      两侧留白均等，视线落点稳定在中间。 */
   margin-left: auto;
@@ -954,7 +967,7 @@ body {
 
 /* ── 滚动条 ─────────────────────────────────────────────────────────── */
 
-::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar { width: var(--scrollbar-w); height: var(--scrollbar-w); }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
   background: rgba(255,255,255,0.10); border-radius: var(--r-xs);
@@ -1413,17 +1426,30 @@ body {
    ══════════════════════════════════════════════════════════════════════ */
 
 .composer {
-  padding: 10px 16px 14px;
+  /* 水平内边距与 .main-body 一致（22px），并**额外让出滚动条宽度**：
+     正文容器设了 `scrollbar-gutter: stable`，它的居中基准比可视宽度窄
+     一个滚动条；输入区不让出同样的宽度就会整体偏右半个滚动条
+     （实测宽窗口下左边缘差 -4px，正是 9px 的一半）。
+     用 --scrollbar-w 而不是写死 9px：那个值同时驱动真实滚动条宽度，
+     两边必须同源。 */
+  padding: 10px calc(22px + var(--scrollbar-w)) 14px 22px;
   border-top: 1px solid var(--edge-soft);
+}
+
+/* 输入区与对话正文共用同一条阅读栏宽（--read-width）且同样居中：
+   视线从正文移到输入框不需要横向跳。 */
+.composer-inner {
   position: relative;
+  max-width: var(--read-width);
+  margin: 0 auto;
 }
 
 /* ── `@` 引用候选 ───────────────────────────────────────────────────────
    贴在输入框上方。向上弹出是必然选择：输入框在窗口底部，下方没有空间。 */
 .at-menu {
   position: absolute;
-  left: 16px; right: 16px;
-  bottom: calc(100% - 6px);
+  left: 0; right: 0;
+  bottom: calc(100% + 8px);
   z-index: 60;
   max-height: 260px; overflow-y: auto;
   display: flex; flex-direction: column; gap: 1px;
@@ -1490,11 +1516,13 @@ body {
 
 .composer-box textarea {
   display: block; width: 100%;
-  min-height: 26px; max-height: 220px;
+  /* 默认高度约两行。此前 min-height 26px（单行），输入框看着像根细条，
+     且写第一句话纵向没有余量；参照客户端的输入区默认更舒展。 */
+  min-height: 46px; max-height: 220px;
   padding: 12px 14px 2px;
   resize: none; overflow-y: auto;
   background: none; border: none; outline: none;
-  color: var(--t1); font: inherit; font-size: 13.5px; line-height: 1.6;
+  color: var(--t1); font: inherit; font-size: var(--text-chat); line-height: 1.6;
   scrollbar-gutter: stable;
 }
 .composer-box textarea::placeholder { color: var(--t4); }

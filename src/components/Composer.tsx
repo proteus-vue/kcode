@@ -246,7 +246,6 @@ export function Composer({
 
   const current = models.find((m) => m.id === selectedModel);
   const efforts = current?.reasoningEfforts ?? [];
-  const branch = git?.isRepo ? git.branch ?? 'HEAD 分离' : null;
 
   /**
    * 下拉项在每次渲染时重建（列表很短，无需缓存）。
@@ -274,6 +273,10 @@ export function Composer({
 
   return (
     <div className="composer">
+      {/* 内容约束到与对话正文同一条阅读栏宽（--read-width）并对齐居中。
+          此前输入框撑满整个中栏，宽窗口下与正文左右边缘都差一大截，
+          视线从正文移到输入框要横向跳一段。 */}
+      <div className="composer-inner">
       {/* `@` 引用候选：贴在输入框上方。向上弹出是刻意的——
           输入框在窗口底部，向下没有空间。 */}
       {fileMatches.length > 0 && atStart !== null && (
@@ -448,9 +451,12 @@ export function Composer({
         />
 
         <div className="composer-bar">
-          {/* 左：上下文。项目与分支说明「任务会在哪里运行」，
-              权限档位说明「它会怎么运行」——都是提交前必须确认的前提，
-              所以常驻在此，不藏进设置页。 */}
+          {/* 左：上下文。项目说明「任务在哪运行」、权限档位说明「它会怎么运行」
+              —— 都是提交前必须确认的前提，所以常驻在此，不藏进设置页。
+
+              **分支不在这里**：它属于工具栏（规格 03 §3.2 把「当前目录/分支」
+              划给 Toolbar），而我们的浮层（StatusDock）已有 Git 段专门管它，
+              还带提交/推送入口。两处都显示同一个分支名是冗余。 */}
           <div className="ctx-chips">
             <span className="ctx-chip ctx-primary" title={git?.root ?? projectName}>
               <Icon name="folder" size={11} />
@@ -461,17 +467,6 @@ export function Composer({
               disabled={disabled}
               onSelect={onSelectPermission}
             />
-            {branch && (
-              <span className="ctx-chip" title={git?.isRepo ? '当前分支' : '非 git 仓库'}>
-                <Icon name="branch" size={11} />
-                {branch}
-              </span>
-            )}
-            {git?.isRepo && git.ahead + git.behind > 0 && (
-              <span className="ctx-chip mono" title={`领先 ${git.ahead} / 落后 ${git.behind}`}>
-                ↑{git.ahead} ↓{git.behind}
-              </span>
-            )}
           </div>
 
           {/* 右：模型 + 发送 */}
@@ -512,6 +507,7 @@ export function Composer({
             )}
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

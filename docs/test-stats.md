@@ -10,7 +10,7 @@
 | 类别 | 数量 | 失败 | 状态 |
 |---|---|---|---|
 | Rust（`cargo test -p <crate>`，四个 crate） | 235 | 0 | ✅ 全部通过 |
-| 前端（`vitest run`） | 305 | 0 | ✅ 全部通过 |
+| 前端（`vitest run`） | 311 | 0 | ✅ 全部通过 |
 | 协议契约（真实 codex 二进制端到端） | 56 | 0 | ✅ 全部通过 |
 
 Rust 按 crate 分布：kcode-bridge 53 / kcode-domain 113 / kcode-app 48 / kcode-desktop 21。

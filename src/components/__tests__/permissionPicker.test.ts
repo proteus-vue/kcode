@@ -133,3 +133,97 @@ describe('危险态悬浮不被通用 hover 覆盖（特异性检查）', () => 
     expect(body).not.toContain('rgba(255, 255, 255');
   });
 });
+
+/**
+ * 输入框与对话正文必须共用同一条阅读栏宽。
+ *
+ * # 这个测试在防什么
+ *
+ * 实测对齐前的偏差：正文被 `max-width: 82ch` 约束并居中（571–697px），
+ * 而输入框撑满整个中栏（1366px）——宽窗口下左边缘差 6px、右边缘差 15px，
+ * 视线从正文移到输入框要横向跳一大段。
+ *
+ * 对齐需要**三个数值同时正确**，任何一个被单独改动都会重新错位：
+ * 1. 同一个栏宽变量（--read-width）；
+ * 2. 同一个水平内边距基准（.main-body 的 22px）；
+ * 3. 输入区额外让出滚动条宽度（.main-body 设了 scrollbar-gutter: stable，
+ *    它的居中基准比可视宽度窄一个滚动条）。
+ *
+ * 这三条在浏览器里只表现为「差几像素」，肉眼很难归因，所以静态钉住。
+ */
+describe('输入框与对话正文的栏宽对齐', () => {
+  const root2 = join(__dirname, '..', '..', '..');
+  const css2 = readFileSync(join(root2, 'src/styles.css'), 'utf8');
+  const composerSrc = readFileSync(join(root2, 'src/components/Composer.tsx'), 'utf8');
+
+  /**
+   * 取某条规则的声明块。
+   *
+   * **必须先剥掉注释**：选择器文本（如 `::-webkit-scrollbar`、`.main-body`）
+   * 会出现在解释它的注释里，直接 indexOf 会命中注释而不是规则，
+   * 拿到一段错误的文本——这是本文件踩过的坑（断言因此假失败）。
+   */
+  function body(sel: string): string {
+    const stripped = css2.replace(/\/\*[\s\S]*?\*\//g, '');
+    // 选择器后必须紧跟 ` {`：否则 `.main-body` 会命中 `.main-body-wrap`
+    // （前缀碰撞），拿到的是另一条规则的内容。
+    const m = new RegExp(
+      sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\{',
+    ).exec(stripped);
+    if (!m) throw new Error(`未找到规则 ${sel}`);
+    const start = m.index + m[0].length;
+    return stripped.slice(start, stripped.indexOf('}', start));
+  }
+
+  it('栏宽只有一个来源（--read-width），正文与输入区都引用它', () => {
+    expect(css2).toContain('--read-width:');
+    expect(body('.turn'), '.turn 应用变量而非硬编码').toContain('max-width: var(--read-width)');
+    expect(body('.composer-inner'), '输入区必须用同一条栏宽').toContain(
+      'max-width: var(--read-width)',
+    );
+    // 不允许任何一处再写死 ch 值
+    const hardcoded = [...css2.matchAll(/max-width:\s*\d+ch/g)];
+    expect(hardcoded.map((m) => m[0]), '栏宽不应有硬编码 ch 值').toHaveLength(0);
+  });
+
+  it('输入区水平内边距与正文容器同基准（22px）并让出滚动条宽度', () => {
+    const mb = body('.main-body');
+    // .main-body 的 padding 形如 `calc(var(--head-h) + 16px) 22px 8px`
+    // ——顶部是动态值，因此只能断言「水平两值为 22px」，不能要求 padding 后紧跟数值。
+    expect(mb, '.main-body 的水平内边距应为 22px').toMatch(/22px\s+22px|22px\s+8px/);
+
+    const c = body('.composer');
+    // 左内边距必须是 22px（与正文同基准）——取 padding 简写的最后一个长度值
+    const shorthand = c.match(/padding:\s*([^;]+);/)?.[1] ?? '';
+    const parts = shorthand.trim().split(/\s+(?![^(]*\))/);
+    expect(parts[parts.length - 1], '输入区左内边距应为 22px').toBe('22px');
+    // 右内边距必须多出滚动条宽度，且引用变量而非写死数值
+    expect(c, '输入区右内边距应让出滚动条宽度').toContain('calc(22px + var(--scrollbar-w))');
+  });
+
+  it('滚动条宽度同源：变量与 ::-webkit-scrollbar 引用同一个值', () => {
+    expect(css2).toContain('--scrollbar-w:');
+    expect(body('::-webkit-scrollbar'), '真实滚动条宽度必须用同一个变量').toContain(
+      'var(--scrollbar-w)',
+    );
+  });
+
+  it('输入区内容被居中（否则栏宽约束只会靠左）', () => {
+    expect(body('.composer-inner')).toMatch(/margin:\s*0 auto/);
+  });
+
+  it('输入框默认高度不小于两行（此前 26px 单行显得像细条）', () => {
+    const ta = body('.composer-box textarea');
+    const m = ta.match(/min-height:\s*(\d+)px/);
+    expect(m, '未找到 min-height').not.toBeNull();
+    // 行高 1.6 × 15px ≈ 24px，两行约 48px；取 46 作为下限
+    expect(Number(m![1]), '默认高度过低，输入框会显得像细条').toBeGreaterThanOrEqual(46);
+  });
+
+  it('分支不在输入区渲染（它属于工具栏的 Git 段）', () => {
+    // 规格 03 §3.2 把「当前目录/分支」划给 Toolbar；StatusDock 的 Git 段
+    // 已专门显示分支并带提交/推送入口，两处都显示是冗余。
+    expect(composerSrc, '输入区不应再渲染分支芯片').not.toContain('当前分支');
+    expect(composerSrc, '不应保留只给分支用的变量').not.toMatch(/const branch\s*=/);
+  });
+});
