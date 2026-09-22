@@ -39,14 +39,17 @@ export function ToolRow({
           <span className={`tool-icon ${declined ? 'declined' : ''}`}>
             <Icon name="terminal" />
           </span>
-          <span className="tool-kind">终端</span>
+          {/* 运行中把类型标签换成状态词：那一行是唯一的焦点，
+              「正在执行」比「终端」更能说明此刻发生了什么。 */}
+          <span className="tool-kind">{running ? '正在执行' : '终端'}</span>
           <span className="tool-summary mono">{oneLine}</span>
           <span className="tool-meta">
+            {/* 运行中不放 chip：左侧标签已写「正在执行」、文字上还有扫光，
+                再加一个「运行中」徽标是三重复述（且它最抢眼，反而
+                让焦点落在徽标而不是命令本身）。 */}
             {declined ? (
               <span className="chip chip-declined">未执行</span>
-            ) : running ? (
-              <span className="chip chip-running">运行中</span>
-            ) : b.exitCode != null && b.exitCode !== 0 ? (
+            ) : running ? null : b.exitCode != null && b.exitCode !== 0 ? (
               <span className="chip chip-fail">退出 {b.exitCode}</span>
             ) : b.durationMs != null ? (
               <span className="dim">{b.durationMs}ms</span>

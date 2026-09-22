@@ -517,24 +517,29 @@ body {
 
 /* ── 推理折叠 ───────────────────────────────────────────────────────── */
 
+/* 推理过程：与工具行同等弱化。
+   此前是带边框与渐变底的盒子，而一次任务里它出现得比工具调用还频繁
+   （每轮一条），整屏下来盒子比内容多。推理是**过程性**信息，
+   默认收起的它只需一行弱文字提示「这里可以展开」。 */
 .thinking {
-  margin: 6px 0 10px; border-radius: var(--r-md);
-  border: 1px solid var(--edge-soft);
-  background: linear-gradient(180deg, rgba(255,255,255,0.028), transparent);
+  margin: 2px 0; border-radius: var(--r-xs);
   overflow: hidden;
 }
+.thinking:hover { background: rgba(255,255,255,0.028); }
 .thinking summary {
   display: flex; align-items: center; gap: 8px;
-  padding: 7px 12px; cursor: pointer; list-style: none;
-  font-size: 11.5px; color: var(--t3);
+  padding: 3px 8px; cursor: pointer; list-style: none;
+  font-size: 11.5px; color: var(--t4);
 }
 .thinking summary::-webkit-details-marker { display: none; }
 .thinking-label { flex: 1; }
-.thinking-toggle::after { content: '▸'; font-size: 9px; }
-.thinking[open] .thinking-toggle::after { content: '▾'; }
+/* caret 用图标而非 `▸`/`▾` 两套字符：两个字形在开合时会跳变，
+   而图标是同一个 glyph 靠旋转表达（与工具行、文件树一致）。 */
+.thinking-toggle { display: flex; color: var(--t4); transition: transform .15s; }
+.thinking[open] .thinking-toggle { transform: rotate(90deg); }
 .thinking-body {
-  padding: 2px 12px 10px; color: var(--t3); font-size: 12.5px;
-  border-top: 1px solid var(--edge-soft);
+  /* 用缩进表达从属关系，不用分隔线：线会把它重新变成一个「盒子」 */
+  padding: 2px 8px 8px 30px; color: var(--t3); font-size: 12.5px;
 }
 
 /* ── 计划块 ─────────────────────────────────────────────────────────── */
@@ -559,47 +564,115 @@ body {
 
 /* ── 工具行（紧凑单行）───────────────────────────────────────────────── */
 
+/* ── 工具行：常态一律弱化，只有「正在执行」是焦点 ─────────────────────
+   # 为什么这样定调
+   一次任务会跑几十条工具调用。若每条都带图标块、标签、状态 chip，
+   整屏就是一片等重的盒子——用户扫不出「现在在做什么」，也扫不出
+   「哪一步失败了」，因为所有东西一样响。
+   参照客户端的做法是把常态压到几乎无声（只有弱色图标 + 文字），
+   唯一的视觉焦点留给正在执行的那一条。
+   因此这里**没有**背景、没有边框、没有图标底座；hover 才浮出一层
+   极淡的底以提示「这行可点」。 */
+
 .tool-row {
-  margin: 2px 0; border-radius: var(--r-sm);
+  margin: 0; border-radius: var(--r-xs);
   transition: background .12s;
 }
-.tool-row:hover { background: rgba(255,255,255,0.035); }
-.tool-row.is-declined { background: rgba(167,139,250,0.07); }
+.tool-row:hover { background: rgba(255,255,255,0.028); }
+/* 被拒绝：用左侧一道短竖线标记，而不是整块变色。
+   整块变得和「正在执行」一样醒目会抢走焦点，而它其实是已结束的历史。 */
+.tool-row.is-declined { position: relative; }
+.tool-row.is-declined::before {
+  content: ''; position: absolute; left: 0; top: 6px; bottom: 6px;
+  width: 2px; border-radius: 1px; background: rgba(167,139,250,0.5);
+  margin-left: -8px;
+}
 
 .tool-row-head {
-  display: flex; align-items: center; gap: 9px; width: 100%;
-  padding: 6px 8px; background: none; border: none; cursor: pointer;
-  font: inherit; color: var(--t2); text-align: left;
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 3px 8px; background: none; border: none; cursor: pointer;
+  font: inherit; text-align: left;
+  /* 基线色统一压低：正文用 body 的 --t1，工具行不该和它同重 */
+  color: var(--t3);
 }
 .tool-row-head.static { cursor: default; }
 
+/* 图标底座去掉：只留一个 14px 的弱色图标与文字对齐。
+   此前是 20px 带边框的方块，几十行排下来像一排按钮。 */
 .tool-icon {
-  width: 20px; height: 20px; flex-shrink: 0;
-  display: grid; place-items: center; border-radius: var(--r-xs);
-  background: rgba(255,255,255,0.055); color: var(--t3);
-  border: 1px solid var(--edge-soft);
+  width: 14px; height: 14px; flex-shrink: 0;
+  display: grid; place-items: center;
+  color: var(--t4);
 }
-.tool-icon.declined { color: var(--violet); border-color: rgba(167,139,250,0.3); background: var(--violet-dim); }
-.tool-row.is-running .tool-icon { color: var(--accent); border-color: rgba(106,165,255,0.3); }
+.tool-icon.declined { color: rgba(167,139,250,0.7); }
+/* 运行中：图标用强调色——这是整屏唯一的彩色图标 */
+.tool-row.is-running .tool-icon { color: var(--accent); }
 
 .tool-kind { font-size: 11px; color: var(--t4); flex-shrink: 0; min-width: 26px; }
+/* 运行中的标签换成「正在执行」并提亮：它是这一行的状态词，
+   与命令文本一起构成焦点（参照客户端也是这个形态）。 */
+.tool-row.is-running .tool-kind {
+  color: var(--t1); font-weight: 600;
+}
 .tool-summary {
-  flex: 1; min-width: 0; font-size: 12px; color: var(--t2);
+  flex: 1; min-width: 0; font-size: 12px; color: var(--t3);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .tool-summary.mono { font-family: var(--mono); font-size: 11.5px; }
 .tool-meta { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.tool-chevron { color: var(--t4); transition: transform .15s; display: flex; }
-.tool-chevron.open { transform: rotate(90deg); }
+/* chevron 常态不显示（它只是「可展开」的提示，不是内容），
+   hover 或已展开时才出现。 */
+.tool-chevron {
+  color: var(--t4); transition: transform .15s, opacity .12s;
+  display: flex; opacity: 0;
+}
+.tool-row:hover .tool-chevron { opacity: 1; }
+.tool-chevron.open { transform: rotate(90deg); opacity: 1; }
+
+/* ── 运行态：文字上从左往右扫过的高光 ────────────────────────────────
+   用 background-clip: text 做「文字本身在流动」，而不是给行加背景。
+   好处是焦点落在文字上，行的高度与常态完全一致——
+   动画不会造成任何布局位移，几十行里只有这一行是「活的」。 */
+@keyframes tool-sweep {
+  from { background-position: 160% 0; }
+  to { background-position: -60% 0; }
+}
+.tool-row.is-running .tool-summary {
+  background-image: linear-gradient(
+    100deg,
+    var(--t4) 0%,
+    var(--t4) 38%,
+    var(--t1) 50%,
+    var(--t4) 62%,
+    var(--t4) 100%
+  );
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: tool-sweep 2.1s linear infinite;
+}
+/* 用户要求减弱动效时不做扫光，退化为静态提亮 */
+@media (prefers-reduced-motion: reduce) {
+  .tool-row.is-running .tool-summary {
+    animation: none;
+    background-image: none;
+    color: var(--t1);
+    -webkit-text-fill-color: currentColor;
+  }
+}
 
 .chip {
   font-size: 10px; padding: 1px 6px; border-radius: var(--r-xs);
   background: rgba(255,255,255,0.07); color: var(--t3);
   border: 1px solid var(--edge-soft);
 }
-.chip-running { color: var(--accent); background: var(--accent-dim); border-color: rgba(106,165,255,0.3); }
-.chip-fail { color: var(--danger); background: var(--danger-dim); border-color: rgba(248,113,113,0.3); }
-.chip-declined { color: var(--violet); background: var(--violet-dim); border-color: rgba(167,139,250,0.35); }
+/* 退出码/耗时这类「已结束」的信息只给颜色，不给实色底：
+   它们不需要吸引点击，只需要在扫视时能被区分出来。 */
+.chip-running { color: var(--accent); background: transparent; border-color: rgba(106,165,255,0.35); }
+.chip-fail { color: var(--danger); background: transparent; border-color: rgba(248,113,113,0.35); }
+.chip-declined { color: var(--violet); background: transparent; border-color: rgba(167,139,250,0.35); }
 
 .file-chip { display: inline-flex; align-items: center; gap: 5px; margin-right: 10px; }
 .add { color: var(--ok); font-family: var(--mono); font-size: 11px; }

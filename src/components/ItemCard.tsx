@@ -10,6 +10,7 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { Item } from '../types/domain';
+import { Icon } from './Icon';
 import { Markdown } from './Markdown';
 import { ToolRow } from './ToolRow';
 
@@ -67,7 +68,9 @@ export function ItemCard({
         <details className="thinking" open={streaming}>
           <summary>
             <span className="thinking-label">推理过程{streaming ? ' · 生成中' : ''}</span>
-            <span className="thinking-toggle" />
+            <span className="thinking-toggle">
+              <Icon name="chevron" size={11} />
+            </span>
           </summary>
           <div className="thinking-body">
             <Markdown>{text}</Markdown>

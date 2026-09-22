@@ -239,3 +239,85 @@ describe('输入框与对话正文的栏宽对齐', () => {
     expect(composerSrc, '不应保留只给分支用的变量').not.toMatch(/const branch\s*=/);
   });
 });
+
+/**
+ * 工具行的视觉层级：常态弱化，只有运行态是焦点。
+ *
+ * # 这个测试在防什么
+ *
+ * 一次任务会跑几十条工具调用。若每条都带图标底座、实色状态 chip、
+ * 常显箭头，整屏就是一片等重的盒子——用户既扫不出「现在在做什么」，
+ * 也扫不出「哪一步失败了」。这是纯视觉问题，jsdom 不做样式计算，
+ * DOM 测试完全看不见，所以做静态检查。
+ *
+ * 同时钉住「唯一的动画只给运行态」：动效一多，焦点就散了。
+ */
+describe('工具行的视觉层级', () => {
+  const root3 = join(__dirname, '..', '..', '..');
+  const c3 = readFileSync(join(root3, 'src/styles.css'), 'utf8');
+  const toolSrc = readFileSync(join(root3, 'src/components/ToolRow.tsx'), 'utf8');
+
+  function body3(sel: string): string {
+    const stripped = c3.replace(/\/\*[\s\S]*?\*\//g, '');
+    const m = new RegExp(
+      sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\{',
+    ).exec(stripped);
+    if (!m) throw new Error(`未找到规则 ${sel}`);
+    const start = m.index + m[0].length;
+    return stripped.slice(start, stripped.indexOf('}', start));
+  }
+
+  it('图标没有底座（无背景、无边框）——几十行排下来会像一排按钮', () => {
+    const icon = body3('.tool-icon');
+    expect(icon, '图标不应带背景').not.toMatch(/background\s*:/);
+    expect(icon, '图标不应带边框').not.toMatch(/border\s*:/);
+  });
+
+  it('工具行常态无边框、无背景（hover 才浮出极淡的底）', () => {
+    const row = body3('.tool-row');
+    expect(row, '工具行不应有边框').not.toMatch(/border\s*:/);
+    expect(row, '工具行不应有常驻背景').not.toMatch(/background\s*:(?!\s*none)/);
+    expect(body3('.tool-row:hover'), 'hover 仍需给可点的提示').toMatch(/background\s*:/);
+  });
+
+  it('运行态用文字扫光表达，且是唯一的动画', () => {
+    const running = body3('.tool-row.is-running .tool-summary');
+    expect(running, '运行态应有扫光动画').toContain('animation');
+    expect(running, '用 background-clip:text 让文字本身流动').toContain('background-clip: text');
+    // 行高度不能因动画改变（否则几十行里只有这一行会在视觉上跳动）
+    expect(running, '不应改动尺寸属性').not.toMatch(/(?:height|padding|margin)\s*:/);
+
+    // 动画 keyframes 必须存在
+    expect(c3).toContain('@keyframes tool-sweep');
+  });
+
+  it('减弱动效偏好下不做扫光（可访问性）', () => {
+    expect(c3, '缺少 prefers-reduced-motion 分支').toContain('prefers-reduced-motion');
+    const i = c3.indexOf('prefers-reduced-motion');
+    const block = c3.slice(i, i + 400);
+    expect(block, '该分支应关掉扫光动画').toContain('animation: none');
+  });
+
+  it('运行中不再叠一个「运行中」徽标（与标签重复，且它最抢眼）', () => {
+    expect(toolSrc, '不应再有 chip-running').not.toContain('chip-running');
+    // 标签换成状态词
+    expect(toolSrc, '运行中应把类型标签换成状态词').toContain('正在执行');
+  });
+
+  it('chevron 常态隐藏，hover 或展开时才出现', () => {
+    expect(body3('.tool-chevron'), 'chevron 常态应透明').toMatch(/opacity:\s*0/);
+    expect(body3('.tool-row:hover .tool-chevron'), 'hover 应显形').toMatch(/opacity:\s*1/);
+  });
+
+  it('推理行同样弱化（它是过程性信息，比工具调用还频繁）', () => {
+    const th = body3('.thinking');
+    expect(th, '推理行不应有边框').not.toMatch(/border\s*:/);
+    expect(th, '推理行不应有常驻背景').not.toMatch(/background\s*:/);
+  });
+
+  it('开合箭头用同一个 glyph 旋转，不用两套字符', () => {
+    // `▸`/`▾` 是两个字形，切换时会跳变
+    expect(c3, '不应再用 ▸ / ▾ 字符').not.toMatch(/content:\s*'[▸▾]'/);
+    expect(body3('.thinking-toggle'), '应靠 transform 旋转').toContain('transform');
+  });
+});
