@@ -212,12 +212,24 @@ describe('输入框与对话正文的栏宽对齐', () => {
     expect(body('.composer-inner')).toMatch(/margin:\s*0 auto/);
   });
 
-  it('输入框默认高度不小于两行（此前 26px 单行显得像细条）', () => {
+  it('输入框默认高度不小于三行（此前 26px 单行显得像细条）', () => {
     const ta = body('.composer-box textarea');
     const m = ta.match(/min-height:\s*(\d+)px/);
     expect(m, '未找到 min-height').not.toBeNull();
-    // 行高 1.6 × 15px ≈ 24px，两行约 48px；取 46 作为下限
-    expect(Number(m![1]), '默认高度过低，输入框会显得像细条').toBeGreaterThanOrEqual(46);
+    // 行高 1.6 × 15px = 24px，三行约 72px；低于此输入框会显得局促
+    expect(Number(m![1]), '默认高度过低，输入框会显得像细条').toBeGreaterThanOrEqual(72);
+  });
+
+  it('输入区不再画通栏分隔线（那条线在深底上呈现为一道白线）', () => {
+    // 输入框本身是带边框的圆角块；再叠一条通栏线会像「线下面挂了个盒子」。
+    // 参照客户端的输入区是独立浮起的块，没有通栏线。
+    const c = body('.composer');
+    expect(c, '不应再有 border-top 分隔线').not.toMatch(/border-top:/);
+  });
+
+  it('栏宽用固定像素而非 ch（ch 随元素字号变化，多处算不出同一宽度）', () => {
+    const root = body(':root');
+    expect(root, '--read-width 应为固定像素上限').toMatch(/--read-width:\s*min\(\d+px,\s*100%\)/);
   });
 
   it('分支不在输入区渲染（它属于工具栏的 Git 段）', () => {
