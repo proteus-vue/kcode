@@ -7,7 +7,7 @@
 
 | ID | 指标 | 参照 | KCode | 状态 | 优先级 |
 |---|---|---|---|---|---|
-| IA-01 | 三栏：左导航 / 中对话 / 右审阅 | Codex command center | Sidebar+Main+Inspector，可折叠拖拽 | ✅ | — |
+| IA-01 | 三栏：左导航 / 中对话 / 右审阅 | Codex command center | Sidebar+Main+Inspector，可折叠拖拽；**中栏顶栏浮动沉浸**（见 VS-11） | ✅ | — |
 | IA-02 | 左栏「项目分组+最近」 | Project→Thread | Sidebar 分组+recent | ✅ | — |
 | IA-03 | 线程排序=待用户操作优先 | 等待审批>运行中>… | threadSortRank | ✅ | — |
 | IA-04 | Thread 行：标题/仓库/worktree/模型/变更数/状态 | 方案 §2.2 | 标题+相对时间+状态+待审批+**变更文件数Δ**+**模型徽标**（Sidebar ThreadRow；纯函数 changedFileCount/shortModelName，ThreadState.name/model + threadMeta 事件）；worktree 标签无数据源（worktree 创建本身未实现，见 IA-06） | 🟡 | P0 |
@@ -130,6 +130,8 @@
 | VS-08 | 工具输出超阈值折叠 | 30KB | `foldOutput()` 30k 字符，**保留尾部**（关键信息在末尾） | ✅ |
 | VS-09 | 自动滚动不抢用户滚动条 | — | `autoScroll.ts` + `useAutoScroll`，上滑即停并出「回到底部」 | ✅ |
 | VS-10 | 工具调用卡片默认折叠 | — | ToolRow 默认折叠 | ✅ |
+| VS-11 | 内容沉浸到顶部导航之下 | Codex toolbar 在 y=0，内容从其下穿过 | 中栏顶栏改**浮动**（absolute + 底部渐隐 + backdrop 模糊），`.main` 不再让出 40px 标题栏带；顶部留白做在滚动容器内边距上（随内容滚走，内容才能穿过） | ✅ |
+| VS-12 | 自建图标集（非拼凑） | 三家均为自有图标 | `Icon.tsx` 30 枚全部重构：16×16 网格 + 统一描边 + JSX 片段（`rect rx`/`circle r` 保证圆角）；规范由 `__tests__/iconSet.test.ts` 9 项守卫；渲染实测修正 `edit`（曾像匕首）与 `wrench`（曾像放大镜/棒棒糖） | ✅ |
 
 **VS-06 偏离理由**：折叠到 0 是我们当前的行为，实测可用（顶栏有显式开关按钮
 与 ⌘B 快捷键，不会出现「关了就打不开」）。但确实不如 62px 图标栏——折叠后
