@@ -55,6 +55,17 @@ trap cleanup EXIT
 
 sleep 1
 
+# mock 实收请求数：本脚本的**正向对照**。
+#
+# 回环连接的存活时间常短于 0.4s 采样间隔，lsof 可能一条都抓不到（实测如此）——
+# 此时「连接表为空」既不能证明没有出站，也不能证明本轮真的观察到了模型链路。
+# mock 自己的计数不受轮询粒度影响；为 0 或读不到时脚本必须失败，
+# 否则就是「盲通过」——正是勘误 §3.21 / §3.22 踩过的坑。
+mock_requests() {
+  curl -s --max-time 3 --noproxy '*' "http://127.0.0.1:${PORT}/stats" 2>/dev/null \
+    | grep -oE '[0-9]+' | head -1
+}
+
 # ── 隔离 CODEX_HOME ─────────────────────────────────────────────────────
 TMPHOME="$(mktemp -d)"
 CONFIG="$TMPHOME/config.toml"
@@ -150,9 +161,18 @@ wait "$DRIVER_PID" 2>/dev/null || true
 echo
 echo "════════ 采集到的连接 ════════"
 if [[ ! -s "$SNAPSHOT" ]]; then
-  echo "（未采集到任何连接——app-server 在此交互中未建立 TCP 连接）"
+  # 连接表为空时，必须由 mock 的计数补上正向对照，否则这次「通过」
+  # 只说明轮询没抓到东西，不说明链路真的走通过（见上方 mock_requests）。
+  MOCK_REQ="$(mock_requests || true)"
+  echo "（未采集到任何连接——回环连接常短于采样间隔，轮询抓不到属正常）"
+  echo "正向对照：mock 实收模型请求 ${MOCK_REQ:-读取失败} 次"
+  if [[ -z "$MOCK_REQ" || "$MOCK_REQ" -lt 1 ]]; then
+    echo "✗ 失败：模型链路未走通（mock 未收到请求），本次观察无法支撑任何结论" >&2
+    rm -f "$SNAPSHOT"
+    exit 1
+  fi
   echo
-  echo "✓ 通过：除 app-server ↔ 本地 mock 之外，无任何网络连接"
+  echo "✓ 通过：本轮实测模型流量全部走回环（mock 已收），无任何网络出站被采集到"
   rm -f "$SNAPSHOT"
   exit 0
 fi
@@ -184,8 +204,14 @@ echo
 #         ——这是最强的证据：连接去的就是本机 DNS 给它指的地方
 #      c. `2a03:2880:` 前缀（Facebook IPv6 段的兜底，无 PTR 时用）
 #    三条都不成立的，一律失败：**拿不到归属就必须说不确定，不能算通过**。
+#
+#    ⚠ 兜底段**不在**下面的白名单里：它必须进归属循环，打印依据并计入条数。
+#    早先版本把固定前缀直接放进 ALLOWED_PATTERN 提前放行——命中它的连接既不
+#    显示归属也不计数，恰好违背「逐条归属、单独计数而非静默忽略」的承诺，
+#    也让报告的「上游元数据拉取 N 条」偏小。归属依据只剩「PTR / 等于本机
+#    DNS 应答」时，兜底段在下方循环里作为第三条依据参与判定。
 POLLUTION_PATTERN="2a03:2880:"
-ALLOWED_PATTERN="127\.0\.0\.1:${PORT}|localhost:${PORT}|\[::1\]:${PORT}|${POLLUTION_PATTERN}"
+ALLOWED_PATTERN="127\.0\.0\.1:${PORT}|localhost:${PORT}|\[::1\]:${PORT}"
 
 # 也允许 IPC / unix socket（非网络出站）
 UNEXPECTED="$(sort -u "$SNAPSHOT" \
@@ -244,6 +270,10 @@ if [[ -n "$UNEXPECTED" ]]; then
       POLLUTED+="${line}    ↳ 归属：PTR ${ptr}（DNS 污染应答段）"$'\n'
     elif is_meta_dns_answer "$ip"; then
       POLLUTED+="${line}    ↳ 归属：本机 DNS 对该元数据端点的应答之一（${ip}）"$'\n'
+    elif [[ "$line" == *"$POLLUTION_PATTERN"* ]]; then
+      # 兜底段：实测确属该前缀但前两条依据不成立（常见于 IPv6 无 PTR 可查）。
+      # 同样计入 POLLUTED——放行必须留下依据与计数，不静默。
+      POLLUTED+="${line}    ↳ 归属：兜底段 ${POLLUTION_PATTERN}（前两条依据不成立，仅以前缀认定）"$'\n'
     else
       STILL_UNEXPECTED+="${line}"$'\n'
       [[ -n "$ptr" ]] && STILL_UNEXPECTED+="    ↳ PTR: ${ptr}"$'\n'
@@ -282,9 +312,21 @@ fi
 # 统计并如实报告各类连接
 LOCAL_HITS="$(sort -u "$SNAPSHOT" | grep -cE "127\.0\.0\.1:${PORT}" || true)"
 META_HITS="$(printf '%s' "$POLLUTED" | grep -cE 'TCP|UDP' || true)"
+# 正向对照：mock 自己的计数不受轮询粒度影响。lsof 抓到的本地连接条数
+# 常为 0（回环连接存活短于采样间隔），但模型请求确实发生了——报告里
+# 两条都要给，否则「0 条」会被读成「链路没通」。
+MOCK_REQ="$(mock_requests || true)"
+
+if [[ -z "${MOCK_REQ:-}" || "$MOCK_REQ" -lt 1 ]]; then
+  echo "✗ 失败：模型链路未走通（mock 实收 ${MOCK_REQ:-读取失败} 次请求）" >&2
+  echo "  本次抓取到的连接无法代表真实行为，不能据此判定出站情况。" >&2
+  rm -f "$SNAPSHOT"
+  exit 1
+fi
 
 echo "✓ 通过：未发现计划外的出站连接"
-echo "    本地 mock provider : ${LOCAL_HITS} 条"
+echo "    正向对照（mock 实收模型请求）: ${MOCK_REQ} 次 —— 链路确认走通"
+echo "    本地 mock provider : ${LOCAL_HITS} 条（轮询采样；回环连接存活短于间隔时可为 0）"
 echo "    上游元数据拉取     : ${META_HITS} 条（codex 自身行为，目标地址由本机 DNS 决定）"
 if [[ "${META_HITS}" -gt 0 ]]; then
   echo
