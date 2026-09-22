@@ -46,6 +46,7 @@ type IconName =
   | 'folder'
   | 'terminal'
   | 'file'
+  | 'image'
   | 'edit'
   | 'check'
   | 'close'
@@ -208,6 +209,14 @@ const ICONS: Record<IconName, ReactNode> = {
     <>
       <path d="M9.3 1.8H4.8a1.55 1.55 0 00-1.55 1.55v9.3a1.55 1.55 0 001.55 1.55h6.4a1.55 1.55 0 001.55-1.55V5.4L9.3 1.8z" />
       <path d="M9.3 1.8v3.6h3.45" />
+    </>
+  ),
+  /** 图片：圆角画框 + 山与太阳。用于图片附件（粘贴 / 拖入 / 截图）。 */
+  image: (
+    <>
+      <rect x="2.1" y="3.2" width="11.8" height="9.6" rx="1.8" />
+      <circle cx="5.7" cy="6.7" r="1.25" />
+      <path d="M2.6 11.4l3.1-3.1 2.5 2.5 2.1-2.1 3 3" />
     </>
   ),
   /**

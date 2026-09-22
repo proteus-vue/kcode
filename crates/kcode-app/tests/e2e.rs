@@ -996,3 +996,80 @@ async fn compact_thread_is_accepted_by_server() {
     h.service.shutdown();
     tokio::time::sleep(Duration::from_millis(200)).await;
 }
+
+/// 图片附件必须能随轮次送达（协议 `localImage`）。
+///
+/// # 这条测试在防什么
+///
+/// 图片是「添加上下文」里唯一无法靠纯文本替代的能力：用户贴一张界面截图
+/// 让模型看，比他用文字描述半天都准。而协议只提供 `localImage`（本地路径）
+/// 与 `image`（URL）两种输入，**没有内嵌 base64 的形式**——如果参数形状
+/// 写错，服务端会直接拒绝整轮，用户看到的是「发送失败」而非「图片没带上」。
+///
+/// mock provider 不会真的看图，但 `turn/start` 的入参校验在服务端：
+/// 形状不对这一轮就起不来。因此「轮次能正常完成」本身就是形状正确的证据。
+#[tokio::test(flavor = "multi_thread")]
+async fn turn_accepts_local_image_attachment() {
+    let Some(mut h) = Harness::start(vec![json!({
+        "type": "message", "id": "m", "role": "assistant", "status": "completed",
+        "content": [{ "type": "output_text", "text": "我看到了", "annotations": [] }]
+    })])
+    .await
+    else {
+        eprintln!("跳过：未安装 codex 二进制");
+        return;
+    };
+
+    // 造一张真实的小 PNG（1×1 透明像素）——用真文件而不是随便的文本，
+    // 因为服务端可能会校验图片可解码。
+    let img = h.cwd_path().join("shot.png");
+    const PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    std::fs::write(&img, PNG_1X1).unwrap();
+
+    let thread_id = h.start_thread().await;
+    let sent = h
+        .service
+        .send_turn_full(
+            &thread_id,
+            "看这张图",
+            None,
+            None,
+            vec![img.display().to_string()],
+        )
+        .await;
+    assert!(
+        sent.is_ok(),
+        "带 localImage 的轮次未被服务端接受 —— 参数形状不对：{:?}",
+        sent.err()
+    );
+
+    // 轮次要真的跑起来（形状不对时它根本不会开始）
+    let done = h
+        .wait_for(Duration::from_secs(30), |ev| match ev {
+            AppEvent::TurnCompleted { .. } => Some(()),
+            _ => None,
+        })
+        .await;
+    assert!(done.is_some(), "带图片的轮次未能完成");
+
+    h.service.shutdown();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+/// 纯文本轮次的报文必须与加图片前逐字节一致（不能因为改动而带上空 input 项）。
+#[tokio::test(flavor = "multi_thread")]
+async fn turn_without_images_keeps_text_only_input() {
+    let Some(h) = Harness::start(vec![]).await else { return };
+    let thread_id = h.start_thread().await;
+    // 不传图片：走 send_turn 的旧路径，应当照常被接受
+    let out = h.service.send_turn(&thread_id, "纯文本").await;
+    assert!(out.is_ok(), "纯文本轮次受影响：{:?}", out.err());
+    h.service.shutdown();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}

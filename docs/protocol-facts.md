@@ -182,6 +182,30 @@ approvalPolicy: anyOf, approvalsReviewer: anyOf, baseInstructions: string|null, 
   （带 `sessionId`）。因此形态**只能实测**，推不出来。
 - 参数：`{"query": string, "roots": [string]}`，两者皆必填。
 
+### ⚠️ 图片输入的形态：只有路径/URL，没有内嵌字节
+
+`turn/start` 的 `input` 数组元素（`UserInput`）实测有 7 种：
+
+| type | 载荷 | 用途 |
+|---|---|---|
+| `text` | `text`, `text_elements[]` | 正文 |
+| `image` | `url`, `detail` | 网络图片 |
+| `localImage` | `path`, `detail` | **本地图片（我们用的）** |
+| `audio` / `localAudio` | `url` / `path` | 音频 |
+| `skill` | `name`, `path` | 技能引用 |
+| `mention` | `name`, `path` | 文件引用 |
+
+**关键**：图片**没有内嵌 base64 的形式**。因此：
+
+- 拖入的文件（Tauri 拖放事件直接给出绝对路径）→ 直接传路径，不必落盘；
+- 剪贴板粘贴的图片（只有字节、没有路径）→ **必须先写到磁盘**再传路径
+  （实现见 `crates/kcode-desktop` 的 `save_attachment`，目录固定在自己
+  app_data 下，不接受调用方指定，避免路径注入面）。
+
+由 `crates/kcode-app/tests/e2e.rs::turn_accepts_local_image_attachment`
+对真 app-server 验证：形状不对时该轮根本起不来，所以「轮次能完成」就是
+形状正确的证据。
+
 ### `thread/compact/start` 参数形状
 
 `{"threadId": string}`，仅此一项。服务端接受后压缩结果经 `thread/compacted`

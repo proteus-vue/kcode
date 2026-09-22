@@ -58,7 +58,7 @@ function applyDecisionLocally(
 }
 
 /** 判断是否运行在 Tauri 环境中（浏览器里跑单测时为 false）。 */
-function inTauri(): boolean {
+export function inTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
@@ -122,7 +122,7 @@ export interface KcodeApi {
   createThread: () => Promise<void>;
   refreshThreads: () => Promise<string[]>;
   openThread: (threadId: string) => Promise<void>;
-  sendTurn: (text: string) => Promise<void>;
+  sendTurn: (text: string, images?: string[]) => Promise<void>;
   decide: (requestId: string, decision: ApprovalDecision, scope?: string) => Promise<void>;
   interrupt: (turnId: string) => Promise<void>;
   exportAudit: () => Promise<string>;
@@ -508,7 +508,7 @@ export function useKcode(): KcodeApi {
 
   openThreadRef.current = openThread;
 
-  const sendTurn = useCallback(async (text: string) => {
+  const sendTurn = useCallback(async (text: string, images: string[] = []) => {
     const threadId = activeRef.current;
     if (!inTauri() || !threadId) return;
     try {
@@ -517,6 +517,8 @@ export function useKcode(): KcodeApi {
         text,
         model: selectedModel,
         effort: selectedEffort,
+        // 图片以路径传输（协议 localImage 只认路径，没有内嵌字节的形式）
+        images,
       });
     } catch (e) {
       setState((prev) => ({ ...prev, errors: [...prev.errors, extractErrorMessage(e)] }));

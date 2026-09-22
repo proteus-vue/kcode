@@ -80,7 +80,8 @@
 | CS-02 | 模型后端查询 | 非硬编码 | models | ✅ | — |
 | CS-03 | effort 与模型并列 | 深度 | EFFORT_LABEL | ✅ | — |
 | CS-04 | 运行中停止 | 可中断 | onStop | ✅ | — |
-| CS-05 | 附件结构化发给模型 | 上下文 | serialize+测试 | ✅ | — |
+| CS-05 | 附件结构化发给模型 | 上下文 | 网页元素走 `serializeWebElements`（文本）；**图片走协议 `localImage`（路径）** | ✅ | — |
+| CS-05b | 图片附件：拖入 / 粘贴 | 规格 04 §4.5 | **已落地**：拖放（Tauri 直接给绝对路径，不落盘）与粘贴（剪贴板只有字节，经 `save_attachment` 落盘）双通道；类型白名单 + 20MB 上限 + 缩略图预览 + 拒绝原因 `role=alert`。`attachmentImage.ts` 15 项纯函数测试（边界 ±1 字节、非图片类型、保序）；e2e 对真 app-server 验证 `localImage` 形状 | ✅ | P1 |
 | CS-06 | Slash `/review` `/commit`… | 命令映射 | **`/compact` 已落地**（`thread/compact/start`，e2e 对真 app-server 验证参数形状）；未知命令按普通文本发送（不做假命令，见 CS-11） | 🟡 | P1 |
 | CS-07 | AGENTS.md 预览 | 扩展层 | **无** | ❌ | P1 |
 | CS-06b | `@` 引用工作区文件 | 规格 04 §4.5 | **已落地**：`fuzzyFileSearch` → `searchFiles` → 输入框 `@` 候选（防抖 120ms、键盘导航、Esc 只关列表）；`atQueryAt` 纯函数 8 项测试**专防邮箱地址误触发**；协议细节见 `protocol-facts.md`（该方法用 snake_case，与其余方法不同） | ✅ | P1 |

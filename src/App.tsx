@@ -526,7 +526,7 @@ export default function App() {
 
         <Composer
           disabled={!thread}
-          onSubmit={(t) => void api.sendTurn(t)}
+          onSubmit={(t, images) => void api.sendTurn(t, images)}
           running={running || awaitingApproval}
           onStop={() => {
             if (latestTurnId) void api.interrupt(latestTurnId);

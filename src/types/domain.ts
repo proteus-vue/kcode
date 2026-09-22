@@ -469,3 +469,25 @@ export interface FileMatch {
   /** 命中字符在文件名中的下标（可选高亮）。 */
   indices: number[];
 }
+
+/**
+ * 粘贴的图片附件。
+ *
+ * 与 `WebElementAttachment`（网页元素）分开：两者的生命周期与投递方式
+ * 完全不同——网页元素被序列化成**文本**发出去，图片则是以协议
+ * `localImage` 的形式、用**路径**随轮次提交。
+ */
+export interface ImageAttachment {
+  kind: 'image';
+  /** 落盘后的绝对路径——协议 `localImage` 需要它。 */
+  path: string;
+  /** 原始文件名，仅用于展示。 */
+  name: string;
+  /** data URL，用于缩略图预览（CSP 允许 data:）。 */
+  preview: string;
+  /** 字节数，用于展示与上限校验。 */
+  size: number;
+}
+
+/** 输入区可携带的附件。 */
+export type ComposerAttachment = WebElementAttachment | ImageAttachment;

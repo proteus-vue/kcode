@@ -166,7 +166,8 @@ describe('↑ / ↓ 历史回溯', () => {
     const { onSubmit } = mount();
     type('第一条指令');
     key('Enter');
-    expect(onSubmit).toHaveBeenCalledWith('第一条指令');
+    // 第二个参数是图片路径列表；无图片时为空数组（轮次报文因此保持纯文本）
+    expect(onSubmit).toHaveBeenCalledWith('第一条指令', []);
     expect(ta().value).toBe('');
 
     key('ArrowUp', { cursorAt: 0 });
@@ -312,6 +313,62 @@ describe('斜杠命令', () => {
     const { onSubmit } = mount({ onCompact: () => {} });
     type('/unknown');
     key('Enter');
-    expect(onSubmit).toHaveBeenCalledWith('/unknown');
+    expect(onSubmit).toHaveBeenCalledWith('/unknown', []);
+  });
+});
+
+describe('图片附件（拖入 / 粘贴）', () => {
+  /**
+   * 造一个 paste 事件。
+   *
+   * jsdom 里没有 `ClipboardEvent` 构造器（实测 ReferenceError），
+   * 因此用 MouseEvent 充当载体再挂上 clipboardData——React 的
+   * onPaste 只读取该属性，事件类名不影响。
+   */
+  function pasteWith(files: File[]) {
+    const ta = host!.querySelector('textarea') as HTMLTextAreaElement;
+    const ev = new MouseEvent('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, 'clipboardData', { value: { files } });
+    act(() => {
+      ta.dispatchEvent(ev);
+    });
+    return ev;
+  }
+
+  it('粘贴非图片时给出可读拒绝原因（不静默丢弃）', () => {
+    mount();
+    pasteWith([new File(['plain'], 'notes.txt', { type: 'text/plain' })]);
+    const err = host!.querySelector('.attach-error');
+    expect(err).not.toBeNull();
+    // 用户常以为自己复制的是图片，错误里必须点明实际类型与文件名
+    expect(err!.textContent).toContain('notes.txt');
+    expect(err!.textContent).toContain('text/plain');
+  });
+
+  it('附件被拒的提示带 role=alert（辅助技术需即时播报）', () => {
+    mount();
+    pasteWith([new File(['x'], 'a.pdf', { type: 'application/pdf' })]);
+    expect(host!.querySelector('.attach-error')?.getAttribute('role')).toBe('alert');
+  });
+
+  it('纯文本粘贴走默认行为（不抢剪贴板）', () => {
+    mount();
+    const ev = pasteWith([]);
+    // 未被 preventDefault，才不会阻断正常的文本粘贴
+    expect(ev.defaultPrevented).toBe(false);
+  });
+
+  it('过多的图片被拒时给出体积原因', () => {
+    mount();
+    const big = new File([new Uint8Array(10)], 'huge.png', { type: 'image/png' });
+    Object.defineProperty(big, 'size', { value: 25 * 1024 * 1024 });
+    pasteWith([big]);
+    const err = host!.querySelector('.attach-error');
+    expect(err?.textContent).toContain('上限 20MB');
+  });
+
+  it('占位文案提示可粘贴/拖入图片（否则用户不知道支持）', () => {
+    mount();
+    expect((host!.querySelector('textarea') as HTMLTextAreaElement).placeholder).toContain('图片');
   });
 });

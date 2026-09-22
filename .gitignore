@@ -33,3 +33,6 @@ logs/
 
 # Tauri 打包用的暂存二进制（由 scripts/stage-codex-binary.sh 生成，225MB，不入库）
 crates/kcode-desktop/binaries/
+
+# ZCode 工具自动生成的忽略规则（非本项目文件）
+.zcodeignore

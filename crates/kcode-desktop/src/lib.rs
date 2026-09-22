@@ -466,9 +466,12 @@ async fn send_turn(
     // 注意：tauri::command 的参数上不能写文档注释。
     model: Option<String>,
     effort: Option<String>,
+    // 随轮次附加的本地图片绝对路径（协议 localImage）。
+    // 前端拖入的文件已有路径；粘贴的图片先经 save_attachment 落盘再传路径。
+    images: Option<Vec<String>>,
 ) -> Result<String, CommandError> {
     let svc = require_service(&state).await?;
-    svc.send_turn_with(thread_id, text, model, effort)
+    svc.send_turn_full(thread_id, text, model, effort, images.unwrap_or_default())
         .await
         .map_err(CommandError::from)
 }
@@ -646,6 +649,62 @@ async fn compact_thread(
 ) -> Result<(), CommandError> {
     let svc = require_service(&state).await?;
     svc.compact_thread(thread_id).await.map_err(CommandError::from)
+}
+
+/// 保存粘贴的图片附件，返回可交给 `localImage` 的绝对路径。
+///
+/// # 为什么必须落盘
+///
+/// 协议的图片输入只有 `localImage`（本地路径）与 `image`（URL）两种，
+/// **没有内嵌 base64 的形式**。从剪贴板粘进来的是字节、没有路径，
+/// 因此必须先写到磁盘。
+///
+/// 写入位置固定在自己的 app_data 下（`attachments/`），不接受调用方指定
+/// 目录：这是唯一避免「前端传什么就写什么」的路径注入面的做法。
+/// 拖放进来的文件本来就有路径，不走这里。
+#[tauri::command]
+async fn save_attachment(
+    state: State<'_, AppState>,
+    file_name: String,
+    data_base64: String,
+) -> Result<String, CommandError> {
+    use base64::Engine as _;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|e| CommandError::from(format!("附件数据不是合法 base64：{e}")))?;
+
+    // 单条上限 20MB：模型侧对图片本就有分辨率上限，更大的图既送不进去
+    // 也会把报文撑爆。提前挡住并给出可读原因，比让上游报错更好排查。
+    const MAX: usize = 20 * 1024 * 1024;
+    if bytes.len() > MAX {
+        return Err(CommandError::from(format!(
+            "图片过大（{:.1}MB，上限 20MB）",
+            bytes.len() as f64 / 1024.0 / 1024.0
+        )));
+    }
+
+    let dir = state.paths.app_data.join("attachments");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| CommandError::from(format!("创建附件目录失败：{e}")))?;
+
+    // 只取扩展名，文件名由我们生成：调用方给的名字可能含 `/` 或 `..`，
+    // 直接拼进路径就是路径穿越。时间戳 + 随机后缀避免同名覆盖。
+    let ext = std::path::Path::new(&file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| e.len() <= 8 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or("png");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = dir.join(format!("attachment-{stamp}.{ext}"));
+
+    std::fs::write(&path, &bytes)
+        .map_err(|e| CommandError::from(format!("写入附件失败：{e}")))?;
+
+    Ok(path.display().to_string())
 }
 
 /// 列出当前工作区可见的技能。
@@ -844,6 +903,7 @@ pub fn run() {
             decide_file,
             list_threads_remote,
             list_skills,
+            save_attachment,
             fuzzy_search_files,
             compact_thread,
             list_plugins,

@@ -395,6 +395,8 @@ enum Command {
         text: String,
         model: Option<String>,
         effort: Option<String>,
+        /// 附加的本地图片绝对路径（协议 `localImage`）。
+        images: Vec<String>,
         reply: oneshot::Sender<Result<String, String>>,
     },
     Steer {
@@ -712,8 +714,25 @@ impl AgentService {
         model: Option<String>,
         effort: Option<String>,
     ) -> Result<String, String> {
+        self.send_turn_full(thread_id, text, model, effort, Vec::new()).await
+    }
+
+    /// 提交轮次，并附带本地图片作为上下文（协议 `localImage`）。
+    ///
+    /// 图片以**路径**而非字节传输：协议提供 `localImage`（本地路径）与
+    /// `image`（URL）两种，没有内嵌 base64 的形式。因此前端贴图后要先落盘，
+    /// 这里只转发路径——好处是不必把图片塞进 JSON-RPC 报文（大图会让
+    /// 单条消息几十 MB，读写都变慢）。
+    pub async fn send_turn_full(
+        &self,
+        thread_id: impl Into<String>,
+        text: impl Into<String>,
+        model: Option<String>,
+        effort: Option<String>,
+        images: Vec<String>,
+    ) -> Result<String, String> {
         let (thread_id, text) = (thread_id.into(), text.into());
-        self.call(|reply| Command::SendTurn { thread_id, text, model, effort, reply })
+        self.call(|reply| Command::SendTurn { thread_id, text, model, effort, images, reply })
             .await
     }
 
@@ -1167,10 +1186,16 @@ async fn handle_command(
             }
         }
 
-        Command::SendTurn { thread_id, text, model, effort, reply } => {
+        Command::SendTurn { thread_id, text, model, effort, images, reply } => {
+            // 文本在前、图片在后：模型的阅读顺序与用户「先说事、再给材料」
+            // 的顺序一致，也让纯文本轮次的报文与改动前逐字节相同。
+            let mut input = vec![json!({ "type": "text", "text": text })];
+            for path in &images {
+                input.push(json!({ "type": "localImage", "path": path }));
+            }
             let mut params = json!({
                 "threadId": thread_id,
-                "input": [{ "type": "text", "text": text }],
+                "input": input,
             });
             // 逐轮可覆盖模型与推理强度（协议在 turn/start 上支持）
             if let Some(m) = model {

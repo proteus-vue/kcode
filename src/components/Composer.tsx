@@ -26,9 +26,19 @@ import {
   pushHistory,
   type HistoryCursor,
 } from './composerHistory';
+import {
+  extensionOf,
+  formatSize,
+  imageFilesFrom,
+} from './attachmentImage';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { inTauri } from '../stores/useKcode';
 import type {
+  ComposerAttachment,
   FileMatch,
   GitStatus,
+  ImageAttachment,
   ModelOption,
   PermissionMode,
   WebElementAttachment,
@@ -82,7 +92,8 @@ export function Composer({
   onCompact,
 }: {
   disabled: boolean;
-  onSubmit: (text: string) => void;
+  /** 提交一轮。`images` 是随轮次上传的本地图片绝对路径（协议 `localImage`）。 */
+  onSubmit: (text: string, images?: string[]) => void;
   onStop?: () => void;
   running?: boolean;
   models: ModelOption[];
@@ -116,9 +127,13 @@ export function Composer({
 }) {
   const [text, setText] = useState('');
   /** 已附加的引用材料。发送时随正文一起提交。 */
-  const [attachments, setAttachments] = useState<WebElementAttachment[]>([]);
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   /** 展开预览的附件（看完整内容）。 */
   const [preview, setPreview] = useState<number | null>(null);
+  /** 附件被拒的原因（类型不对/过大）。不静默丢弃。 */
+  const [attachError, setAttachError] = useState<string | null>(null);
+  /** 正在处理拖入的图片（读文件 + 落盘需要时间，期间给可见反馈）。 */
+  const [dropping, setDropping] = useState(false);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   /** 已提交输入的历史（↑ 回溯，规格 04 §4.5）。 */
   const [history, setHistory] = useState<string[]>([]);
@@ -230,11 +245,14 @@ export function Composer({
     const t = text.trim();
     // 只有附件、没有正文时也应可发送：用户可能就只想说「看这个元素」
     if ((!t && attachments.length === 0) || disabled || running) return;
-    // 序列化在 attachmentSerialize 里（带测试）：模型看不到界面，
-    // 只收到这段文本，字段缺一个它就定位不到用户指的是什么
-    const attached = serializeWebElements(attachments);
+    // 两类附件走不同通道：
+    // - 网页元素 → 序列化成**文本**追加在正文后（模型只能读文字）；
+    // - 图片 → 以协议 `localImage` 的形式、用**路径**随轮次提交（见 onSubmit 第二参）。
+    const webEls = attachments.filter((a): a is WebElementAttachment => a.kind === 'webElement');
+    const images = attachments.filter((a): a is ImageAttachment => a.kind === 'image');
+    const attached = serializeWebElements(webEls);
     const full = attached ? (t ? `${t}\n\n${attached}` : attached) : t;
-    onSubmit(full);
+    onSubmit(full, images.map((im) => im.path));
     // 历史记「用户实际打的话」而不是拼上附件后的全文：
     // 回溯出来再发一次时不该把上次的引用材料又带一遍。
     setHistory((h) => pushHistory(h, t));
@@ -242,7 +260,137 @@ export function Composer({
     setText('');
     setAttachments([]);
     setPreview(null);
+    setAttachError(null);
   };
+
+  /**
+   * 加入一批图片附件。
+   *
+   * 拖放与粘贴共用：两者拿到的东西不同（拖放直接给绝对路径，
+   * 粘贴只有字节），但校验与入列的逻辑完全一致。
+   */
+  const addImages = (items: ImageAttachment[]) => {
+    if (items.length === 0) return;
+    setAttachments((prev) => [...prev, ...items]);
+    setAttachError(null);
+  };
+
+  /** 读一个 File 为 data URL（缩略图预览用）。 */
+  const readAsDataUrl = (f: File) =>
+    new Promise<string>((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result));
+      r.onerror = () => reject(new Error('读取文件失败'));
+      r.readAsDataURL(f);
+    });
+
+  /**
+   * 处理粘贴：从剪贴板取图片并落盘。
+   *
+   * 剪贴板给的是字节、没有路径，而协议只认路径（`localImage`），
+   * 因此必须先写到磁盘——走 `save_attachment` 命令，目录由后端固定，
+   * 前端不能指定，避免「传什么写什么」的路径注入面。
+   */
+  const handlePaste = async (e: React.ClipboardEvent) => {
+    const files = Array.from(e.clipboardData?.files ?? []);
+    if (files.length === 0) return; // 纯文本粘贴：走默认行为
+    e.preventDefault();
+
+    const { accepted, rejected } = imageFilesFrom(files);
+    if (rejected.length > 0) setAttachError(rejected.map((r) => r.message).join('；'));
+
+    // 非 Tauri 环境（浏览器里跑 vite dev）没有 invoke：
+    // 不提前拦会抛出「Cannot read properties of undefined」这种
+    // 与用户操作毫无关系的错误。
+    if (!inTauri()) {
+      if (accepted.length > 0) setAttachError('图片附件需要桌面端，浏览器预览不支持');
+      return;
+    }
+
+    const out: ImageAttachment[] = [];
+    for (const f of accepted) {
+      try {
+        const preview = await readAsDataUrl(f);
+        const dataBase64 = preview.slice(preview.indexOf(',') + 1);
+        const path = await invoke<string>('save_attachment', {
+          fileName: f.name || `pasted.${extensionOf(f.name, f.type)}`,
+          dataBase64,
+        });
+        out.push({
+          kind: 'image',
+          path,
+          name: f.name || '粘贴的图片',
+          preview,
+          size: f.size,
+        });
+      } catch (err) {
+        setAttachError(err instanceof Error ? err.message : String(err));
+      }
+    }
+    addImages(out);
+  };
+
+  /**
+   * 处理从系统拖入的文件。
+   *
+   * **拖放的文件本来就有绝对路径**（Tauri 在拖放事件里直接给出），
+   * 所以不经过落盘，直接把路径交给 `localImage` —— 少一次读写，
+   * 也不会在 app_data 里留下一份副本。
+   */
+  useEffect(() => {
+    if (!inTauri()) return;
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+
+    // 拖入过程中给出可见反馈：此时文件还没进来，没有反馈用户会以为
+    // 「拖了没反应」而反复拖。over/leave 由 Tauri 成对发出。
+    const onOver = () => setDropping(true);
+    const onLeave = () => setDropping(false);
+
+    void listen('tauri://drag-over', onOver).then((fn) => {
+      if (disposed) fn();
+      else unlisteners.push(fn);
+    });
+    void listen('tauri://drag-leave', onLeave).then((fn) => {
+      if (disposed) fn();
+      else unlisteners.push(fn);
+    });
+    void listen<{ paths: string[] }>('tauri://drag-drop', (ev) => {
+      setDropping(false);
+      const paths = ev.payload?.paths ?? [];
+      const isImg = (p: string) => /\.(png|jpe?g|gif|webp|bmp)$/i.test(p);
+      const imgs = paths.filter(isImg);
+      const others = paths.filter((p) => !isImg(p));
+      if (others.length > 0) {
+        setAttachError(
+          `只能附加图片，已忽略：${others.map((p) => p.split('/').pop()).join('、')}`,
+        );
+      }
+      if (imgs.length === 0) return;
+      // 拖放的文件本来就有绝对路径（Tauri 直接给出），因此不落盘、
+      // 不在 app_data 里留副本，直接把路径交给 localImage。
+      // 预览图此处不读：大图在拖入瞬间就解码会卡一下。
+      setAttachments((prev) => [
+        ...prev,
+        ...imgs.map((p) => ({
+          kind: 'image' as const,
+          path: p,
+          name: p.split('/').pop() ?? p,
+          preview: '',
+          size: 0,
+        })),
+      ]);
+      setAttachError(null);
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisteners.push(fn);
+    });
+
+    return () => {
+      disposed = true;
+      for (const fn of unlisteners) fn();
+    };
+  }, []);
 
   const current = models.find((m) => m.id === selectedModel);
   const efforts = current?.reasoningEfforts ?? [];
@@ -308,78 +456,133 @@ export function Composer({
           ))}
         </div>
       )}
-      <div className={`composer-box ${running ? 'is-running' : ''}`}>
+      <div className={`composer-box ${running ? 'is-running' : ''} ${dropping ? 'is-dropping' : ''}`}>
+        {/* 拖入时的覆盖提示：文件还没进来，必须让用户确认「松手就会加上」 */}
+        {dropping && (
+          <div className="drop-hint">
+            <Icon name="image" size={16} />
+            <span>松手即可附加图片</span>
+          </div>
+        )}
         {/* 附件区：在文本域之上。放在上面而不是下面，是因为它属于
             「这次要发送的内容」，视线应当先看到内容再看到操作。 */}
         {attachments.length > 0 && (
           <div className="composer-attachments">
-            {attachments.map((a, i) => (
+            {attachments.map((a, i) => {
               // **不能用 <button> 套 <button>**（含 role="button" 的 span）：
               // 嵌套交互元素是非法 HTML，真实浏览器的行为不可预期
               // （点击内层可能触发外层、也可能都不触发，各引擎不一）。
               // 改成一个容器 + 两个并列按钮：展开与移除各司其职。
-              <span key={`${a.selector}-${i}`} className="attach-chip">
-                <button
-                  className={`attach-open ${preview === i ? 'is-open' : ''}`}
-                  onClick={() => setPreview(preview === i ? null : i)}
-                  title={a.selector}
-                >
-                  <Icon name="compass" size={11} />
-                  <span className="attach-label">
-                    {attachments.length > 1 ? `网页元素 ${i + 1}` : '1 个网页元素'}
-                  </span>
-                </button>
-                <button
-                  className="attach-remove"
-                  aria-label="移除附件"
-                  title="移除"
-                  onClick={() => {
-                    setAttachments((prev) => prev.filter((_, j) => j !== i));
-                    setPreview(null);
-                  }}
-                >
-                  <Icon name="close" size={10} />
-                </button>
-              </span>
-            ))}
+              //
+              // 图片附件额外显示缩略图：只看文件名无法确认「是不是这张」，
+              // 而贴错图是常见操作，用户需要在发送前一眼核对。
+              const isImg = a.kind === 'image';
+              return (
+                <span key={isImg ? a.path : `${a.selector}-${i}`} className="attach-chip">
+                  {isImg && a.preview && (
+                    <img className="attach-thumb" src={a.preview} alt="" />
+                  )}
+                  <button
+                    className={`attach-open ${preview === i ? 'is-open' : ''}`}
+                    onClick={() => setPreview(preview === i ? null : i)}
+                    title={isImg ? a.path : a.selector}
+                  >
+                    <Icon name={isImg ? 'image' : 'compass'} size={11} />
+                    <span className="attach-label">
+                      {isImg
+                        ? a.name
+                        : attachments.length > 1
+                          ? `网页元素 ${i + 1}`
+                          : '1 个网页元素'}
+                    </span>
+                  </button>
+                  <button
+                    className="attach-remove"
+                    aria-label="移除附件"
+                    title="移除"
+                    onClick={() => {
+                      setAttachments((prev) => prev.filter((_, j) => j !== i));
+                      setPreview(null);
+                    }}
+                  >
+                    <Icon name="close" size={10} />
+                  </button>
+                </span>
+              );
+            })}
           </div>
         )}
 
+        {/* 附件被拒的原因：不静默丢弃——用户以为贴上了才是最坏的 */}
+        {attachError && (
+          <p className="attach-error" role="alert">
+            {attachError}
+          </p>
+        )}
+
         {/* 预览卡片：与参照一致，显示标签、内容摘要与来源。
-            点一下才展开，避免长文本一直占着输入区。 */}
+            点一下才展开，避免长文本一直占着输入区。
+            图片附件走单独分支：它的信息是「哪一张、多大」，没有选择器与正文。 */}
         {preview !== null && attachments[preview] && (
+          attachments[preview].kind === 'image' ? (
+            <div className="attach-preview">
+              <div className="attach-preview-head">
+                <span className="attach-tag">图片</span>
+                <span className="attach-size">
+                  {attachments[preview].size > 0 ? formatSize(attachments[preview].size) : '外部文件'}
+                </span>
+              </div>
+              {(attachments[preview] as ImageAttachment).preview && (
+                <img
+                  className="attach-preview-img"
+                  src={(attachments[preview] as ImageAttachment).preview}
+                  alt={attachments[preview].name}
+                />
+              )}
+              <p className="attach-src" title={(attachments[preview] as ImageAttachment).path}>
+                {(attachments[preview] as ImageAttachment).path}
+              </p>
+            </div>
+          ) : (
           <div className="attach-preview">
             <div className="attach-preview-head">
-              <span className="attach-tag">{attachments[preview].tag}</span>
+              <span className="attach-tag">{(attachments[preview] as WebElementAttachment).tag}</span>
               <span className="attach-size">
-                {attachments[preview].width}×{attachments[preview].height}
+                {(attachments[preview] as WebElementAttachment).width}×
+                {(attachments[preview] as WebElementAttachment).height}
               </span>
-              {attachments[preview].color && (
+              {(attachments[preview] as WebElementAttachment).color && (
                 <span className="attach-color">
                   <span
                     className="attach-swatch"
-                    style={{ background: attachments[preview].color }}
+                    style={{ background: (attachments[preview] as WebElementAttachment).color }}
                   />
-                  {attachments[preview].color}
+                  {(attachments[preview] as WebElementAttachment).color}
                 </span>
               )}
             </div>
-            {attachments[preview].text && (
-              <p className="attach-text">{attachments[preview].text}</p>
+            {(attachments[preview] as WebElementAttachment).text && (
+              <p className="attach-text">{(attachments[preview] as WebElementAttachment).text}</p>
             )}
-            <p className="attach-src" title={attachments[preview].url}>
-              {attachments[preview].selector}
+            <p className="attach-src" title={(attachments[preview] as WebElementAttachment).url}>
+              {(attachments[preview] as WebElementAttachment).selector}
             </p>
           </div>
+          )
         )}
 
         <textarea
           ref={taRef}
           value={text}
           placeholder={
-            disabled ? '请先新建对话…' : running ? '任务进行中，可继续输入以追加指令' : '随心输入'
+            disabled
+              ? '请先新建对话…'
+              : running
+                ? '任务进行中，可继续输入以追加指令'
+                : '随心输入，可粘贴或拖入图片'
           }
           disabled={disabled}
+          onPaste={(e) => void handlePaste(e)}
           onChange={(e) => {
             setText(e.target.value);
             // 一旦手动编辑就退出历史回溯：否则用户改完历史项再按 ↑，
