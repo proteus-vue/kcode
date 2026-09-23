@@ -26,6 +26,11 @@ jobs:
       - name: 安装锁定依赖
         run: npm ci
 
+      # workflow 自身是否有效。无效文件**不会**失败在任何 job 上——
+      # 它创建一次 0 job 的 run 就结束，看起来像「CI 还没跑」。见 §3.25。
+      - name: 校验 workflow 自身有效
+        run: bash scripts/verify-workflow.sh
+
       - name: 校验 codex 版本与哈希（安全基线 + 可复现）
         run: bash scripts/verify-codex-version.sh
 
@@ -46,6 +51,13 @@ jobs:
 
   rust:
     runs-on: ubuntu-latest
+    # `secrets` **不能**出现在任何 `if:` 表达式里：GitHub 会因此判定
+    # **整个 workflow 文件无效**，所有 job 一个都不跑（本项目为此空跑了
+    # 18 次推送才被发现，见 docs/协议勘误与修正.md §3.25）。
+    # 因此这里只在 job 级 env 里算出「有没有凭据」的布尔标记，
+    # 具体密钥值仍只挂在单个步骤上——不给该 job 的每个步骤都塞一遍密钥。
+    env:
+      HAS_MODEL_KEY: ${{ secrets.KCODE_MODEL_API_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -67,7 +79,7 @@ jobs:
 
       - name: 集成测试（真实 app-server 进程 + 本地 mock 模型）
         run: |
-          cargo test -p codex-bridge --test contract --test approval_semantics
+          cargo test -p kcode-bridge --test contract --test approval_semantics
           cargo test -p kcode-domain --test integration
           cargo test -p kcode-app --test acceptance
 
@@ -94,8 +106,9 @@ jobs:
 
       # 沙箱边界：需要真实模型凭据（CI 中通过 secrets 注入）。
       # 无凭据时脚本退出码 3，此处允许跳过而非失败。
+      # 判断依据是 job 级 env 里的布尔标记——`if:` 里不能直接写 secrets。
       - name: 沙箱边界验收（需模型凭据）
-        if: ${{ secrets.KCODE_MODEL_API_KEY != '' }}
+        if: env.HAS_MODEL_KEY == 'true'
         env:
           KCODE_MODEL_BASE_URL: ${{ secrets.KCODE_MODEL_BASE_URL }}
           KCODE_MODEL_API_KEY: ${{ secrets.KCODE_MODEL_API_KEY }}
