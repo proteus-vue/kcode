@@ -145,8 +145,34 @@ pub fn commit_all(workspace: &Path, message: &str) -> Result<String, String> {
         return Err("提交信息不能为空".to_owned());
     }
     run_git_checked(workspace, &["add", "-A"])?;
+
+    // 身份未配置是**首次使用时的常见情形**（新机器、CI 容器、刚装的 git），
+    // 而 git 的原文 "Please tell me who you are." 既没说是哪一项配置缺失，
+    // 也没给出可执行的下一步。这里翻译成能照做的指引。
+    if identity_missing(workspace) {
+        return Err(
+            "git 未配置提交身份。请先执行：\n  git config user.name \"你的名字\"\n  \
+             git config user.email \"you@example.com\"\n（加 --global 可设为全局）"
+                .to_owned(),
+        );
+    }
+
     let out = run_git_checked(workspace, &["commit", "-m", msg])?;
     Ok(out)
+}
+
+/// 判断当前仓库是否缺少提交身份。
+///
+/// 问 `git config --get` 而不是解析 commit 的报错文本：错误文案随 git 版本
+/// 与语言环境变化（`LC_ALL` 会影响输出），按文本匹配会在别的机器上失效。
+fn identity_missing(workspace: &Path) -> bool {
+    // 空值也算缺失（`user.name=""` 同样提交不了）
+    let get = |k: &str| {
+        run_git(workspace, &["config", "--get", k])
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+    };
+    !get("user.name") || !get("user.email")
 }
 
 /// 推送到当前分支的上游。
@@ -415,6 +441,15 @@ mod tests {
                 .expect("git 调用失败");
         };
         run(&["init", "-q"]);
+        // **仓库级**身份配置，而不是只靠环境变量。
+        //
+        // 环境变量只影响本夹具自己发起的 commit；产品代码 `commit_all` 走的是
+        // 干净的 git 子进程，它不继承这些变量。早先只有环境变量时，本夹具在
+        // 开发机（有全局 user.name）上恰好能过，而在无全局配置的 CI 容器里
+        // 必失败——该缺陷因 CI 长期未运行而被隐藏（见 docs/协议勘误与修正.md
+        // §3.25、§3.26）。写进仓库配置后，测试环境即真实用户环境。
+        run(&["config", "user.name", "t"]);
+        run(&["config", "user.email", "t@t"]);
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
         run(&["add", "-A"]);
         run(&["commit", "-qm", "init"]);
@@ -531,6 +566,46 @@ mod tests {
             err.contains("nothing to commit") || err.contains("无文件要提交") || !err.is_empty(),
             "应给出可读的原因: {err}"
         );
+    }
+
+    /// 身份未配置时必须给出**可照做**的指引，而不是把 git 的原文透出去。
+    ///
+    /// 这条分支真实咬过：CI 首次真正运行（勘误 §3.25 修好之后）时 rust job
+    /// 就失败在这里——ubuntu runner 没有全局 git 身份，而既有测试只在
+    /// 开发机上跑过（开发机总有配置）。
+    ///
+    /// 构造方式用**仓库级空值**（`git config user.name ""`）而不是清空全局
+    /// 配置：仓库级优先于全局，于是「身份为空」这个状态在开发机与 CI 上
+    /// 完全一致，不依赖机器配置、也不需要改进程环境变量（那会污染并行
+    /// 运行的其它测试）。
+    #[test]
+    fn commit_all_without_identity_gives_actionable_error() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        // 覆盖成空值：git 读到的是空，等价于「没配」
+        git(dir.path(), &["config", "user.name", ""]);
+        git(dir.path(), &["config", "user.email", ""]);
+        std::fs::write(dir.path().join("a.txt"), b"y").unwrap();
+
+        assert!(identity_missing(dir.path()), "空值应被视为未配置");
+
+        let err = match commit_all(dir.path(), "首次提交") {
+            Ok(out) => panic!("身份缺失时不应提交成功，实际输出：{out}"),
+            Err(e) => e,
+        };
+        assert!(err.contains("user.name"), "应指出缺的是哪一项: {err}");
+        assert!(err.contains("user.email"), "应指出缺的是哪一项: {err}");
+        assert!(
+            err.contains("git config"),
+            "应给出可照做的命令而不是原文报错: {err}"
+        );
+    }
+
+    #[test]
+    fn identity_present_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        assert!(!identity_missing(dir.path()), "夹具已配置身份，不应判为缺失");
     }
 
     #[test]

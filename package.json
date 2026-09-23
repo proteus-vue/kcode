@@ -17,6 +17,7 @@
     "verify:egress": "bash scripts/verify-no-egress.sh",
     "verify:sandbox": "bash scripts/verify-sandbox-boundary.sh",
     "verify:workflow": "bash scripts/verify-workflow.sh",
+    "test:clean": "bash scripts/test-in-clean-env.sh",
     "dev:web": "vite",
     "build:web": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",

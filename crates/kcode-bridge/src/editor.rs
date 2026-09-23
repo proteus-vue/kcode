@@ -244,10 +244,18 @@ pub fn info() -> EditorInfo {
 /// 返回实际使用的编辑器名称，UI 展示它——用户需要知道「点下去开在哪」，
 /// 尤其当探测结果与他预期不同（本机装了多个编辑器）时。
 pub fn open(path: &Path, line: Option<u32>) -> Result<String, String> {
+    open_with(path, line, detect())
+}
+
+/// `open` 的可注入版本：探测结果由调用方给出。
+///
+/// 拆出来是为了**可测且并行安全**：直接改进程环境变量（`KCODE_EDITOR`）
+/// 会与并行运行的其它测试互相污染，而那种失败是间歇性的、极难归因。
+/// 真实路径仍走 `detect()`（见 `open`），这里只把「选谁」变成参数。
+pub fn open_with(path: &Path, line: Option<u32>, choice: Choice) -> Result<String, String> {
     if !path.exists() {
         return Err(format!("文件不存在：{}", path.display()));
     }
-    let choice = detect();
     let path_str = path.to_string_lossy().into_owned();
     // 不承诺做不到的事：系统默认编辑器收到 `路径:行` 会当成文件名，
     // 于是「打开失败」看起来像文件被删了。宁可不跳行。
@@ -406,18 +414,14 @@ mod tests {
         let target = dir.path().join("a.ts");
         std::fs::write(&target, "const a = 1;").unwrap();
 
-        // 通过 KCODE_EDITOR 注入。测试内改环境变量：本文件里只有这个
-        // 测试会读它（其余都直接调用 pick 并显式传参），而 open() 在
-        // 文件不存在时提前返回，不会走到探测。
-        let prev = std::env::var("KCODE_EDITOR").ok();
-        std::env::set_var("KCODE_EDITOR", &script);
-        let result = open(&target, Some(12));
-        match prev {
-            Some(v) => std::env::set_var("KCODE_EDITOR", v),
-            None => std::env::remove_var("KCODE_EDITOR"),
-        }
-        let label = result.expect("应成功启动配置的编辑器");
-        assert_eq!(label, "KCODE_EDITOR");
+        // 显式注入探测结果，不改进程环境变量（那会与并行测试互相污染）
+        let choice = Choice {
+            label: "Fake".to_owned(),
+            program: script.to_string_lossy().into_owned(),
+            style: LineStyle::PathSuffix,
+        };
+        let label = open_with(&target, Some(12), choice).expect("应成功启动配置的编辑器");
+        assert_eq!(label, "Fake");
 
         // 子进程是 spawn 出去的，不等待；条件轮询等它写完（有上限，不盲等）
         let mut args = String::new();
