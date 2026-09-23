@@ -85,19 +85,29 @@ jobs:
       - name: 安装锁定依赖（含 codex 平台二进制）
         run: npm ci
 
-      # **zsh 是集成测试的硬前提**：codex 用 `/bin/zsh -lc '<cmd>'` 执行
-      # 模型发出的命令（本地实测 commandExecution.item.command 的形状）。
-      # ubuntu runner 默认**不装 zsh**，于是命令在执行前就失败，而
-      # app-server 不会报错——表现为「轮次正常收尾、没有任何命令 Item」，
-      # 集成测试因此失败在「未找到命令 Item」（见 docs/协议勘误与修正.md §3.27）。
+      # **bubblewrap 是集成测试的硬前提**（这是根因，见 §3.29）。
       #
-      # 这不是「为测试放宽条件」：真实用户的开发机（macOS 自带、多数 Linux
-      # 发行版的默认交互 shell）都有 zsh，装它是让 CI 环境与真实环境一致。
-      - name: 安装 zsh（codex 执行命令所需的 shell）
+      # Linux 上 workspace-write 沙箱的命令执行依赖它。缺少时 app-server 会
+      # 通过 `configWarning` 明说（这是**根因的直接证据**，此前没人读到）：
+      #
+      #   "Codex could not find bubblewrap on PATH. Install bubblewrap with your
+      #    OS package manager. See the sandbox prerequisites: ... Codex will use
+      #    the bundled bubblewrap in the meantime."
+      #
+      # 而它并没有真的用成 bundled 的那个——命令仍然不执行，表现为
+      # 「轮次正常收尾、没有任何命令 Item」。
+      #
+      # 我一度因为 `use_linux_sandbox_bwrap` 特性是 **removed** 就排除了 bwrap，
+      # 那是**错误的推理**：特性开关被移除恰恰意味着 bwrap 现在是**默认且必需**的
+      # 执行前提，不再是可选项（可选项才需要开关）。教训：从「没有开关」推出
+      # 「不需要它」是反的。
+      #
+      # 装它不是「为测试放宽条件」：真实 Linux 环境按官方 prerequisites 都应安装它。
+      - name: 安装 bubblewrap（Linux 沙箱的命令执行前提）
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq zsh
-          echo "zsh: $(command -v zsh) ($(zsh --version))"
+          sudo apt-get install -y -qq bubblewrap
+          echo "bwrap: $(command -v bwrap) ($(bwrap --version))"
 
       - uses: dtolnay/rust-toolchain@stable
 
