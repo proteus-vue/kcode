@@ -127,6 +127,26 @@ jobs:
         if: failure()
         run: bash scripts/ci-summarize-failures.sh /tmp/rust-integration.log
 
+      # 沙箱前提自检。集成测试失败的现场是「模型发出了命令调用、轮次正常收尾，
+      # 但命令 Item 根本没产生」——这指向**命令执行通道本身**而不是命令语法
+      # （连 `echo hello` 都不产生 Item）。Linux 上 workspace-write 沙箱依赖
+      # 内核/工具支持，所以把前提打出来，让「沙箱不可用」这个假设可被证实或排除，
+      # 而不是继续猜（见 docs/协议勘误与修正.md §3.27）。
+      - name: 沙箱前提自检（仅失败时执行）
+        if: failure()
+        run: |
+          {
+            echo "### Linux 沙箱前提"
+            echo '```'
+            echo "kernel: $(uname -r)"
+            echo "user namespaces (unprivileged): $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo '（无此文件）')"
+            echo "max_user_namespaces: $(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo '（无此文件）')"
+            echo "landlock LSM: $(grep -c landlock /sys/kernel/security/lsm 2>/dev/null || echo '（读不到）')"
+            echo "bwrap: $(command -v bwrap || echo '未安装')"
+            echo "seccomp: $(grep Seccomp /proc/self/status 2>/dev/null | head -1 || echo '未知')"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: 静态检查
         run: cargo clippy --workspace --all-targets -- -D warnings
 
