@@ -175,17 +175,29 @@ jobs:
           set -o pipefail
           cargo test --workspace --lib --no-fail-fast 2>&1 | tee /tmp/rust-tests.log
 
-      - name: 失败用例摘要（仅失败时执行）
+      # 失败诊断分两路：
+      # - **job summary 放全文**（无配额限制，但未登录访问者看不到）
+      # - **注解放最关键的几行**（匿名可读，但每个 check-run 有上限，实测 23 条）
+      #
+      # 分两路是被配额逼出来的：早先诊断步骤一口气输出 20+ 条注解，把上限
+      # 吃满，真正关键的失败原因反而被挤掉——表现为「CI 红了但看不到为什么」。
+      - name: 失败摘要（仅失败时执行）
         if: failure()
-        # 统一用 scripts/ci-summarize-failures.sh：它按「注解上限」设计输出
-        # ——只打 FAILED 行与 error[...] 行，而不是 tail -40（后者会撞上限，
-        # 把真正的 error 行挤掉。本步骤一度如此，导致编译错误看不见）。
         run: |
-          bash scripts/ci-summarize-failures.sh /tmp/rust-tests.log
-          echo "---- 编译错误（若上层未给出）----"
-          grep -nE "^(error|error\[)" /tmp/rust-tests.log | head -10 | while IFS= read -r line; do
-            echo "::error::$line"
-          done
+          LOG=/tmp/rust-tests.log
+          if [[ ! -f "$LOG" ]]; then
+            echo "::error::日志文件缺失：$LOG（步骤在写入前就失败了）"
+            exit 0
+          fi
+          # 全文进 summary（前 80 行足够覆盖编译错误）
+          {
+            echo '### 单元测试失败详情（前 80 行）'
+            echo '```'
+            head -80 "$LOG"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # 注解放摘要脚本挑出的关键行
+          bash scripts/ci-summarize-failures.sh "$LOG" | head -8
 
       - name: 集成测试（真实 app-server 进程 + 本地 mock 模型）
         run: |
