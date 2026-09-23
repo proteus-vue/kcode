@@ -76,17 +76,28 @@ impl Projector {
                     changes: extract_changes(item),
                 }
             }
+            // MCP / 动态工具的调用。
+            //
+            // # 参数与结果都保留完整内容
+            //
+            // 早先这里用 `truncate(..., 200)` 截断——问题在于**截断发生在投影期**，
+            // 展开也看不全：用户点开只看到 200 字符加省略号，而那正是他想看细节
+            // 的时刻。命令输出那条通路不是这么做的（完整保留、只在显示时按 30KB
+            // 折叠），两者不一致的后果是「MCP 工具永远看不到参数」。
+            //
+            // 现在一律存完整内容，截断交给显示层（ToolRow 展开时折叠）——
+            // 与命令输出同一套规则。
             "mcpToolCall" | "dynamicToolCall" => ItemBody::ToolCall {
                 server: item.get("server").and_then(Value::as_str).map(str::to_owned),
                 tool: item.get("tool").and_then(Value::as_str).unwrap_or("unknown").to_owned(),
-                args_summary: item.get("arguments").map(|v| truncate(&v.to_string(), 200)),
-                result_summary: item.get("result").map(|v| truncate(&v.to_string(), 200)),
+                args_summary: item.get("arguments").map(pretty_json),
+                result_summary: item.get("result").map(pretty_json),
             },
             "functionCallOutput" => ItemBody::ToolCall {
                 server: None,
                 tool: item.get("name").and_then(Value::as_str).unwrap_or("function").to_owned(),
                 args_summary: None,
-                result_summary: item.get("output").map(|v| truncate(&v.to_string(), 200)),
+                result_summary: item.get("output").map(pretty_json),
             },
             "webSearch" => ItemBody::WebSearch {
                 query: item.get("query").and_then(Value::as_str).unwrap_or_default().to_owned(),
@@ -430,12 +441,16 @@ fn extract_changes(item: &Value) -> Vec<FileChangeEntry> {
     out
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_owned();
+/// 把 JSON 值渲染成可读文本（缩进两格）；不是 JSON 就原样返回字符串。
+///
+/// 为什么格式化而不是 `to_string()`：MCP 的参数与结果都是嵌套 JSON，
+/// 压成一行既难读也难复制（用户会把它贴进另一个工具里用）。缩进后
+/// 一眼能看出结构，而这正是「展开看细节」时想要的东西。
+fn pretty_json(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
     }
-    let cut: String = s.chars().take(max).collect();
-    format!("{cut}…")
 }
 
 fn now_ms() -> i64 {

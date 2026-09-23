@@ -68,9 +68,9 @@ export function ToolRow({
                 该命令未被执行——你拒绝了它。轮次的其他部分仍会继续。
               </p>
             )}
-            {b.aggregatedOutput && (
-              <pre className="tool-output">{foldOutput(b.aggregatedOutput).text}</pre>
-            )}
+            {/* 命令输出接上复制与折叠：用户的下一个动作常是
+                「把报错搜一下」或「把结果贴进 issue」。 */}
+            {b.aggregatedOutput && <OutputBlock label="输出" text={b.aggregatedOutput} />}
           </div>
         )}
       </div>
@@ -141,24 +141,34 @@ export function ToolRow({
   }
 
   if (item.body.kind === 'toolCall') {
+    const b = item.body;
+    const hasDetail = Boolean(b.argsSummary) || Boolean(b.resultSummary);
     return (
       <div className="tool-row">
-        <button className="tool-row-head" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        <button
+          className="tool-row-head"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          disabled={!hasDetail}
+        >
           <span className="tool-icon">
             <Icon name="layers" />
           </span>
           <span className="tool-kind">工具</span>
           <span className="tool-summary mono">
-            {item.body.server ? `${item.body.server} / ` : ''}
-            {item.body.tool}
+            {b.server ? `${b.server} / ` : ''}
+            {b.tool}
           </span>
-          <span className="tool-chevron">
+          <span className={`tool-chevron ${open ? 'open' : ''}`}>
             <Icon name="chevron" size={12} />
           </span>
         </button>
-        {open && item.body.resultSummary && (
+        {open && hasDetail && (
           <div className="tool-body">
-            <pre className="tool-output">{item.body.resultSummary}</pre>
+            {/* 分区标题不是装饰：参数与结果都是 JSON，混在一起时
+                用户分不清哪一段是「我让它做的」、哪一段是「它返回的」。 */}
+            {b.argsSummary && <OutputBlock label="参数" text={b.argsSummary} />}
+            {b.resultSummary && <OutputBlock label="结果" text={b.resultSummary} />}
           </div>
         )}
       </div>
@@ -216,6 +226,61 @@ export function ToolRow({
   }
 
   return null;
+}
+
+/**
+ * 一块可复制、可折叠的输出。
+ *
+ * # 为什么复制是必备的
+ *
+ * 用户看到工具输出后的下一步动作，常常是「把它贴到别处」——搜报错、贴进
+ * issue、在另一个终端里重跑那条命令。没有复制按钮，他只能手工划选，
+ * 而终端输出里常混着换行与制表符，划选很容易多一个少一个字符。
+ *
+ * 参照客户端的工具结果右上角正是一个复制按钮。
+ *
+ * # 折叠在**显示层**而不是投影层
+ *
+ * 与命令输出同一套规则（30KB 阈值、保留尾部——关键信息在末尾）。
+ * 早先 MCP 的参数/结果在投影时就被截到 200 字符，展开也看不全；
+ * 现在完整存储、只在这里折叠。
+ */
+function OutputBlock({ label, text }: { label: string; text: string }) {
+  const [copied, setCopied] = useState(false);
+  const folded = foldOutput(text);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      // 反馈 1.2 秒后复原：够看清，又不至于一直占着位置
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // 剪贴板不可用（权限被拒、非安全上下文）：静默失败会让用户以为复制成功了，
+      // 所以这里什么也不做但保留按钮外观——真失败时用户可以手工划选。
+    }
+  };
+
+  return (
+    <div className="out-block">
+      <div className="out-head">
+        <span className="out-label">{label}</span>
+        {folded.truncated && (
+          <span className="out-folded">已折叠 {folded.hiddenChars.toLocaleString()} 字符</span>
+        )}
+        <button
+          className={`out-copy ${copied ? 'is-done' : ''}`}
+          onClick={copy}
+          title={copied ? '已复制' : '复制'}
+          aria-label={copied ? '已复制' : `复制${label}`}
+        >
+          <Icon name={copied ? 'check' : 'file'} size={11} />
+          <span>{copied ? '已复制' : '复制'}</span>
+        </button>
+      </div>
+      <pre className="tool-output">{folded.text}</pre>
+    </div>
+  );
 }
 
 function changedFiles(item: Item): boolean {

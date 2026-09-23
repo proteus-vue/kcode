@@ -28,7 +28,7 @@
 |---|---|---|---|---|---|
 | CH-01 | 气泡+Markdown（禁 raw HTML） | 标准 | ItemCard+Markdown | ✅ | — |
 | CH-02 | ~~推理可折叠~~ → **不展示推理** | 参照客户端不展示 | **已移除**：实测 Codex.app 的 asar 里 `reasoning` 只出现在模型配置（`reasoning_effort`），无任何推理内容 UI；理由成立——推理每轮一条、与工具调用交替，展开让时间线翻倍而信息价值低于命令与 diff。reducer 按 channel 过滤其流式增量（防漏成正文），孤儿样式已删 | ✅ | — |
-| CH-03 | 工具/命令紧凑单行可展开 | 成熟客户端 | ToolRow；**连续同类动作聚合折叠**（`toolGrouping.ts`）：`已搜索 3 次搜索 ⌄` 一行收起，展开后仍是同一套 ToolRow。只有「同类且连续」才聚合（中间夹别的类型即断开），单条不成组；**失败/被拒绝的命令一律不聚合**——它们是需要注意的异常，收进摘要等于藏起来。21 项纯函数测试 + 组件测试 | ✅ | — |
+| CH-03 | 工具/命令紧凑单行可展开 | 成熟客户端 | ToolRow；**连续同类动作聚合折叠**（`toolGrouping.ts`）：`已搜索 3 次搜索 ⌄` 一行收起，展开后仍是同一套 ToolRow。只有「同类且连续」才聚合（中间夹别的类型即断开），单条不成组；**失败/被拒绝的命令一律不聚合**——它们是需要注意的异常，收进摘要等于藏起来。**展开后按「参数 / 结果」分区 + 每块可复制**（`OutputBlock`）：复制是必备的——用户的下一个动作常是「把报错搜一下」或「把结果贴进 issue」，没有按钮只能手工划选，而终端输出里混着换行与制表符很容易多一个少一个字符。**MCP 工具的 `arguments` 此前从未渲染**（领域层解析了、TS 类型也定了，但只有结果被显示）——数据在而用户看不到，已修。**参数与结果的截断从投影期移到显示层**：原先在 Rust 投影时 `truncate(…, 200)`，展开也看不全；现完整保留、只在显示时按 30k 折叠（保留尾部，与命令输出同一条规则），并把 JSON 格式化成缩进形式（压成一行既难读也难复制）。8 项组件测试 | ✅ | — |
 | CH-04 | declined≠completed 视觉 | 实测语义 | chip 未执行 | ✅ | — |
 | CH-05 | Turn 状态齐全 | 状态机 | TurnView | ✅ | — |
 | CH-06 | unknown 不静默当成功 | 恢复 | unknown-note | ✅ | — |
@@ -90,7 +90,7 @@
 | CS-09 | 插件列表 | plugin/list | Library | ✅ | — |
 | CS-10 | 设置=实际生效+路径 | 可排查 | Settings | ✅ | — |
 | CS-11 | 无死开关 | 纪律 | 已遵循 | ✅ | — |
-| CS-12 | MCP 列表 | 扩展层 | 无 | ❌ | P2 |
+| CS-12 | MCP 列表 | 扩展层 | **无列表 UI**（`mcpServerStatus/list` 已可用，实测本机返回 0 个 server——未配 MCP）。**关于「内置能力」（自动核验页面样式 / 自动调 CDP）的实测结论见下方「内置工具面的实测」一节** | 🟡 | P2 |
 
 ## 6. 右栏场景
 
@@ -319,6 +319,57 @@ Agent 起了终端/browser 就自动切右栏——**不做**。理由：那会�
 > 偏离不等于更好：若将来有用户反馈「想知道模型怎么想的」，可加回为默认折叠、
 > 且只在用户主动展开时请求（而非默认渲染几十条）。当前选择的理由是
 > **信息密度**——时间线要能让用户扫出「哪一步在跑、哪一步失败了」。
+
+## 内置工具面的实测（2026-09-23）
+
+> 起因：「ZCode / Codex 有好多内置能力让对话自动调用（自动核验页面样式、自动调 CDP），我们有吗？」
+> 这个问题的答案**不能靠读 codex 的二进制字符串推断**，我实测了三次，结论如下。
+
+### 实测方法
+
+在**真实 app-server 进程内**捕获模型收到的 `tools` 数组——这是唯一权威来源
+（`debug prompt-input` 是另一条代码路径，两者结论不同，见下）。
+
+### 结论：本机环境下，模型可见的工具只有 9 个
+
+```
+exec_command, write_stdin, request_user_input, view_image,
+multi_agent_v1, get_goal, create_goal, update_goal, web_search
+```
+
+**没有 `browser_use`、没有 `computer_use`、没有 CDP 相关工具。**
+
+### 为什么没有（关键）
+
+codex 二进制里确实有这些能力（`browser_use` / `browser_use_full_cdp_access` /
+`computer_use` / `in_app_browser` 在 `experimentalFeature/list` 里全是
+**stable + enabled + default**）。但它们的注入走的是 `hosted_model_tool_specs`
+这条路径——**「hosted tools」由服务端配置决定，不是本地开关**。
+
+本机实际用的是 **第三方 custom provider**（`requires_openai_auth = false`
+带 `base_url` 指向本地中转）。这类 provider 下 hosted tools 不注入，
+所以模型看不到它们。
+
+**这与我们客户端无关**：那 9 个工具是 app-server 直接给模型的，
+每次调用都以 `commandExecution` / `collabAgentToolCall` / `webSearch` 等
+Item 回到时间线，而那些**我们已经渲染好了**。所以：
+
+- **要做**的只有「把回来的 Item 显示清楚」——本次完成的参数/结果分区与复制即属此类；
+- **不该做**的（也做不到）是「自己实现浏览器核验 / CDP」——那是 provider 侧的能力，
+  我们既无法注入工具，也没有必要重造。
+
+### 一处需要留意的差异
+
+`debug prompt-input` 给出的清单里 `browser` 出现、`computer_use` 不出现，
+而 app-server 内捕获的清单两者都不出现。**两条路径的清单不一致**，
+所以判断「模型实际能用什么」必须用 app-server 内捕获，不能拿 `debug`
+子命令的输出去推断。
+
+### 若想启用这些能力
+
+换用官方 OpenAI provider（`requires_openai_auth = true` + 官方端点）后
+hosted tools 才会注入。这是一条**环境要求**而非代码改动，已如实记在此处，
+免得下次有人以为是我们漏接了。
 
 ## 参照
 
