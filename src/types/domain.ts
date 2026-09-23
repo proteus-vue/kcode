@@ -176,6 +176,19 @@ export type ItemBody =
       tool: string;
       argsSummary: string | null;
       resultSummary: string | null;
+      /**
+       * 调用状态：`inProgress` / `completed` / `failed`。
+       *
+       * 必须保留：失败时 `resultSummary` 为 null，不取状态的话一次失败的
+       * 调用在界面上与「还在跑」完全一样，而且没有可展开的内容。
+       */
+      status: string | null;
+      /** 失败原因（协议 `error.message`）。 */
+      error: string | null;
+      /** 协议给的只读提示（MCP 的 `readOnlyHint`）。 */
+      readOnly: boolean | null;
+      /** 调用耗时（毫秒）。 */
+      durationMs: number | null;
     }
   | { kind: 'webSearch'; query: string }
   | { kind: 'imageView'; path: string }

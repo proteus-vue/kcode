@@ -14,6 +14,7 @@ import { useState } from 'react';
 import type { Item } from '../types/domain';
 import { changeKindLabel, fileStats, isDeclined } from '../stores/store';
 import { foldOutput } from './outputFold';
+import { humanizeToolName, isToolCallFailed, isToolCallRunning } from './mcpTool';
 import { Icon } from './Icon';
 
 export function ToolRow({
@@ -142,9 +143,13 @@ export function ToolRow({
 
   if (item.body.kind === 'toolCall') {
     const b = item.body;
-    const hasDetail = Boolean(b.argsSummary) || Boolean(b.resultSummary);
+    const running = isToolCallRunning(b.status);
+    const failed = isToolCallFailed(b.status);
+    // 失败也算「有详情」——错误信息本身就是用户要看的内容。
+    // 漏掉这一条的后果：失败的调用不可展开、什么都看不到（这正是修之前的症状）。
+    const hasDetail = Boolean(b.argsSummary) || Boolean(b.resultSummary) || Boolean(b.error);
     return (
-      <div className="tool-row">
+      <div className={`tool-row ${running ? 'is-running' : ''}`}>
         <button
           className="tool-row-head"
           onClick={() => setOpen((v) => !v)}
@@ -154,10 +159,24 @@ export function ToolRow({
           <span className="tool-icon">
             <Icon name="layers" />
           </span>
-          <span className="tool-kind">工具</span>
+          {/* 与命令行同一套规则：运行中把类型标签换成状态词，
+              那一行是唯一的焦点，「正在执行」比「工具」更能说明此刻发生了什么。 */}
+          <span className="tool-kind">{running ? '正在执行' : '工具'}</span>
           <span className="tool-summary mono">
-            {b.server ? `${b.server} / ` : ''}
-            {b.tool}
+            {b.server ? `${humanizeToolName(b.server)} · ` : ''}
+            {humanizeToolName(b.tool)}
+          </span>
+          <span className="tool-meta">
+            {/* 只读标记：协议给的 `readOnlyHint`，用户在批准前需要知道
+                这个工具不会改东西。为 false/未知时不显示——「未声明」不等于「会写」。 */}
+            {b.readOnly === true && <span className="chip">只读</span>}
+            {/* 失败必须可见：失败时没有结果，不给 chip 的话这一行
+                与「还在跑」长得一样。 */}
+            {failed ? (
+              <span className="chip chip-fail">失败</span>
+            ) : running ? null : b.durationMs != null ? (
+              <span className="dim">{b.durationMs}ms</span>
+            ) : null}
           </span>
           <span className={`tool-chevron ${open ? 'open' : ''}`}>
             <Icon name="chevron" size={12} />
@@ -166,7 +185,9 @@ export function ToolRow({
         {open && hasDetail && (
           <div className="tool-body">
             {/* 分区标题不是装饰：参数与结果都是 JSON，混在一起时
-                用户分不清哪一段是「我让它做的」、哪一段是「它返回的」。 */}
+                用户分不清哪一段是「我让它做的」、哪一段是「它返回的」。
+                错误放最前——失败时它才是用户要找的东西。 */}
+            {b.error && <OutputBlock label="错误" text={b.error} tone="danger" />}
             {b.argsSummary && <OutputBlock label="参数" text={b.argsSummary} />}
             {b.resultSummary && <OutputBlock label="结果" text={b.resultSummary} />}
           </div>
@@ -245,7 +266,16 @@ export function ToolRow({
  * 早先 MCP 的参数/结果在投影时就被截到 200 字符，展开也看不全；
  * 现在完整存储、只在这里折叠。
  */
-function OutputBlock({ label, text }: { label: string; text: string }) {
+function OutputBlock({
+  label,
+  text,
+  tone,
+}: {
+  label: string;
+  text: string;
+  /** `danger` 用于错误块：标签着红色，与「参数/结果」区分开。 */
+  tone?: 'danger';
+}) {
   const [copied, setCopied] = useState(false);
   const folded = foldOutput(text);
 
@@ -264,7 +294,7 @@ function OutputBlock({ label, text }: { label: string; text: string }) {
   return (
     <div className="out-block">
       <div className="out-head">
-        <span className="out-label">{label}</span>
+        <span className={`out-label ${tone === 'danger' ? 'is-danger' : ''}`}>{label}</span>
         {folded.truncated && (
           <span className="out-folded">已折叠 {folded.hiddenChars.toLocaleString()} 字符</span>
         )}

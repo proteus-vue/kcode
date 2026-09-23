@@ -76,28 +76,61 @@ impl Projector {
                     changes: extract_changes(item),
                 }
             }
-            // MCP / 动态工具的调用。
+            // ── MCP 工具调用 ──────────────────────────────────────────
             //
-            // # 参数与结果都保留完整内容
+            // **不能与 dynamicToolCall 合并成一条 arm**：两者字段名不同
+            // （`server` vs `namespace`、`result` vs `contentItems`），
+            // 合并会让其中一种的字段永远读不到——而那正是早先发生过的事
+            // （连 `result` 都只取了 MCP 的形态）。
             //
-            // 早先这里用 `truncate(..., 200)` 截断——问题在于**截断发生在投影期**，
-            // 展开也看不全：用户点开只看到 200 字符加省略号，而那正是他想看细节
-            // 的时刻。命令输出那条通路不是这么做的（完整保留、只在显示时按 30KB
-            // 折叠），两者不一致的后果是「MCP 工具永远看不到参数」。
-            //
-            // 现在一律存完整内容，截断交给显示层（ToolRow 展开时折叠）——
-            // 与命令输出同一套规则。
-            "mcpToolCall" | "dynamicToolCall" => ItemBody::ToolCall {
+            // 参数与结果一律存**完整内容**：早先用 `truncate(..., 200)` 在投影期
+            // 截断，展开也看不全，而那正是用户想看细节的时刻。截断交给显示层。
+            "mcpToolCall" => ItemBody::ToolCall {
                 server: item.get("server").and_then(Value::as_str).map(str::to_owned),
-                tool: item.get("tool").and_then(Value::as_str).unwrap_or("unknown").to_owned(),
+                tool: item.get("tool").and_then(Value::as_str).unwrap_or("未知工具").to_owned(),
                 args_summary: item.get("arguments").map(pretty_json),
-                result_summary: item.get("result").map(pretty_json),
+                // MCP 的 result 是 `{ content, structuredContent, _meta }`：
+                // 只取前两项，`_meta` 是给程序用的元数据（游标、追踪 id），
+                // dump 给用户是纯噪音且往往很占地方。
+                result_summary: item.get("result").and_then(format_mcp_result),
+                status: item.get("status").and_then(Value::as_str).map(str::to_owned),
+                error: item
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                read_only: item.get("readOnlyHint").and_then(Value::as_bool),
+                duration_ms: item.get("durationMs").and_then(Value::as_i64),
             },
+            // ── 动态工具（非 MCP）───────────────────────────────────────
+            //
+            // 命名空间字段叫 `namespace`、结果在 `contentItems`，
+            // 且**没有 error 字段**——失败只能从 `success: false` 推断。
+            "dynamicToolCall" => ItemBody::ToolCall {
+                server: item.get("namespace").and_then(Value::as_str).map(str::to_owned),
+                tool: item.get("tool").and_then(Value::as_str).unwrap_or("未知工具").to_owned(),
+                args_summary: item.get("arguments").map(pretty_json),
+                result_summary: item.get("contentItems").map(pretty_json),
+                status: item.get("status").and_then(Value::as_str).map(str::to_owned),
+                // 协议没给原因。**如实说明「失败但无原因」比留空强**：
+                // 留空会让它看起来像还没跑完，而用户需要知道它已经失败了。
+                error: match item.get("success").and_then(Value::as_bool) {
+                    Some(false) => Some("调用失败（协议未给出原因）".to_owned()),
+                    _ => None,
+                },
+                read_only: None,
+                duration_ms: item.get("durationMs").and_then(Value::as_i64),
+            },
+            // 模型的函数输出（无独立状态：它必然是某次调用已完成的结果）。
             "functionCallOutput" => ItemBody::ToolCall {
                 server: None,
-                tool: item.get("name").and_then(Value::as_str).unwrap_or("function").to_owned(),
+                tool: item.get("name").and_then(Value::as_str).unwrap_or("函数").to_owned(),
                 args_summary: None,
                 result_summary: item.get("output").map(pretty_json),
+                status: None,
+                error: None,
+                read_only: None,
+                duration_ms: None,
             },
             "webSearch" => ItemBody::WebSearch {
                 query: item.get("query").and_then(Value::as_str).unwrap_or_default().to_owned(),
@@ -377,10 +410,12 @@ fn extract_agent_states(item: &Value) -> Vec<AgentState> {
         .iter()
         .map(|(thread_id, v)| AgentState {
             thread_id: thread_id.clone(),
+            // 兜底用中文：这个值会直接出现在界面上（`agentStatusLabel`
+            // 对未识别的取值是原样返回的），漏出英文 `unknown` 是黑话。
             status: v
                 .get("status")
                 .and_then(Value::as_str)
-                .unwrap_or("unknown")
+                .unwrap_or("未知")
                 .to_owned(),
             message: v.get("message").and_then(Value::as_str).map(str::to_owned),
         })
@@ -439,6 +474,46 @@ fn extract_changes(item: &Value) -> Vec<FileChangeEntry> {
         }
     }
     out
+}
+
+/// 把 MCP 的 `result` 渲染成可读文本。
+///
+/// 协议形状：`{ content: [...], structuredContent: ..., _meta: ... }`。
+///
+/// 与 `pretty_json` 的差别在于**按语义取正文**：MCP 的 content 项形如
+/// `{ type: "text", text: "..." }`，直接 dump 会把真正要读的文字埋进
+/// 花括号与转义里（`{"type":"text","text":"构建通过\n"}`）；这里取 `text`
+/// 字段，让结果区读起来就是一段文本。未知类型保留结构化形式，不猜。
+fn format_mcp_result(result: &Value) -> Option<String> {
+    let obj = result.as_object()?;
+    let mut parts: Vec<String> = Vec::new();
+
+    match obj.get("content") {
+        Some(Value::Array(items)) => {
+            for it in items {
+                parts.push(render_content_item(it));
+            }
+        }
+        Some(other) => parts.push(pretty_json(other)),
+        None => {}
+    }
+    if let Some(sc) = obj.get("structuredContent").filter(|v| !v.is_null()) {
+        parts.push(pretty_json(sc));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+/// 渲染 MCP content 数组里的一项：有 `text` 就取它，否则保留结构。
+fn render_content_item(item: &Value) -> String {
+    if let Some(text) = item.get("text").and_then(Value::as_str) {
+        return text.to_owned();
+    }
+    pretty_json(item)
 }
 
 /// 把 JSON 值渲染成可读文本（缩进两格）；不是 JSON 就原样返回字符串。
@@ -806,6 +881,124 @@ mod tests {
         });
         match p.project_item_body(&item) {
             ItemBody::AgentMessage { text } => assert_eq!(text, "第一行\n第二行"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// MCP 调用的状态与错误**必须保留**。
+    ///
+    /// 这是「失败隐形」的根因：协议在失败时 `result` 为 null，
+    /// 若投影不取 `error`，界面上一次失败的调用与「还在跑」完全一样，
+    /// 而且没有任何可展开的内容——用户只会觉得「这个工具没反应」。
+    #[test]
+    fn projects_mcp_call_status_and_error() {
+        let p = Projector::new("/ws");
+        let item = json!({
+            "type": "mcpToolCall",
+            "id": "m1",
+            "server": "github",
+            "tool": "create_issue",
+            "status": "failed",
+            "arguments": { "title": "x" },
+            "result": null,
+            "error": { "message": "403 Forbidden" },
+            "readOnlyHint": false,
+            "durationMs": 830
+        });
+        match &p.project_item_body(&item) {
+            ItemBody::ToolCall { tool, status, error, read_only, duration_ms, result_summary, .. } => {
+                assert_eq!(tool, "create_issue");
+                assert_eq!(status.as_deref(), Some("failed"));
+                assert_eq!(error.as_deref(), Some("403 Forbidden"), "失败原因必须保留");
+                assert_eq!(*read_only, Some(false));
+                assert_eq!(*duration_ms, Some(830));
+                assert!(result_summary.is_none(), "失败时本就没有结果");
+            }
+            other => panic!("应投影为 ToolCall：{other:?}"),
+        }
+    }
+
+    /// `readOnlyHint: true` 要能透出——用户在批准前需要知道它不改东西。
+    #[test]
+    fn projects_mcp_read_only_hint() {
+        let p = Projector::new("/ws");
+        let item = json!({
+            "type": "mcpToolCall", "id": "m2", "server": "fs", "tool": "read_file",
+            "status": "inProgress", "arguments": {}, "readOnlyHint": true
+        });
+        match &p.project_item_body(&item) {
+            ItemBody::ToolCall { read_only, .. } => assert_eq!(*read_only, Some(true)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// MCP 的 result 按语义渲染：取 content 里的正文、丢掉 `_meta`。
+    #[test]
+    fn mcp_result_is_rendered_by_semantics_not_dumped() {
+        let p = Projector::new("/ws");
+        let item = json!({
+            "type": "mcpToolCall", "id": "m3", "server": "fs", "tool": "read",
+            "status": "completed", "arguments": {},
+            "result": {
+                "content": [
+                    { "type": "text", "text": "构建通过" },
+                    { "type": "text", "text": "0 warnings" }
+                ],
+                "structuredContent": { "ok": true },
+                "_meta": { "cursor": "SECRET-INTERNAL-CURSOR", "traceId": "abc" }
+            }
+        });
+        let body = p.project_item_body(&item);
+        let ItemBody::ToolCall { result_summary, .. } = &body else { panic!("{body:?}") };
+        let out = result_summary.as_deref().unwrap_or("");
+        // 正文直接可读，而不是埋进 {"type":"text","text":"…"} 里
+        assert!(out.contains("构建通过"), "应取 text 正文：{out}");
+        assert!(out.contains("0 warnings"));
+        assert!(out.contains("ok"), "structuredContent 应保留");
+        // `_meta` 是给程序看的元数据，不该 dump 给用户
+        assert!(!out.contains("SECRET-INTERNAL-CURSOR"), "_meta 不该展示：{out}");
+        assert!(!out.contains("traceId"));
+    }
+
+    /// 动态工具与 MCP 的字段名**不同**，必须各自解析。
+    #[test]
+    fn projects_dynamic_tool_call_with_its_own_field_names() {
+        let p = Projector::new("/ws");
+        let item = json!({
+            "type": "dynamicToolCall",
+            "id": "d1",
+            "namespace": "custom_ns",
+            "tool": "do_thing",
+            "status": "failed",
+            "success": false,
+            "arguments": { "a": 1 },
+            "contentItems": [{ "type": "text", "text": "boom" }],
+            "durationMs": 42
+        });
+        match &p.project_item_body(&item) {
+            ItemBody::ToolCall { server, tool, status, error, result_summary, duration_ms, .. } => {
+                // 命名空间字段叫 namespace（不是 server）——合并成一条 arm 会读不到
+                assert_eq!(server.as_deref(), Some("custom_ns"), "应读 namespace");
+                assert_eq!(tool, "do_thing");
+                assert_eq!(status.as_deref(), Some("failed"));
+                // 协议没给原因，但要如实说明「失败了」而不是留空
+                assert!(error.is_some(), "success=false 必须转成可见的失败说明");
+                assert!(result_summary.is_some(), "结果在 contentItems 里");
+                assert_eq!(*duration_ms, Some(42));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 缺 tool 名时的兜底必须是中文（它会直接显示在时间线上）。
+    #[test]
+    fn missing_tool_name_falls_back_to_chinese() {
+        let p = Projector::new("/ws");
+        let item = json!({ "type": "mcpToolCall", "id": "m4", "server": "x", "status": "completed" });
+        match &p.project_item_body(&item) {
+            ItemBody::ToolCall { tool, .. } => {
+                assert_eq!(tool, "未知工具", "不该漏出英文 unknown");
+            }
             other => panic!("{other:?}"),
         }
     }

@@ -42,6 +42,21 @@ afterEach(() => {
 
 const mk = (body: Item['body']): Item => ({ id: 'i1', turnId: 't1', createdAtMs: 0, body });
 
+/** MCP/动态工具调用的夹具：只传关心的字段，其余给中性默认值。 */
+const call = (over: Partial<Extract<Item['body'], { kind: 'toolCall' }>> = {}): Item =>
+  mk({
+    kind: 'toolCall',
+    server: 'mcp',
+    tool: 'search_docs',
+    argsSummary: '{\n  "query": "沙箱前提"\n}',
+    resultSummary: '{\n  "matches": 3\n}',
+    status: 'completed',
+    error: null,
+    readOnly: null,
+    durationMs: null,
+    ...over,
+  });
+
 function render(item: Item) {
   host = document.createElement('div');
   document.body.appendChild(host);
@@ -59,15 +74,6 @@ const click = (el: Element | null | undefined) => {
 };
 
 describe('MCP 工具调用：参数与结果都要能看到', () => {
-  const call = (over: Partial<Extract<Item['body'], { kind: 'toolCall' }>> = {}): Item =>
-    mk({
-      kind: 'toolCall',
-      server: 'mcp',
-      tool: 'search_docs',
-      argsSummary: '{\n  "query": "沙箱前提"\n}',
-      resultSummary: '{\n  "matches": 3\n}',
-      ...over,
-    });
 
   it('展开后「参数」与「结果」都渲染（此前参数从未显示）', () => {
     const el = render(call());
@@ -118,17 +124,80 @@ describe('MCP 工具调用：参数与结果都要能看到', () => {
   });
 });
 
+describe('MCP 调用的状态：失败不能隐形', () => {
+  it('失败时显示「失败」chip，且错误内容可展开', () => {
+    // 这是修之前的症状：失败时 result 为 null → 无可展开内容 →
+    // 整行与「还在跑」长得一样，用户什么也看不到
+    const el = render(
+      call({ status: 'failed', error: '403 Forbidden', resultSummary: null }),
+    );
+    expect(el.textContent, '必须有失败标记').toContain('失败');
+    expect(
+      (el.querySelector('.tool-row-head') as HTMLButtonElement).disabled,
+      '失败必须可展开（否则用户看不到原因）',
+    ).toBe(false);
+
+    click(el.querySelector('.tool-row-head'));
+    const text = el.querySelector('.tool-body')?.textContent ?? '';
+    expect(text, '应显示失败原因').toContain('403 Forbidden');
+    expect([...el.querySelectorAll('.out-label')].map((e) => e.textContent)).toContain('错误');
+  });
+
+  it('进行中显示「正在执行」并带运行态（与命令行同一套规则）', () => {
+    const el = render(call({ status: 'inProgress', resultSummary: null }));
+    expect(el.textContent).toContain('正在执行');
+    expect(el.querySelector('.tool-row.is-running'), '应有运行态样式钩子').not.toBeNull();
+  });
+
+  it('完成态不标状态词（完成是默认，标注等于加噪声）', () => {
+    const el = render(call({ status: 'completed' }));
+    const head = el.querySelector('.tool-row-head')?.textContent ?? '';
+    expect(head).toContain('工具');
+    expect(head, '不该出现「已完成」').not.toContain('已完成');
+  });
+
+  it('只读工具标「只读」（用户在批准前需要知道它不改东西）', () => {
+    const el = render(call({ readOnly: true }));
+    expect(el.textContent).toContain('只读');
+  });
+
+  it('未声明只读时不标（「未声明」不等于「会写」）', () => {
+    const el = render(call({ readOnly: null }));
+    expect(el.textContent).not.toContain('只读');
+  });
+
+  it('耗时与命令行口径一致（毫秒）', () => {
+    const el = render(call({ status: 'completed', durationMs: 830 }));
+    expect(el.textContent).toContain('830ms');
+  });
+});
+
+describe('工具名可读化（协议只给标识符）', () => {
+  it('下划线拆成空格，便于扫读', () => {
+    const el = render(call({ server: null, tool: 'search_docs' }));
+    expect(el.querySelector('.tool-summary')?.textContent).toContain('search docs');
+  });
+
+  it('驼峰也拆开', () => {
+    const el = render(call({ server: null, tool: 'createIssue' }));
+    expect(el.querySelector('.tool-summary')?.textContent).toContain('create Issue');
+  });
+
+  it('剥掉 mcp__server__ 前缀（server 名已单独显示，重复只是更长）', () => {
+    const el = render(call({ server: 'github', tool: 'mcp__github__create_issue' }));
+    const summary = el.querySelector('.tool-summary')?.textContent ?? '';
+    expect(summary).toContain('create issue');
+    // server 名仍显示（用户要知道是哪个 server），但不重复出现在工具名里
+    expect(summary).toContain('github');
+    expect(summary.match(/github/g)?.length, 'server 名不该出现两次').toBe(1);
+  });
+});
+
 describe('复制按钮', () => {
   it('复制的是**完整原文**，不是折叠后显示的那段', async () => {
     const long = 'A'.repeat(31_000) + 'TAIL-END';
     const el = render(
-      mk({
-        kind: 'toolCall',
-        server: null,
-        tool: 'x',
-        argsSummary: null,
-        resultSummary: long,
-      }),
+      call({ server: null, tool: 'x', argsSummary: null, resultSummary: long }),
     );
     click(el.querySelector('.tool-row-head'));
     click(el.querySelector('.out-copy'));
@@ -143,13 +212,7 @@ describe('复制按钮', () => {
 
   it('复制后按钮显示已复制（给出反馈，否则用户会反复点）', async () => {
     const el = render(
-      mk({
-        kind: 'toolCall',
-        server: null,
-        tool: 'x',
-        argsSummary: '{}',
-        resultSummary: null,
-      }),
+      call({ server: null, tool: 'x', argsSummary: '{}', resultSummary: null }),
     );
     click(el.querySelector('.tool-row-head'));
     const btn = el.querySelector('.out-copy')!;

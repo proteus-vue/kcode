@@ -156,12 +156,39 @@ pub enum ItemBody {
         /// 变更文件路径列表（含变更类型）。
         changes: Vec<FileChangeEntry>,
     },
+    /// MCP / 动态工具调用。
+    ///
+    /// # 为什么必须保留状态与错误
+    ///
+    /// 协议对这两类调用都给了 `inProgress | completed | failed` 三态，
+    /// 且 `mcpToolCall` 还带 `error: { message }`。**失败时 `result` 为 null**
+    /// ——不取这两个字段的后果很具体：
+    ///
+    /// - 一次**失败**的调用在界面上与「还在跑」完全一样（都没有结果）；
+    /// - 而且它没有可展开的内容，连点开都看不到任何东西——
+    ///   用户无从知道它失败了，只会觉得「这个工具没反应」。
+    ///
+    /// 这与命令那条通路不一致（命令有退出码与「未执行」标记），
+    /// 而「失败必须可见」是项目对工具行的基本要求。
     #[serde(rename_all = "camelCase")]
     ToolCall {
         server: Option<String>,
         tool: String,
         args_summary: Option<String>,
         result_summary: Option<String>,
+        /// 调用状态：`inProgress` / `completed` / `failed`。
+        #[serde(default)]
+        status: Option<String>,
+        /// 失败原因（协议 `error.message`）。
+        #[serde(default)]
+        error: Option<String>,
+        /// 协议给的只读提示（`mcpToolCall.readOnlyHint`）。
+        /// 为 true 时标「只读」——用户在批准前需要知道它不会改东西。
+        #[serde(default)]
+        read_only: Option<bool>,
+        /// 调用耗时（协议 `durationMs`），与命令行的展示口径一致。
+        #[serde(default)]
+        duration_ms: Option<i64>,
     },
     #[serde(rename_all = "camelCase")]
     WebSearch { query: String },
@@ -518,15 +545,26 @@ mod tests {
             assert!(v.get(bad).is_none(), "字段 `{bad}` 未按 camelCase 序列化");
         }
 
-        // 其余含多词字段的变体同样校验
+        // 其余含多词字段的变体同样校验。
+        // ToolCall 的多词字段最多（argsSummary / resultSummary / readOnly /
+        // durationMs），是这类 bug 最容易出现的地方。
         let tool = serde_json::to_value(ItemBody::ToolCall {
             server: Some("mcp".into()),
             tool: "search".into(),
             args_summary: Some("{}".into()),
-            result_summary: None,
+            result_summary: Some("ok".into()),
+            status: Some("failed".into()),
+            error: Some("boom".into()),
+            read_only: Some(true),
+            duration_ms: Some(12),
         })
         .unwrap();
-        assert!(tool.get("argsSummary").is_some(), "keys: {tool}");
+        for key in ["argsSummary", "resultSummary", "readOnly", "durationMs", "status", "error"] {
+            assert!(tool.get(key).is_some(), "缺少 camelCase 字段 `{key}`：{tool}");
+        }
+        for bad in ["args_summary", "result_summary", "read_only", "duration_ms"] {
+            assert!(tool.get(bad).is_none(), "字段 `{bad}` 未按 camelCase 序列化");
+        }
 
         let file = serde_json::to_value(ItemBody::FileChange {
             status: ItemStatus::Declined,

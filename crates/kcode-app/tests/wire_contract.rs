@@ -88,11 +88,17 @@ fn item_body_wire_format_is_camel_case() {
                 diff: "@@ -1 +1 @@\n-a\n+b\n".into(),
             }],
         },
+        // 全部多词字段都填上：这个契约测试的目的就是「不漏 snake_case」，
+        // 留空会让新加的字段逃过校验。
         ItemBody::ToolCall {
             server: Some("mcp".into()),
             tool: "search".into(),
-            args_summary: None,
-            result_summary: None,
+            args_summary: Some("{}".into()),
+            result_summary: Some("ok".into()),
+            status: Some("completed".into()),
+            error: None,
+            read_only: Some(true),
+            duration_ms: Some(12),
         },
         ItemBody::WebSearch { query: "q".into() },
         ItemBody::ImageView { path: "/i.png".into() },

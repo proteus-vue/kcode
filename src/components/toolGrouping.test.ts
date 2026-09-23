@@ -25,7 +25,7 @@ const cmd = (status: 'inProgress' | 'completed' | 'failed' | 'declined', command
 
 const search = (q = 'foo') => mk({ kind: 'webSearch', query: q });
 const read = (p = '/w/a.png') => mk({ kind: 'imageView', path: p });
-const tool = (t = 'x') => mk({ kind: 'toolCall', server: null, tool: t, argsSummary: null, resultSummary: null });
+const tool = (t = 'x') => mk({ kind: 'toolCall', server: null, tool: t, argsSummary: null, resultSummary: null, status: 'completed', error: null, readOnly: null, durationMs: null });
 const file = () => mk({
   kind: 'fileChange',
   status: 'completed',
