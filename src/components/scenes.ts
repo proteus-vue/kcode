@@ -19,13 +19,14 @@ export type WorkbenchScene =
   | 'terminal'
   | 'browser'
   | 'files'
-  | 'chat'
+  | 'library'
+  | 'subagents'
   | 'simulator';
 
 export interface SceneMeta {
   id: WorkbenchScene;
   label: string;
-  icon: 'diff' | 'terminal' | 'compass' | 'folder' | 'chat' | 'devices';
+  icon: 'diff' | 'terminal' | 'compass' | 'folder' | 'layers' | 'cpu' | 'devices';
   /** 快捷键提示（仅展示，不注册——注册了却与系统键冲突更糟）。 */
   shortcut: string;
 }
@@ -37,8 +38,15 @@ export const SCENES: SceneMeta[] = [
   { id: 'terminal', label: '终端', icon: 'terminal', shortcut: '⌘`' },
   { id: 'browser', label: '浏览器', icon: 'compass', shortcut: '⌘T' },
   { id: 'files', label: '文件', icon: 'folder', shortcut: '⌘P' },
-  // 侧边聊天此前错用 plus（加号表示「新建」，与「聊天」无关）。
-  { id: 'chat', label: '侧边聊天', icon: 'chat', shortcut: '⌘⇧S' },
+  // **这里此前叫「侧边聊天」，但它渲染的一直是技能/插件/设置**——
+  // 菜单承诺了一个不存在的能力（scenes.ts 早先的注释还写着「同一 app-server
+  // 的另一条线程」，而实现里没有第二条线程）。改名以反映实际内容：
+  // 真正的侧边聊天需要右栏里再放一套输入区与时间线，是独立工作量，
+  // 已如实记入对标清单的未做项，而不是继续挂一个名不副实的入口。
+  { id: 'library', label: '库', icon: 'layers', shortcut: '⌘⇧S' },
+  // 子代理：Agent 派生的并行工作单元。只在当前线程确实有子代理活动时
+  // 才可进入（与其它场景一致：不给空入口）。
+  { id: 'subagents', label: '子代理', icon: 'cpu', shortcut: '⌘⇧A' },
   // 模拟器：Android 走 adb（实时截图 + 输入），iOS 需要完整 Xcode。
   // 不可用时**不出现在菜单里**（与其它场景一致：不给空入口），
   // 可用性由后端探测——本机没装完整 Xcode 时 iOS 侧就不可用。
@@ -57,7 +65,14 @@ export interface SceneAvailability {
   terminal: boolean;
   browser: boolean;
   files: boolean;
-  chat: boolean;
+  library: boolean;
+  /**
+   * 子代理是否可进入。
+   *
+   * 判据是**当前线程确实有子代理活动**，不是恒为 true——没有子代理时
+   * 点开只有一句「暂无」，那属于空入口。
+   */
+  subagents: boolean;
   /**
    * 模拟器是否可用。
    *

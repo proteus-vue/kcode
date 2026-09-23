@@ -16,7 +16,7 @@ const all: SceneAvailability = {
   terminal: true,
   browser: true,
   files: true,
-  chat: true, simulator: true,
+  library: true, subagents: true, simulator: true,
 };
 
 let root: Root | null = null;

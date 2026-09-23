@@ -21,6 +21,7 @@ import { useSlotRect } from './components/RightTabs';
 import { BrowserPanel } from './components/BrowserPanel';
 import { Workbench } from './components/Workbench';
 import { TerminalPanel } from './components/TerminalPanel';
+import { SubagentPanel, collectSubagents } from './components/SubagentPanel';
 import { SimulatorPanel } from './components/SimulatorPanel';
 import { FileTree } from './components/FileTree';
 import { fitViewport } from './components/viewportSize';
@@ -35,6 +36,11 @@ import { useKcode, extractErrorMessage } from './stores/useKcode';
 import { usePanelLayout } from './hooks/usePanelLayout';
 import { useAutoScroll } from './hooks/useAutoScroll';
 import { matchPanelShortcut, matchFocusComposerShortcut } from './hooks/panelShortcut';
+import {
+  followedScene,
+  nextFollowedScene,
+  type FollowSignal,
+} from './hooks/sceneFollow';
 import { onColumnBandDoubleClick, onTitlebarDoubleClick } from './hooks/titlebarZoom';
 import { reviewDataFor, threadTitle } from './stores/store';
 import {
@@ -293,6 +299,42 @@ export default function App() {
   );
 
   /**
+   * 当前线程的子代理列表（从所有 item 汇总）。
+   *
+   * 只统计**当前线程**：子代理是线程内的并行工作单元，把别的线程的
+   * 子代理混进来会让「这个面板在说谁」变得含糊。
+   */
+  const subagents = useMemo(
+    () => (thread ? collectSubagents(Object.values(thread.items)) : []),
+    [thread],
+  );
+
+  /**
+   * 右栏自动跟随态。
+   *
+   * 「跟随」= 让右栏跟着 Agent 的工作内容走（它在改文件就显示 diff、
+   * 派了子代理就显示子代理）。**用户一旦手动点过场景标签就退出跟随**，
+   * 之后的自动切换全部让位——这是跟随功能唯一的纪律，也是最容易做错的地方：
+   * 抢用户的画面比不联动更烦人。规则与状态机见 hooks/sceneFollow.ts。
+   */
+  const [following, setFollowing] = useState(true);
+
+  /** 是否有子代理仍在运行——给「子代理」标签加活动标记用。 */
+  const subagentsWorking = useMemo(
+    () => subagents.some((e) => e.status === 'running' || e.status === 'pendingInit'),
+    [subagents],
+  );
+  /**
+   * 用户是否曾经手动选过场景。
+   *
+   * 单独用一个 ref 而不是只靠 `following`：跟随开启时用户仍可能手动点
+   * 某个场景（此时不该退出跟随？——不，**点标签就是明确表达意图**，
+   * 所以要退出）。这个 ref 只用于区分「程序化切换」与「用户点击」，
+   * 避免自动切换把自己关掉。
+   */
+  const userPickedRef = useRef(false);
+
+  /**
    * 行内评论（受控在这里而不是 DiffViewer 内）。
    *
    * 必须提升：切场景或切线程时 DiffViewer 会卸载，状态留在组件里就丢了。
@@ -361,8 +403,11 @@ export default function App() {
     browser: true,
     // 文件：有工作区路径
     files: Boolean(api.env?.workspace),
-    // 侧边聊天：有线程上下文才有意义（技能/插件/设置都依赖已连接的运行时）
-    chat: Boolean(api.env?.workspace),
+    // 库（技能/插件/设置）：都依赖已连接的运行时
+    library: Boolean(api.env?.workspace),
+    // 子代理：**只在当前线程确实有子代理时可进入**。
+    // 与其它场景一致（不给空入口）——没有子代理时点开只有一句「暂无」。
+    subagents: subagents.length > 0,
     // 模拟器：**由后端探测本机工具链**决定。Android 需要 emulator+adb，
     // iOS 需要完整 Xcode。不给空入口——不可用时不出现（本机未装完整
     // Xcode，于是 iOS 侧不可用；Android 侧可用）。
@@ -390,6 +435,87 @@ export default function App() {
     },
     [],
   );
+
+  /**
+   * **自动跟随**：让右栏跟着 Agent 的工作内容走。
+   *
+   * 信号优先级（子代理 > 变更 > 浏览器）与「为什么不做局部锁定」的取舍
+   * 写在 hooks/sceneFollow.ts 的头部。
+   *
+   * 依赖里刻意只有 `signalKey` 这类**会变化的值**，而不是整个 state：
+   * item 每来一条都会重建 state 对象，依赖它会让这个 effect 每轮触发几十次。
+   */
+  const followSignal = useMemo<FollowSignal>(
+    () => ({
+      // 「有子代理」就算信号：哪怕它已经跑完，用户也可能想看它干了什么
+      subagentActive: subagents.length > 0,
+      hasChanges: Boolean(review.changeSet && review.changeSet.files.length > 0),
+      browserOpened: false,
+    }),
+    [subagents.length, review.changeSet],
+  );
+
+  /**
+   * 场景切换的结果记在 ref 里供 effect 读取。
+   *
+   * effect 不能直接依赖 `effectiveScene` ——那会在用户手动切场景后立刻
+   * 又触发一次跟随判断，把用户的选择覆盖掉。用 ref 读当前值即可。
+   */
+  const sceneRef = useRef<string | null>(null);
+  sceneRef.current = effectiveScene;
+
+  useEffect(() => {
+    if (userPickedRef.current) return; // 用户手动选过 → 让位
+    const next = nextFollowedScene(
+      true,
+      sceneRef.current as never,
+      followSignal,
+      (sc) => scenes[sc],
+    );
+    if (next) {
+      setOpenScenes((prev) => openScene(prev, next));
+      setActiveScene(next);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [followSignal.subagentActive, followSignal.hasChanges]);
+
+  /** 换线程时恢复跟随（新线程是新的工作上下文）。 */
+  useEffect(() => {
+    userPickedRef.current = false;
+    setFollowing(true);
+  }, [thread?.id]);
+
+  /**
+   * 用户手动选场景 → 退出跟随。
+   *
+   * **只有用户点击才走这里**；程序化切换（自动跟随、打开内容视图）
+   * 直接调 setActiveScene，不经过它——否则自动切换会把自己关掉。
+   */
+  const pickScene = useCallback(
+    (id: WorkbenchScene) => {
+      userPickedRef.current = true;
+      setFollowing(false);
+      activateScene(id);
+    },
+    [activateScene],
+  );
+
+  /**
+   * 重新开启跟随。
+   *
+   * 主动作：把用户带到「此刻最该看的地方」，而不是只把开关打开等着
+   * 下一个信号——那会让用户点了「跟随」却什么都没发生。
+   */
+  const resumeFollow = useCallback(() => {
+    userPickedRef.current = false;
+    setFollowing(true);
+    const target = followedScene(followSignal);
+    if (target && scenes[target]) {
+      setOpenScenes((prev) => openScene(prev, target));
+      setActiveScene(target);
+    }
+  }, [followSignal, scenes]);
+
 
   /**
    * 关闭一个标签；关的是活动标签时激活其右邻（没有则左邻）。
@@ -647,7 +773,16 @@ export default function App() {
           open={openAvailable}
           active={effectiveScene}
           availability={scenes}
-          onActivate={activateScene}
+          /* 用户点标签走 pickScene（会退出跟随），
+             区别于程序化的 activateScene。 */
+          onActivate={pickScene}
+          /* 跟随态的可见入口：关掉后用户能一眼看到并能恢复。
+             没有它，「自动切换为什么停了」会变成一个无从察觉的状态。 */
+          following={following}
+          onResumeFollow={resumeFollow}
+          /* 有子代理在跑时，「子代理」标签带活动标记——
+             否则用户看不出另一条并行工作线正在推进。 */
+          working={subagentsWorking ? 'subagents' : null}
           onClose={closeSceneTab}
           onCloseOthers={closeOtherTabs}
           onCloseAll={closeAllTabs}
@@ -862,7 +997,16 @@ export default function App() {
             </div>
           )}
 
-          {effectiveScene === 'chat' && (
+          {effectiveScene === 'subagents' && (
+            <SubagentPanel
+              entries={subagents}
+              onOpenFile={(path) =>
+                api.openInRight({ kind: 'file', path, label: path.split('/').pop() ?? path })
+              }
+            />
+          )}
+
+          {effectiveScene === 'library' && (
             <>
               {panel === 'plugins' ? (
                 <div className="panel">

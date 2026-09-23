@@ -462,6 +462,18 @@ enum Command {
         search_term: Option<String>,
         reply: oneshot::Sender<Result<Vec<ThreadSummary>, String>>,
     },
+    /// 直接向 app-server 读一条**任意**线程（协议 `thread/read`）。
+    ///
+    /// 与 `LoadThread` 的区别是数据来源：`LoadThread` 重放本地事件日志，
+    /// 只能读「我们自己在跑的主线程」；子代理线程的事件不在本地日志里，
+    /// 必须走协议问服务端。
+    ///
+    /// 读不到时**如实返回错误**，由 UI 呈现为「不可读」——参照客户端
+    /// 也为这种情况专门做了 loading / unavailable 两个状态。
+    ReadRemoteThread {
+        thread_id: String,
+        reply: oneshot::Sender<Result<ThreadSnapshot, String>>,
+    },
     /// 列出当前工作区可见的技能。
     ListSkills {
         cwd: String,
@@ -833,6 +845,20 @@ impl AgentService {
         self.call(|reply| Command::ListThreadsRemote { search_term, reply }).await
     }
 
+    /// 读一条任意线程（协议 `thread/read`，含子代理线程）。
+    ///
+    /// `includeTurns: true` 以拿到 turns 与 items——协议注释说 full-history
+    /// hydration 对分页线程已弃用、建议改用 `thread/turns/list` +
+    /// `thread/items/list`；但子代理线程通常很短（几次工具调用），
+    /// 一次读完更简单。真拿不全时下面的解析会如实反映（items 为空而不报错）。
+    pub async fn read_remote_thread(
+        &self,
+        thread_id: impl Into<String>,
+    ) -> Result<ThreadSnapshot, String> {
+        let thread_id = thread_id.into();
+        self.call(|reply| Command::ReadRemoteThread { thread_id, reply }).await
+    }
+
     /// 列出当前工作区可见的技能（`skills/list`）。
     ///
     /// 必须传工作区：技能分 user 与 repo 两个作用域，后者依赖 cwd 才能发现。
@@ -1157,6 +1183,10 @@ async fn handle_command(
     let emit = |e: AppEvent| {
         let _ = events.send(e);
     };
+    // 投影器就地构造：与 owner_loop 里那个同源（都用工作区作为 cwd）。
+    // 需要它是因为读远端线程要把协议 item 投影成领域 Item，而那条路径
+    // 不经过 handle_incoming（那里才有一份现成的 projector）。
+    let projector = Projector::new(workspace);
 
     match cmd {
         Command::StartThread { cwd, model, sandbox, approval_policy, reply } => {
@@ -1776,6 +1806,71 @@ async fn handle_command(
             };
             let _ = reply.send(out);
         }
+
+        Command::ReadRemoteThread { thread_id, reply } => {
+            // 协议返回 { thread: { id, cwd, turns: [...], status } }
+            let out = match transport
+                .request("thread/read", json!({ "threadId": thread_id, "includeTurns": true }))
+                .await
+            {
+                Ok(result) => {
+                    let thread = result.get("thread").cloned().unwrap_or(Value::Null);
+                    let cwd = thread
+                        .get("cwd")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+
+                    // 逐 turn 投影 items，**复用与主线程相同的 Projector**：
+                    // 这样子代理时间线的渲染与主线程完全一致（工具行、命令输出、
+                    // 变更的样式都不需要第二套实现）。
+                    let mut items: Vec<Item> = Vec::new();
+                    let mut turns: Vec<TurnSnapshot> = Vec::new();
+                    if let Some(arr) = thread.get("turns").and_then(Value::as_array) {
+                        for t in arr {
+                            let tid = t
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned();
+                            if tid.is_empty() {
+                                continue;
+                            }
+                            let status = t
+                                .get("status")
+                                .and_then(Value::as_str)
+                                .and_then(TurnStatus::from_protocol)
+                                .unwrap_or(TurnStatus::Completed);
+                            let duration_ms = t.get("durationMs").and_then(Value::as_i64);
+                            turns.push(TurnSnapshot { turn_id: tid.clone(), status, duration_ms });
+                            if let Some(its) = t.get("items").and_then(Value::as_array) {
+                                for raw in its {
+                                    let item = projector.project_item(&thread_id, &tid, raw);
+                                    match items.iter_mut().find(|i| i.id == item.id) {
+                                        Some(slot) => *slot = item,
+                                        None => items.push(item),
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Ok(ThreadSnapshot {
+                        thread_id: thread_id.clone(),
+                        cwd,
+                        turns,
+                        items,
+                        // 子代理线程没有我们的审阅决策（那是主线程的事），
+                        // 也不做崩溃残留告警——如实留空比编造一条更安全。
+                        change_sets: Vec::new(),
+                        warnings: Vec::new(),
+                    })
+                }
+                Err(e) => Err(format!("读取线程失败：{e}")),
+            };
+            let _ = reply.send(out);
+        }
+
 
         Command::ListThreads { reply } => {
             let guard = log.lock().await;

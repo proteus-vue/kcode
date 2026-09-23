@@ -1211,6 +1211,86 @@ body {
 .turn-detail-file:hover { color: var(--t1); }
 .turn-detail-files li > .turn-detail-file { cursor: default; }
 
+/* ── 右栏跟随指示 ─────────────────────────────────────────────────── */
+
+/* 两态共用一个按钮：跟随中低调（它是常态，不该抢注意力），
+   已停止时也保持低调但可点——用户想恢复时找得到它。 */
+.wb-follow {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px; border-radius: var(--r-xs);
+  border: 1px solid var(--edge-soft); background: transparent;
+  font: inherit; font-size: 10.5px; color: var(--t4); cursor: pointer;
+  flex-shrink: 0;
+}
+.wb-follow:hover { color: var(--t2); background: rgba(255,255,255,0.05); }
+.wb-follow.is-on { color: var(--accent); border-color: rgba(106,165,255,0.28); }
+.wb-follow.is-on:hover { background: var(--accent-dim); }
+
+/* 标签上的「正在工作」点：呼吸而不是闪烁——闪烁会与「正在执行」的
+   扫光抢注意力，而这里只是提示「那边还在跑」。 */
+.wb-tab-working {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent); margin-left: 2px; flex-shrink: 0;
+  animation: pulse 1.8s ease-in-out infinite;
+}
+
+/* ── 子代理面板 ───────────────────────────────────────────────────── */
+
+.subagent-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.subagent-item {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; width: 100%;
+  padding: 6px 8px; border-radius: var(--r-xs);
+  border: 1px solid var(--edge-soft); background: transparent;
+  font: inherit; font-size: 11.5px; color: var(--t3); cursor: pointer;
+  text-align: left;
+}
+.subagent-item:hover { background: rgba(255,255,255,0.045); color: var(--t2); }
+.subagent-item-id { color: var(--t4); flex-shrink: 0; }
+.subagent-item-status { flex-shrink: 0; }
+.subagent-item.tone-running .subagent-item-status { color: var(--accent); }
+.subagent-item.tone-ok .subagent-item-status { color: var(--ok); }
+.subagent-item.tone-danger .subagent-item-status { color: var(--danger); }
+.subagent-item-task {
+  /* 任务文本是「这个代理在干什么」的关键线索，不该被省略号吃掉大半。
+     右栏最窄 320px，扣掉 id 与状态后只剩百来像素——
+     与其显示 8 个字加省略号，不如让它换行占满两行。 */
+  flex: 1 1 100%; min-width: 0; color: var(--t4);
+  overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  white-space: normal; line-height: 1.45;
+}
+.subagent-note { margin: 8px 0 0; font-size: 10.5px; color: var(--t4); }
+
+.subagent-detail-id { color: var(--t3); }
+.subagent-task { margin: 6px 0 10px; }
+.subagent-task-text {
+  margin: 0; font-size: 12px; line-height: 1.6; color: var(--t2);
+  padding: 7px 9px; background: rgba(0,0,0,0.22);
+  border-radius: var(--r-xs); border: 1px solid var(--edge-soft);
+  white-space: pre-wrap; word-break: break-word;
+}
+
+/* 「读不到」的呈现：给原因与两条出路，不给假的重试承诺。
+   参照客户端也为这个状态单独做了文案（subagents.panel.response.unavailable）。 */
+.subagent-unavailable {
+  padding: 10px 12px; border-radius: var(--r-sm);
+  background: var(--warn-dim); border: 1px solid rgba(251,191,36,0.25);
+}
+.subagent-unavailable-title { margin: 0 0 5px; font-size: 12px; color: var(--warn); }
+.subagent-unavailable-hint { margin: 0 0 7px; font-size: 11px; line-height: 1.6; color: var(--t3); }
+.subagent-unavailable-detail {
+  margin: 0 0 8px; font-size: 10.5px; line-height: 1.5; color: var(--t4);
+  word-break: break-all;
+}
+
+.subagent-timeline { display: flex; flex-direction: column; gap: 10px; }
+.subagent-turn { display: flex; flex-direction: column; gap: 4px; }
+.subagent-turn-time {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin: 2px 0 0; font-size: 10.5px; color: var(--t4);
+}
+.subagent-turn-failed { margin: 0; font-size: 11px; color: var(--danger); }
+
 /* ── Markdown ───────────────────────────────────────────────────────── */
 
 /* 对话正文：刻意比 UI 正文（body 13.5px）大一号。
@@ -2974,6 +3054,15 @@ body {
    容器一滚，子视图的矩形就与网页内容错位（表现为网页「飘」了）。 */
 .workbench:has(.browser-panel) .workbench-body { overflow: hidden; }
 .workbench-body > .panel { flex: 0 0 auto; }
+/* 子代理面板是**单一内容**（不像审查场景那样叠好几个卡片），应当撑满
+   右栏高度：会话时间线需要纵向空间，收缩后下方会留一片空白。
+   注意**必须写在上面那条之后**：同特异性下后者胜，写在前面的会被
+   `flex: 0 0 auto` 覆盖掉（这是实测踩到的——规则写了但没生效）。 */
+.workbench-body > .panel:has(.subagent-list),
+.workbench-body > .panel:has(.subagent-timeline) {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+}
+.workbench-body > .panel:has(.subagent-timeline) { overflow-y: auto; }
 .workbench-body > .terminal,
 .workbench-body > .file-tree { flex: 1; min-height: 0; }
 

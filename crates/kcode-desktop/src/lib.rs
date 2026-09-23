@@ -602,6 +602,19 @@ async fn revert_file(
         .map_err(CommandError::from)
 }
 
+/// 读一条任意线程（协议 `thread/read`），用于在右栏查看子代理会话。
+///
+/// 与 `load_thread` 的区别：那个重放本地事件日志（只有主线程有），
+/// 这个直接问服务端——子代理线程只存在于服务端。
+#[tauri::command]
+async fn read_remote_thread(
+    state: State<'_, AppState>,
+    threadId: String,
+) -> Result<kcode_app::ThreadSnapshot, CommandError> {
+    let svc = require_service(&state).await?;
+    svc.read_remote_thread(threadId).await.map_err(CommandError::from)
+}
+
 /// 探测本机可用的外部编辑器。
 ///
 /// UI 用它决定「打开方式」按钮写什么、能不能承诺跳到行——
@@ -1139,6 +1152,7 @@ pub fn run() {
             git_push,
             git_remote,
             revert_file,
+            read_remote_thread,
             editor_info,
             open_in_editor,
         ])

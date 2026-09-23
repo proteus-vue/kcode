@@ -160,6 +160,13 @@ export interface KcodeApi {
   pendingText: string | null;
   appendComposerText: (text: string) => void;
   clearPendingText: () => void;
+  /**
+   * 读一条任意线程（协议 `thread/read`，含子代理线程）。
+   *
+   * 失败时抛出可读错误——子代理线程可能已被服务端回收（`shutdown` /
+   * `notFound`），UI 必须如实呈现为「不可读」，不能留空白。
+   */
+  readRemoteThread: (threadId: string) => Promise<ThreadSnapshot>;
   /** 右栏当前展示的内容视图；null 表示只看状态面板。 */
   rightContent: RightContent | null;
   openInRight: (c: RightContent | null) => void;
@@ -499,6 +506,18 @@ export function useKcode(): KcodeApi {
    * 重建是幂等的，因此每次打开都调用是安全的——这保证了「刷新页面」
    * 或「切换线程再切回来」不会丢内容。
    */
+  /**
+   * 读一条任意线程（协议 `thread/read`）。
+   *
+   * **不写进主线程状态**：子代理线程是「用来在旁边看的内容」，
+   * 把它并进 `state.threads` 会让侧栏多出一个线程、也会让
+   * 「当前线程」的概念变糊。调用方自己持有结果。
+   */
+  const readRemoteThread = useCallback(async (threadId: string) => {
+    if (!inTauri()) throw new Error('不在桌面环境，无法读取远端线程');
+    return invoke<ThreadSnapshot>('read_remote_thread', { threadId });
+  }, []);
+
   const openThread = useCallback(async (threadId: string) => {
     activeRef.current = threadId;
     setState((prev) => ({ ...prev, activeThreadId: threadId }));
@@ -696,6 +715,7 @@ export function useKcode(): KcodeApi {
     compactThread,
     simulator,
     probeSimulator,
+    readRemoteThread,
     rightContent,
     openInRight: setRightContent,
     appendComposer: useCallback((el: WebElementAttachment) => setPendingInput(el), []),

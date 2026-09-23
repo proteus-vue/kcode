@@ -354,6 +354,8 @@ export interface ThreadSummary {
 export interface TurnSnapshot {
   turnId: string;
   status: TurnStatus;
+  /** 该轮耗时（毫秒）。null = 协议未提供。 */
+  durationMs?: number | null;
 }
 
 /** 从事件日志重建的完整线程快照。 */
@@ -482,7 +484,14 @@ export interface FileDetail {
 /** 右栏内容视图的类型。 */
 export type RightContent =
   | { kind: 'browser'; url: string; label: string }
-  | { kind: 'file'; path: string; label: string };
+  | { kind: 'file'; path: string; label: string }
+  /**
+   * 一条线程的会话内容（用于在右栏查看子代理）。
+   *
+   * 与 `file` / `browser` 并列而不是塞进场景里：它同样需要**整块右栏高度**
+   * 来读时间线，而且要在标签上显示标题、可关闭——与内容视图的语义一致。
+   */
+  | { kind: 'thread'; threadId: string; label: string };
 
 /**
  * 输入框的附件。

@@ -143,6 +143,26 @@ describe('撤销是破坏性动作，视觉上必须可辨', () => {
   });
 });
 
+describe('子代理面板要撑满右栏（覆盖规则必须写在被覆盖者之后）', () => {
+  it('撑满规则位于 `.workbench-body > .panel` 之后', () => {
+    // 这个断言防的是**实测踩到的坑**：两条规则特异性相同，
+    // 写在前面会被 `flex: 0 0 auto` 覆盖 → 面板只有内容高度、
+    // 下方留一大片空白，而 CSS 不会报任何错。
+    const base = css.indexOf('.workbench-body > .panel {');
+    const sub = css.indexOf('.workbench-body > .panel:has(.subagent-list)');
+    expect(base, '未找到基础面板规则').toBeGreaterThanOrEqual(0);
+    expect(sub, '未找到子代理撑满规则').toBeGreaterThanOrEqual(0);
+    expect(sub, '撑满规则必须写在基础规则之后，否则同特异性下会被覆盖').toBeGreaterThan(base);
+  });
+
+  it('子代理面板的规则确实声明了撑满', () => {
+    const i = css.indexOf('.workbench-body > .panel:has(.subagent-list)');
+    const block = css.slice(i, css.indexOf('}', i));
+    expect(block).toContain('flex: 1 1 auto');
+    expect(block).toContain('min-height: 0');
+  });
+});
+
 describe('评论组件确实接入了 DiffViewer', () => {
   it('行工具含评论入口与（可选的）跳行入口', () => {
     expect(viewerSrc).toContain('对此行添加评论');

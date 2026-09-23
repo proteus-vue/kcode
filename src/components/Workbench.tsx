@@ -36,6 +36,9 @@ export function Workbench({
   onClose,
   onCloseOthers,
   onCloseAll,
+  following,
+  onResumeFollow,
+  working,
   children,
 }: {
   /** 已打开的场景（顺序即标签顺序）。 */
@@ -49,6 +52,15 @@ export function Workbench({
   onClose: (s: WorkbenchScene) => void;
   onCloseOthers: () => void;
   onCloseAll: () => void;
+  /**
+   * 是否处于「自动跟随」态（右栏跟着 Agent 的工作内容走）。
+   *
+   * 不传时不渲染指示器——那是「这个入口不存在」，而不是「跟随已关闭」。
+   */
+  following?: boolean;
+  onResumeFollow?: () => void;
+  /** 哪个场景正在「工作」（用于标签上的活动点）。 */
+  working?: WorkbenchScene | null;
   children: React.ReactNode;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -102,8 +114,29 @@ export function Workbench({
         onPick={(id) => onActivate(id)}
         onCloseTab={onClose}
         onContext={(x, y) => setCtxMenu({ x, y })}
+        working={working ?? null}
         trailing={
           <>
+          {/* 跟随指示/开关。两态共用一个按钮：
+              - 跟随中：低调显示「跟随」，点击可关闭（用户想固定住当前视图）
+              - 已关闭：显式可点，点击恢复并立刻跳到最该看的地方
+              没有它，「自动切换为什么停了」会是个无从察觉的状态。 */}
+          {following !== undefined && onResumeFollow && (
+            <button
+              className={`wb-follow ${following ? 'is-on' : ''}`}
+              onClick={onResumeFollow}
+              title={
+                following
+                  ? '右栏正跟随 Agent 的工作内容自动切换'
+                  : '已停止跟随（你手动选过场景）。点击恢复跟随'
+              }
+              aria-label={following ? '跟随中' : '恢复跟随'}
+              aria-pressed={following}
+            >
+              <Icon name="sparkle" size={11} />
+              <span>{following ? '跟随' : '已停止跟随'}</span>
+            </button>
+          )}
           {/* 「…」菜单：右键菜单在所有环境都能用，但不**可见**——
               用户不知道有这功能。这个按钮是它的可靠入口。 */}
           <div className="wb-menu-wrap">
@@ -229,12 +262,14 @@ function TabBar({
   onPick,
   onCloseTab,
   onContext,
+  working,
   trailing,
 }: {
   tabs: { id: WorkbenchScene; label: string; icon: string; active: boolean }[];
   onPick: (id: WorkbenchScene) => void;
   onCloseTab: (id: WorkbenchScene) => void;
   onContext: (x: number, y: number) => void;
+  working?: WorkbenchScene | null;
   trailing?: React.ReactNode;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -268,6 +303,10 @@ function TabBar({
           <button className="wb-tab-main" onClick={() => onPick(t.id)} title={t.label}>
             <Icon name={t.icon as never} size={12} />
             <span className="wb-tab-label">{t.label}</span>
+            {/* 该场景正在工作（例如子代理仍在跑）：一个呼吸点。
+                放在标签上而不是只放在面板里——面板可能没被打开，
+                而「另一条工作线在推进」是用户需要随时知道的。 */}
+            {working === t.id && <span className="wb-tab-working" title="正在运行" />}
           </button>
           {/* 关闭按钮：与「切换」分开，避免一次点击同时触发两件事 */}
           <button

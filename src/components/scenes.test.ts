@@ -20,26 +20,33 @@ const none: SceneAvailability = {
   terminal: false,
   browser: false,
   files: false,
-  chat: false, simulator: false,
+  library: false, subagents: false, simulator: false,
 };
 const all: SceneAvailability = {
   review: true,
   terminal: true,
   browser: true,
   files: true,
-  chat: true, simulator: true,
+  library: true, subagents: true, simulator: true,
 };
 
 describe('工作台场景清单', () => {
   it('包含参照里的六个场景（模拟器为参照之外的自有能力）', () => {
     // 前五个对齐参照（Codex 右栏的「+」菜单）；模拟器取自 MiMo，
     // 是我们用后端探测的工具链真做出来的能力，不是装饰性条目。
+    //
+    // 「库」此前叫「侧边聊天」——但它渲染的一直是技能/插件/设置，菜单名
+    // 承诺了一个不存在的能力（真正的侧边聊天需要右栏里再放一套输入区与
+    // 时间线，尚未实现）。改名以反映实际内容。
+    // 「子代理」是新增的：Agent 派生的并行工作单元，此前只在时间线上
+    // 有一行摘要，看不到各自在干什么。
     expect(SCENES.map((s) => s.label)).toEqual([
       '审查',
       '终端',
       '浏览器',
       '文件',
-      '侧边聊天',
+      '库',
+      '子代理',
       '模拟器',
     ]);
   });
