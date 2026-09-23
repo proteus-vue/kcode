@@ -85,29 +85,61 @@ jobs:
       - name: 安装锁定依赖（含 codex 平台二进制）
         run: npm ci
 
-      # **bubblewrap 是集成测试的硬前提**（这是根因，见 §3.29）。
+      # **bubblewrap 是集成测试的硬前提**（根因，见 §3.29）。
       #
       # Linux 上 workspace-write 沙箱的命令执行依赖它。缺少时 app-server 会
-      # 通过 `configWarning` 明说（这是**根因的直接证据**，此前没人读到）：
+      # 通过 `configWarning` 明说（**根因的直接证据**，此前一直被忽略）：
       #
-      #   "Codex could not find bubblewrap on PATH. Install bubblewrap with your
-      #    OS package manager. See the sandbox prerequisites: ... Codex will use
-      #    the bundled bubblewrap in the meantime."
+      #   1. 未装 bwrap：
+      #      "Codex could not find bubblewrap on PATH. Install bubblewrap with
+      #       your OS package manager. ... Codex will use the bundled bubblewrap
+      #       in the meantime."（而它并没有真的用成 bundled 的那个）
+      #   2. 装了 bwrap 但 userns 受限：
+      #      "Codex's Linux sandbox uses bubblewrap and needs access to create
+      #       user namespaces."
       #
-      # 而它并没有真的用成 bundled 的那个——命令仍然不执行，表现为
-      # 「轮次正常收尾、没有任何命令 Item」。
+      # 第二条正是 Ubuntu 23.10+ 的默认策略：AppArmor 限制非特权 user
+      # namespace（防提权），而 bubblewrap 靠 userns 做隔离。GitHub 的
+      # ubuntu-latest 就在此列。
       #
-      # 我一度因为 `use_linux_sandbox_bwrap` 特性是 **removed** 就排除了 bwrap，
-      # 那是**错误的推理**：特性开关被移除恰恰意味着 bwrap 现在是**默认且必需**的
-      # 执行前提，不再是可选项（可选项才需要开关）。教训：从「没有开关」推出
-      # 「不需要它」是反的。
+      # 我一度因 `use_linux_sandbox_bwrap` 特性是 **removed** 就排除了 bwrap，
+      # 那是**反了的推理**：开关被移除恰恰意味着 bwrap 是**默认且必需**的
+      # 前提——只有可选项才需要开关。
       #
-      # 装它不是「为测试放宽条件」：真实 Linux 环境按官方 prerequisites 都应安装它。
-      - name: 安装 bubblewrap（Linux 沙箱的命令执行前提）
+      # 放开 userns 不是「为测试放宽条件」：这是容器/CI 里运行沙箱工具的标准
+      # 前提（Docker 亦默认放开），且沙箱本身仍在工作——它正是被验证的对象。
+      - name: 安装并启用 bubblewrap（Linux 沙箱的命令执行前提）
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq bubblewrap
           echo "bwrap: $(command -v bwrap) ($(bwrap --version))"
+
+          # 自检：非特权 userns 是否可用（两条路径因发行版而异）
+          echo "--- userns 前提 ---"
+          if [[ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            echo "apparmor_restrict_unprivileged_userns: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+          else
+            echo "apparmor_restrict_unprivileged_userns: （无此文件）"
+          fi
+          if [[ -f /proc/sys/kernel/unprivileged_userns_clone ]]; then
+            echo "unprivileged_userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone)"
+          else
+            echo "unprivileged_userns_clone: （无此文件）"
+          fi
+
+          # 放开限制（Ubuntu 23.10+ 需要前一条；老内核需要后一条）
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
+
+          # 实测 bwrap 是否真的能建 userns —— 这是决定性判据，
+          # 不看参数、直接看它能不能跑起来
+          echo "--- bwrap 实测 ---"
+          if bwrap --unshare-user --uid 0 --gid 0 --ro-bind / / /bin/true 2>/tmp/bwrap-err; then
+            echo "✅ bwrap 可用（能创建 user namespace）"
+          else
+            echo "❌ bwrap 不可用：$(head -3 /tmp/bwrap-err | tr '\n' ' ')"
+            echo "   （沙箱将无法执行命令，集成测试会失败在「未找到命令 Item」）"
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
 
