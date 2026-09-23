@@ -153,6 +153,8 @@ let nextId = 0;
 const pending = new Map();
 const methods = [];
 const commandItems = [];
+/** 告警类通知的原文（configWarning / warning）。 */
+const warnings = [];
 let stderr = '';
 child.stderr.on('data', (d) => {
   stderr += d.toString();
@@ -176,6 +178,12 @@ child.stdout.on('data', (d) => {
       m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result);
     } else if (m.method) {
       methods.push(m.method);
+      // 记下告警类通知的**内容**：CI 上出现了本地没有的 configWarning，
+      // 它可能就是根因的直接证据（例如某项配置在 Linux 上不被接受，
+      // 连带影响命令执行）。只记方法名的话这条线索会被浪费。
+      if (m.method === 'configWarning' || m.method === 'warning') {
+        warnings.push(`${m.method}: ${JSON.stringify(m.params).slice(0, 300)}`);
+      }
       const item = m.params?.item;
       if (item?.type === 'commandExecution') {
         commandItems.push(item);
@@ -225,6 +233,10 @@ try {
     say(`   与命令相关的通知：${cmdRelated.join(', ') || '（一个都没有）'}`);
     say('   含义：app-server 收到了 exec_command 函数调用，但没有执行它。');
     say('   下一步看本步骤前面的「沙箱前提」里 zsh 是否存在。');
+  }
+  if (warnings.length > 0) {
+    say('告警内容（可能是根因的直接证据）：');
+    for (const w of warnings.slice(0, 3)) say(`  · ${w}`);
   }
   if (stderr.trim()) {
     say(`app-server stderr（尾部）：${stderr.trim().split('\n').slice(-5).join(' | ').slice(0, 400)}`);
