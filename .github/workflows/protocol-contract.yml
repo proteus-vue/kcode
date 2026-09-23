@@ -141,6 +141,18 @@ jobs:
             echo "   （沙箱将无法执行命令，集成测试会失败在「未找到命令 Item」）"
           fi
 
+      # Tauri 在 Linux 上编译需要 GTK / WebKit 的开发库。
+      # 缺它们时 `glib-sys` 的 build script 直接失败，而报错是
+      # "failed to run custom build command for glib-sys" —— 从这句
+      # 看不出缺的是哪个 apt 包，所以这里显式装上并注明来源。
+      # 这是 Tauri 官方 prerequisites（Linux 一节的等价物）。
+      - name: 安装 Tauri 的 Linux 系统依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
