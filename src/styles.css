@@ -419,15 +419,7 @@ body {
 /* 权限芯片不许被压缩。它是固定宽度的状态标识，一旦允许收缩，
    flexbox 会把它挤成每行一个字的竖条（实测 900px 窗口下
    「工作区可写 · 按需审批」退化成两行单字），比隐藏更糟。 */
-.head-right { margin-left: auto; flex-shrink: 0; }
 
-.mode-chip {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 4px 10px; border-radius: 999px; font-size: 11px;
-  color: var(--t2); background: rgba(255,255,255,0.05);
-  border: 1px solid var(--edge-soft);
-}
-.dot-sep { color: var(--t4); }
 
 /* 消息流的定位容器：为「回到底部」按钮提供定位基准。
    main-body 本身是滚动容器，按钮不能放在它内部（会跟着内容滚走），
@@ -2405,14 +2397,6 @@ body {
 .settings-select select:focus { outline: none; border-color: rgba(106, 165, 255, 0.45); }
 
 /* 顶栏的模式标签现在是按钮，形状保持不变 */
-.mode-chip { cursor: pointer; font: inherit; }
-.mode-chip:hover { background: rgba(255, 255, 255, 0.09); border-color: var(--edge-strong); }
-/* 危险档位常驻警示色：用户忘了自己切过完全访问是最危险的 */
-.mode-chip.is-danger {
-  color: var(--warn);
-  background: var(--warn-dim);
-  border-color: rgba(251, 191, 36, 0.32);
-}
 
 /* ══════════════════════════════════════════════════════════════════════
    可折叠面板 → 胶囊

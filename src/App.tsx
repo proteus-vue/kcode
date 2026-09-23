@@ -60,25 +60,21 @@ function hostOf(url: string): string {
   }
 }
 
-/**
- * 权限档位的中文名与审批说明。
- *
- * 两半都必须从实际档位推导。此前审批那半是写死的「按需审批」——
- * 切到完全访问后它仍显示「按需审批」，而实际策略已是 never，
- * 界面对行为边界的描述是**错的**，比不显示更糟。
- */
-const MODE_INFO: Record<string, { label: string; approval: string }> = {
-  readOnly: { label: '只读', approval: '改动需批准' },
-  workspaceWrite: { label: '工作区可写', approval: '按需审批' },
-  fullAccess: { label: '完全访问权限', approval: '无需批准' },
-};
+
 
 export default function App() {
   const api = useKcode();
   const { state } = api;
   const [audit, setAudit] = useState<string | null>(null);
-  /** 右侧面板的展示模式：审批/变更/技能/插件 共用一块区域，避免堆叠过长。 */
-  const [panel, setPanel] = useState<'default' | 'skills' | 'plugins' | 'settings'>('default');
+  /**
+   * 「库」场景内的次级切换：技能（默认）↔ 插件。
+   *
+   * **只有两个取值**：此前多出的 `'skills'` 从未被读取（默认分支就是它），
+   * `'settings'` 更是从无渲染者的死取值——顶栏那个 chip 点它什么也不会发生
+   * （该 chip 已删）。让类型与真实可达状态一致，避免下次有人以为
+   * 「设成 skills 会有什么不同」。
+   */
+  const [panel, setPanel] = useState<'default' | 'plugins'>('default');
   const layout = usePanelLayout();
   /**
    * 已打开的工作台场景（顺序即标签顺序）与当前激活的那个。
@@ -288,8 +284,6 @@ export default function App() {
   }, [thread]);
 
   const awaitingApproval = Boolean(pending);
-  /** 顶栏权限芯片的两段文案，都来自实际配置而不是写死的默认值。 */
-  const info = MODE_INFO[api.settings?.mode ?? 'workspaceWrite'] ?? MODE_INFO.workspaceWrite;
   const review = useMemo(
     () =>
       thread && latestTurnId
@@ -645,21 +639,15 @@ export default function App() {
               <span className="head-title dim">未选择任务</span>
             )}
           </div>
-          <div className="head-right">
-            {/* 顶栏的权限状态改为可点入口。
-                它是常驻可见的，用户看到「工作区可写」想知道怎么改时，
-                第一反应是点它——此前它是个死标签。 */}
-            <button
-              className={`mode-chip ${api.settings?.mode === 'fullAccess' ? 'is-danger' : ''}`}
-              onClick={() => setPanel(panel === 'settings' ? 'default' : 'settings')}
-              title="打开设置"
-            >
-              <Icon name="shield" size={12} />
-              <span>{info.label}</span>
-              <span className="dot-sep">·</span>
-              <span>{info.approval}</span>
-            </button>
-          </div>
+          {/* 这里原本有一个权限档位 chip（「完全访问权限 · 无需批准」）。
+              删掉的理由是三条叠在一起：
+              1. **冗余**：底栏的 PermissionPicker 常驻显示当前档位（AP-06），
+                 且危险档有警示色（`.perm-trigger.is-danger`）——
+                 安全信号没有丢，只是不再说两遍；
+              2. **它是死控件**：点击只设 `panel='settings'`，而该分支
+                 从未被渲染——点了什么都不会发生（设置实际在「库」场景里）；
+              3. **抢焦点**：它是一个常驻在对话区右上角的高饱和胶囊，
+                 与「不影响焦点的极简」相悖（见视觉基线 VS-03）。 */}
         </header>
 
         <div className="main-body-wrap">
