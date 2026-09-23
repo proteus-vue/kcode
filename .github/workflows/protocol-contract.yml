@@ -206,6 +206,21 @@ jobs:
           # 注解放摘要脚本挑出的关键行
           bash scripts/ci-summarize-failures.sh "$LOG" | head -8
 
+      # 日志作为 artifact 上传：**这是唯一不依赖 admin 权限、也不受注解
+      # 配额限制的读取通道**。前几轮反复出现「CI 红了但看不到为什么」——
+      # 注解有上限（实测 23 条）、job summary 对未登录访问者不渲染、
+      # 完整日志下载要 admin（本项目开发机没有）。artifact 匿名可下载。
+      - name: 上传测试日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-test-logs
+          path: |
+            /tmp/rust-tests.log
+            /tmp/rust-integration.log
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: 集成测试（真实 app-server 进程 + 本地 mock 模型）
         run: |
           set -o pipefail
