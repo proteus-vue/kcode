@@ -24,9 +24,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Icon } from './Icon';
 import type { SimulatorFrame, SimulatorStatus } from '../types/domain';
+import { classifyGesture, type Gesture } from './simulatorGesture';
 
 /** 轮询间隔。实测单帧 350ms，取 600ms 留出余量避免请求堆积。 */
 const POLL_MS = 600;
+
+/** 落点标记的显示时长——够看清、又不至于停留到干扰下一次操作。 */
+const MARKER_MS = 420;
 
 export function SimulatorPanel({
   status,
@@ -39,10 +43,27 @@ export function SimulatorPanel({
   const [serial, setSerial] = useState<string>('');
   const [frame, setFrame] = useState<SimulatorFrame | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * 设备级操作（启动/关闭/切换）进行中。
+   *
+   * 与 `inputBusy` **分开**：点一下屏幕是毫秒级的动作，而它此前会 disable
+   * 整排设备按钮（含「关闭模拟器」），表现为按钮无故闪烁变灰。
+   * 两类操作的耗时差两个数量级，共用一个标志是错的。
+   */
   const [busy, setBusy] = useState(false);
+  /** 正在发送一次触摸输入。只用于防止输入请求堆积。 */
+  const [inputBusy, setInputBusy] = useState(false);
   const imgRef = useRef<HTMLImageElement | null>(null);
   /** 用 ref 存轮询开关，避免把它放进 effect 依赖导致重启定时器。 */
   const polling = useRef(true);
+  /** 正在进行的指针手势（未抬起时为非空）。 */
+  const gestureRef = useRef<{ x: number; y: number; t: number } | null>(null);
+  /** 当前按下/拖动的落点（用于显示标记）。null = 无手势。 */
+  const [pointer, setPointer] = useState<{ x: number; y: number; from?: { x: number; y: number } } | null>(null);
+  /** 手势结束后短暂保留的标记（点击的反馈）。 */
+  const [marker, setMarker] = useState<{ x: number; y: number } | null>(null);
+  /** 取帧是否在途——避免输入后的补帧与轮询叠加。 */
+  const grabbing = useRef(false);
 
   // 默认选中第一个可用设备；没有设备时不自动启动（启动是重操作，要用户点）
   useEffect(() => {
@@ -54,6 +75,10 @@ export function SimulatorPanel({
   /** 取一帧。 */
   const grab = useCallback(async () => {
     if (!serial) return;
+    // 在途保护：输入后的补帧与 600ms 轮询可能撞在一起。
+    // 不挡会让请求堆积（单帧实测 350ms，叠三个就明显滞后于操作）。
+    if (grabbing.current) return;
+    grabbing.current = true;
     try {
       const f = await invoke<SimulatorFrame>('simulator_frame', { serial });
       setFrame(f);
@@ -62,6 +87,8 @@ export function SimulatorPanel({
       // 取帧失败常见于设备正在启动/关闭。不清空最后一帧——
       // 清掉会让面板闪成空白，而保持上一帧更能说明「它刚才还在」。
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      grabbing.current = false;
     }
   }, [serial]);
 
@@ -87,9 +114,14 @@ export function SimulatorPanel({
     };
   }, [serial, grab]);
 
-  /** 把界面点击换算成设备坐标并发出去。 */
-  const send = useCallback(
-    async (action: string, cx: number, cy: number, x2 = 0, y2 = 0) => {
+  /**
+   * 把界面坐标换算成设备坐标并发出一次输入。
+   *
+   * 换算在显示尺寸与设备尺寸之间做等比映射，并**夹紧到设备范围**——
+   * 手指滑到画面外时坐标会超出（见 map 的 clamp）。
+   */
+  const sendInput = useCallback(
+    async (action: string, cx: number, cy: number, x2 = 0, y2 = 0, durationMs = 120) => {
       if (!serial || !frame || !imgRef.current) return;
       const r = imgRef.current.getBoundingClientRect();
       const map = (px: number, py: number, dispW: number, dispH: number, devW: number, devH: number) => {
@@ -101,7 +133,7 @@ export function SimulatorPanel({
       const p1 = map(cx, cy, r.width, r.height, frame.width, frame.height);
       const p2 = map(x2, y2, r.width, r.height, frame.width, frame.height);
       if (!p1) return;
-      setBusy(true);
+      setInputBusy(true);
       try {
         await invoke('simulator_input', {
           serial,
@@ -110,16 +142,50 @@ export function SimulatorPanel({
           y1: p1[1],
           x2: p2 ? p2[0] : 0,
           y2: p2 ? p2[1] : 0,
-          durationMs: 120,
+          durationMs,
         });
         setError(null);
+        // **输入后立刻补一帧**，不等下一次 600ms 轮询。
+        //
+        // 这里**刻意不加 sleep**：`adb exec-out screencap` 自身约 350ms，
+        // 覆盖了设备处理触摸所需的时间——即「取帧的耗时就是它需要的稳定期」。
+        // 加固定等待只会让反馈更慢。
+        void grab();
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
-        setBusy(false);
+        setInputBusy(false);
       }
     },
-    [serial, frame],
+    [serial, frame, grab],
+  );
+
+  /** 硬件键（返回/主屏）：不经坐标换算，直接发。 */
+  const sendKey = useCallback(
+    (action: 'back' | 'home') => void sendInput(action, 0, 0),
+    [sendInput],
+  );
+
+  /**
+   * 手势结束：判定点击/滑动后发出，并留下落点标记。
+   *
+   * `suppressClickRef` 用于抑制浏览器在滑动后补派的那次 click——
+   * 不抑制会让「滑一下」额外在落点触发一次点击，而用户完全没点。
+   */
+  const finishGesture = useCallback(
+    (start: { x: number; y: number; t: number }, end: { x: number; y: number }) => {
+      const g: Gesture = classifyGesture(start, end, performance.now() - start.t);
+      // 点击用落点；滑动用起点→终点
+      setMarker(g.kind === 'tap' ? { x: g.x, y: g.y } : { x: g.x2, y: g.y2 });
+      window.setTimeout(() => setMarker(null), MARKER_MS);
+
+      if (g.kind === 'tap') {
+        void sendInput('tap', g.x, g.y);
+      } else {
+        void sendInput('swipe', g.x1, g.y1, g.x2, g.y2, g.durationMs);
+      }
+    },
+    [sendInput],
   );
 
   const startAvd = useCallback(async () => {
@@ -216,7 +282,7 @@ export function SimulatorPanel({
               className="sim-icon-btn"
               title="返回键"
               disabled={busy}
-              onClick={() => void send('back', 0, 0)}
+              onClick={() => sendKey('back')}
             >
               <Icon name="arrow-left" size={13} />
             </button>
@@ -224,7 +290,7 @@ export function SimulatorPanel({
               className="sim-icon-btn"
               title="主屏键"
               disabled={busy}
-              onClick={() => void send('home', 0, 0)}
+              onClick={() => sendKey('home')}
             >
               <Icon name="dot" size={13} />
             </button>
@@ -244,19 +310,68 @@ export function SimulatorPanel({
         </button>
       </div>
 
-      {/* 画面：点击与滑动直接作用到设备 */}
+      {/* 画面：点击与滑动直接作用到设备。
+          手势判定用**图片坐标**（要换算成设备坐标），
+          落点标记用**容器坐标**（要定位到 DOM），两者分开算。 */}
       {frame ? (
-        <div className="sim-screen">
+        <div className={`sim-screen ${inputBusy ? 'is-busy' : ''} ${pointer ? 'is-dragging' : ''}`}>
           <img
             ref={imgRef}
             src={frame.dataUrl}
             alt="模拟器画面"
             draggable={false}
             onPointerDown={(e) => {
-              const r = e.currentTarget.getBoundingClientRect();
-              void send('tap', e.clientX - r.left, e.clientY - r.top);
+              const img = e.currentTarget.getBoundingClientRect();
+              const box = e.currentTarget.parentElement!.getBoundingClientRect();
+              const x = e.clientX - img.left;
+              const y = e.clientY - img.top;
+              // 捕获指针：手指滑出图片范围后仍能收到 move/up，
+              // 否则滑到边缘就断掉，长距离滑动做不出来
+              e.currentTarget.setPointerCapture(e.pointerId);
+              gestureRef.current = { x, y, t: performance.now() };
+              setPointer({ x: e.clientX - box.left, y: e.clientY - box.top });
+            }}
+            onPointerMove={(e) => {
+              const start = gestureRef.current;
+              if (!start) return;
+              const img = e.currentTarget.getBoundingClientRect();
+              const box = e.currentTarget.parentElement!.getBoundingClientRect();
+              setPointer({
+                x: e.clientX - box.left,
+                y: e.clientY - box.top,
+                from: { x: start.x + (img.left - box.left), y: start.y + (img.top - box.top) },
+              });
+            }}
+            onPointerUp={(e) => {
+              const start = gestureRef.current;
+              if (!start) return;
+              gestureRef.current = null;
+              setPointer(null);
+              const img = e.currentTarget.getBoundingClientRect();
+              finishGesture(start, { x: e.clientX - img.left, y: e.clientY - img.top });
+            }}
+            onPointerCancel={() => {
+              // 系统取消（来电、手势被接管）：不发出任何输入——
+              // 用户没完成这次操作，替他补一次点击是错的
+              gestureRef.current = null;
+              setPointer(null);
             }}
           />
+
+          {/* 拖动中的轨迹线：给「我正在滑」一个即时反馈，
+              不必等 350ms 后的补帧 */}
+          {pointer?.from && (
+            <svg className="sim-drag" aria-hidden="true">
+              <line x1={pointer.from.x} y1={pointer.from.y} x2={pointer.x} y2={pointer.y} />
+            </svg>
+          )}
+
+          {/* 落点标记：点击后立刻出现，说明「收到了」。
+              没有它，用户只能靠画面变化判断点击是否生效，
+              而点到无响应区域时根本无法区分是自己没点到还是设备没反应。 */}
+          {marker && (
+            <span className="sim-marker" style={{ left: marker.x, top: marker.y }} aria-hidden="true" />
+          )}
         </div>
       ) : (
         <div className="sim-empty">

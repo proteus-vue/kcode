@@ -609,10 +609,14 @@ async fn revert_file(
 #[tauri::command]
 async fn read_remote_thread(
     state: State<'_, AppState>,
-    threadId: String,
+    // 参数名用 snake_case：Tauri 会把前端的 `threadId` 自动映射过来
+    // （与 `simulator_input` 的 `duration_ms` ← `durationMs` 同一机制）。
+    // 这里曾写成 camelCase，clippy 的 `non_snake_case` 在 `-D warnings`
+    // 下直接报错——Rust 侧就该是 Rust 的名字。
+    thread_id: String,
 ) -> Result<kcode_app::ThreadSnapshot, CommandError> {
     let svc = require_service(&state).await?;
-    svc.read_remote_thread(threadId).await.map_err(CommandError::from)
+    svc.read_remote_thread(thread_id).await.map_err(CommandError::from)
 }
 
 /// 探测本机可用的外部编辑器。
