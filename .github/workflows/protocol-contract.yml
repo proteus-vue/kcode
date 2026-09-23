@@ -31,6 +31,13 @@ jobs:
       - name: 校验 workflow 自身有效
         run: bash scripts/verify-workflow.sh
 
+      # 平台门控死代码：本地（macOS）全绿、只在 Linux job 上失败的那类问题。
+      # 起因见 docs/协议勘误与修正.md §3.29：applescript_quote 只被 macOS
+      # 分支调用却没加 cfg，Linux 上成为死代码，clippy -D warnings 变错。
+      # 交叉编译覆盖不到它（kcode-desktop 需要 GTK，交叉不了），故用静态检查。
+      - name: 平台门控检查（防 Linux 死代码）
+        run: bash scripts/check-platform-gating.sh
+
       - name: 校验 codex 版本与哈希（安全基线 + 可复现）
         run: bash scripts/verify-codex-version.sh
 
