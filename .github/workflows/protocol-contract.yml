@@ -150,6 +150,42 @@ jobs:
       # **同时写注解**（::error:: 之外的普通行不会进注解，所以这里显式加前缀）：
       # job summary 对未登录访问者不渲染，而注解面板匿名可读——本项目的开发
       # 环境没有 admin 权限，注解是唯一稳定的读取通道。
+      # 集成测试失败时的诊断。**注解有数量上限（实测 23 条/check-run）**，
+      # 超出部分会被静默丢弃——早先这一步输出了 20+ 行（含整个 doctor），
+      # 结果最关键的 probe-exec 结论被截掉，等于白跑一轮。
+      # 所以这里刻意只输出**少数几条决定性信息**，其余进 job summary。
+      - name: 集成测试失败诊断（仅失败时执行）
+        if: failure()
+        run: |
+          # `set +e`：诊断命令任何一条非零退出都不该终止脚本
+          # （踩过：`set -e` 下 `out=$(cmd)` 遇非零立即退出，后面探针没跑）
+          set +e
+
+          BIN=$(find node_modules/@openai -path '*vendor*/bin/codex' -type f 2>/dev/null | head -1)
+
+          {
+            echo '### 诊断（完整输出）'
+            echo '```'
+            echo "kernel: $(uname -r)"
+            echo "zsh: $(command -v zsh || echo '未安装')"
+            echo "bash: $(command -v bash || echo '未安装')"
+            echo "bwrap: $(command -v bwrap || echo '未安装')"
+            echo "landlock: $(grep -c landlock /sys/kernel/security/lsm 2>/dev/null || echo '?')"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # 决定性判据：在同一条链路上跑一次真实命令，看有没有 commandExecution Item
+          PROBE_OUT=$(cd "$GITHUB_WORKSPACE" && node scripts/probe-exec.mjs "$BIN" 2>&1)
+          echo "$PROBE_OUT" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::zsh=$(command -v zsh || echo 未安装) bash=$(command -v bash)"
+          echo "$PROBE_OUT" | grep -E "^(✅|❌|   exitCode|   与命令相关|   含义|收到方法)" | head -4 | while IFS= read -r line; do
+            echo "::error::probe-exec $line"
+          done
+          # 命令形式本身也是证据（codex 用什么 shell 执行）
+          echo "$PROBE_OUT" | grep -oE "command=/[^ ]+ -lc" | head -1 | while IFS= read -r c; do
+            echo "::error::probe-exec 执行形式 $c"
+          done
+
       - name: 静态检查
         run: cargo clippy --workspace --all-targets -- -D warnings
 
