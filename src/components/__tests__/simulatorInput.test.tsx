@@ -1,16 +1,30 @@
 /**
- * 模拟器面板的手势接线测试（组件级）。
+ * 模拟器面板的接线测试（组件级）。
  *
  * 纯函数测试只证明「判定对了」，不证明**判定结果真的发出去了**。
  * 这一层要守的是一整条链：pointer 事件 → 坐标换算 → invoke。
  * 上一轮核查发现的问题正是「后端支持 swipe、前端从未调用」——
  * 那种缺口只有组件级测试能拦住。
+ *
+ * 四平台改版后另加两类必守的契约：
+ *
+ * 1. **调用参数带平台**：invoke 传的是 `{platform, id}`，而 `id` 必须是
+ *    `runtimeId`（Android 上是 adb serial，不是 AVD 名）。传错会在后端
+ *    得到一个与根因无关的报错。
+ * 2. **能力位决定交互**：`canInput: false` 的平台（iOS）**不接管指针**——
+ *    画面上拖动不能发出任何输入。这条防的是「以后有人为了方便把
+ *    只读判断去掉」，那会让 iOS 用户拖了半天却什么都没发生。
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { SimulatorPanel } from '../SimulatorPanel';
-import type { SimulatorFrame, SimulatorStatus } from '../../types/domain';
+import type {
+  DeviceEntry,
+  PlatformStatus,
+  SimulatorFrame,
+  SimulatorStatus,
+} from '../../types/domain';
 
 // ── 桩掉 Tauri 的 invoke ──────────────────────────────────────────────
 const calls: { cmd: string; args: Record<string, unknown> }[] = [];
@@ -26,7 +40,11 @@ vi.mock('@tauri-apps/api/core', () => ({
     calls.push({ cmd, args });
     if (cmd === 'simulator_frame') {
       frameCalls += 1;
-      return nextFrame;
+      // **必须返回一个新对象**：真实 IPC 每次都是新反序列化的对象，
+      // 而返回同一个引用会让 React 因 `Object.is` 相等而跳过更新——
+      // 那样就掩盖了「轮询随每帧重启」这类依赖链缺陷
+      // （实测：用同一个引用时，注入该缺陷的回归测试依然通过）。
+      return { ...nextFrame };
     }
     if (cmd === 'simulator_probe') {
       probeCalls += 1;
@@ -39,14 +57,79 @@ vi.mock('@tauri-apps/api/core', () => ({
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
 
-const status: SimulatorStatus = {
-  android: {
+/** 构造一台 Android 设备条目（型号 + 系统 + 分辨率为这次改版的重点）。 */
+function androidDevice(over: Partial<DeviceEntry> = {}): DeviceEntry {
+  return {
+    id: 'Pixel_7',
+    name: 'Pixel 7',
+    os: 'Android 14',
+    resolution: '1080×2400',
+    running: true,
+    state: 'device',
+    detail: 'arm64-v8a · 420dpi · google_apis',
+    runtimeId: 'emulator-5554',
+    ...over,
+  };
+}
+
+/** 构造一个不可用平台（缺工具链时后端返回的形状）。 */
+function off(reason: string): PlatformStatus {
+  return {
+    available: false,
+    reason,
+    tool: null,
+    devices: [],
+    canLaunch: false,
+    canInput: false,
+    inputHint: null,
+  };
+}
+
+/** 一个可用的 Android 平台（有一台运行中的设备）。 */
+function onAndroid(devices: DeviceEntry[] = [androidDevice()]): PlatformStatus {
+  return {
     available: true,
     reason: null,
-    avds: ['Pixel_7'],
-    devices: [{ serial: 'emulator-5554', state: 'device', model: 'Pixel 7' }],
-  },
-  ios: { available: false, reason: '未安装完整 Xcode' },
+    tool: '/sdk/emulator + /sdk/adb',
+    devices,
+    canLaunch: true,
+    canInput: true,
+    inputHint: null,
+  };
+}
+
+/**
+ * iOS 可用的形状：**能启动、能取画面、不能触摸**。
+ *
+ * 这正是真实工具链的能力边界（simctl 有截图没有触摸命令），
+ * 也是只读交互测试的夹具。
+ */
+const iosAvailable: PlatformStatus = {
+  available: true,
+  reason: null,
+  tool: 'xcrun simctl',
+  devices: [
+    {
+      id: 'AAAA-BBBB',
+      name: 'iPhone 15 Pro',
+      os: 'iOS 17.0',
+      resolution: null,
+      running: true,
+      state: 'Booted',
+      detail: 'iPhone-15-Pro',
+      runtimeId: 'AAAA-BBBB',
+    },
+  ],
+  canLaunch: true,
+  canInput: false,
+  inputHint: 'iOS 模拟器画面为只读：simctl 不提供触摸注入',
+};
+
+const status: SimulatorStatus = {
+  android: onAndroid(),
+  ios: { available: false, reason: '未安装完整 Xcode' , tool: null, devices: [], canLaunch: false, canInput: false, inputHint: null },
+  harmony: off('未找到 hdc（鸿蒙设备连接器）'),
+  miniprogram: off('未找到微信开发者工具'),
 };
 
 beforeEach(() => {
@@ -100,6 +183,20 @@ async function mount() {
 }
 
 const img = () => host!.querySelector('.sim-screen img') as HTMLImageElement;
+
+/**
+ * 按**精确文本**找按钮。
+ *
+ * 不用 `includes`：设备行上「启动」按钮与状态标签「未启动」相邻，而
+ * `textContent` 包含整个子树——`includes('启动')` 会先命中设备行按钮
+ * （它的文本里含「未启动」），点下去只切换选中态，测试表现成
+ * 「启动按钮点了没反应」。精确匹配是这里唯一可靠的判据。
+ */
+function buttonByText(text: string): HTMLButtonElement | undefined {
+  return [...host!.querySelectorAll('button')].find(
+    (b) => b.textContent?.trim() === text,
+  ) as HTMLButtonElement | undefined;
+}
 
 /**
  * 让图片有一个确定的矩形。
@@ -159,7 +256,14 @@ describe('点击', () => {
 
     const call = lastInput();
     expect(call, '应发出 simulator_input').toBeDefined();
-    expect(call!.args).toMatchObject({ action: 'tap', x1: 200, y1: 400, serial: 'emulator-5554' });
+    // id 必须是 runtimeId（adb serial），不是 AVD 名——见文件头的说明
+    expect(call!.args).toMatchObject({
+      action: 'tap',
+      x1: 200,
+      y1: 400,
+      platform: 'android',
+      id: 'emulator-5554',
+    });
   });
 
   it('微抖动仍发 tap（阈值内的位移不该变成滑动）', async () => {
@@ -263,18 +367,38 @@ describe('内容未变时跳过重绘（卡顿的主要来源）', () => {
   });
 });
 
+describe('轮询节奏（依赖链错了会变成「帧一到就再取一帧」）', () => {
+  it('两秒内取帧次数符合 600ms 间隔，而不是每帧都取', async () => {
+    // 回归测试：`grab` 曾依赖 `frame` 状态 → 轮询 effect 依赖 `grab`
+    // → **每收到一帧就重建定时器**，退化成「帧一到立刻再取一帧」，
+    // 间隔从 600ms 掉到取帧耗时（约 350ms），持续满载。
+    // 这类缺陷不报错，只表现为「模拟器很卡」——所以用计数钉住。
+    //
+    // 已验证这条测试**确实能抓到**那个缺陷：注入 `[platform, runtimeId, frame]`
+    // 依赖后本条失败（表现为超时——失去 600ms 节流后，取帧的微任务链
+    // 持续占住事件循环，连定时器都排不进去）。注意配合 invoke 桩
+    // **返回新对象**：返回同一引用会让 React 跳过更新，测试会假通过。
+    await mount();
+    const before = frameCalls;
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 2000));
+    });
+    const during = frameCalls - before;
+    // 2000ms / 600ms ≈ 3 次。放宽容差到 2–6：定时器有调度抖动，
+    // 但「每帧立刻再取」会是 5–6 次以上且随时间线性增长。
+    expect(during, `两秒内取帧 ${during} 次，间隔已偏离 600ms`).toBeLessThanOrEqual(6);
+  });
+});
+
 describe('启动后自动等设备就绪', () => {
-  it('启动后轮询探测，设备出现时自动选中并停止提示', async () => {
+  it('启动后轮询探测，设备出现时自动选中并取帧', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    // 初始：有 AVD、无运行设备
+    // 初始：有 AVD（未启动），没有任何运行中的设备
     probeResult = {
-      android: {
-        available: true,
-        reason: null,
-        avds: ['Pixel_7'],
-        devices: [],
-      },
-      ios: { available: false, reason: '缺 Xcode' },
+      android: onAndroid([androidDevice({ running: false, state: 'stopped', runtimeId: null })]),
+      ios: off('缺 Xcode'),
+      harmony: off('缺 hdc'),
+      miniprogram: off('缺开发者工具'),
     };
     host = document.createElement('div');
     document.body.appendChild(host);
@@ -302,41 +426,150 @@ describe('启动后自动等设备就绪', () => {
       root!.render(<Harness />);
     });
 
-    // 点「启动」
-    const startBtn = [...host.querySelectorAll('button')].find((b) => b.textContent?.includes('启动'));
-    expect(startBtn, '应有启动按钮').toBeDefined();
+    // 点设备行上的「启动」
+    const startBtn = buttonByText('启动');
+    expect(startBtn, '未运行时设备行上应有启动按钮').toBeDefined();
     await act(async () => {
       startBtn!.click();
     });
+    // 启动调用的参数要带平台与设备 id
+    const startCall = calls.find((c) => c.cmd === 'simulator_start');
+    expect(startCall!.args).toMatchObject({ platform: 'android', id: 'Pixel_7' });
 
     // 等设备出现（模拟器冷启动）
     probeResult = {
-      android: {
-        available: true,
-        reason: null,
-        avds: ['Pixel_7'],
-        devices: [{ serial: 'emulator-5554', state: 'device', model: 'Pixel 7' }],
-      },
-      ios: { available: false, reason: '缺 Xcode' },
+      android: onAndroid(),
+      ios: off('缺 Xcode'),
+      harmony: off('缺 hdc'),
+      miniprogram: off('缺开发者工具'),
     };
     await act(async () => {
       await new Promise((r) => setTimeout(r, 2200)); // 跨过一次 2s 轮询
     });
 
     expect(probeCalls, '应自动探测设备，不需要用户手动刷新').toBeGreaterThan(0);
-    // 设备选中后应当开始取帧（面板有画面）
+    // 设备就绪后应当开始取帧（面板有画面）
     await act(async () => {
       await new Promise((r) => setTimeout(r, 400));
     });
-    // 设备就绪后 AVD 选择器被设备选择器替换，所以要在所有下拉里找含该 serial 的那个。
-    // （原先只取第一个 .sim-select，读到的是 AVD 选择器，断言必失败——那是测试的问题。）
-    const selects = [...host.querySelectorAll('.sim-select')] as HTMLSelectElement[];
-    const deviceSelect = selects.find((el) =>
-      [...el.options].some((o) => o.value === 'emulator-5554'),
-    );
-    expect(deviceSelect, '应出现设备选择器').toBeDefined();
-    expect(deviceSelect!.value, '设备就绪后应自动选中它').toBe('emulator-5554');
-    expect(host.querySelector('.sim-notice'), '就绪后提示应消失').toBeNull();
+    expect(host.querySelector('.sim-screen img'), '就绪后应出现画面').not.toBeNull();
+    // 取帧用的是 runtimeId（serial），不是 AVD 名
+    const frameCall = [...calls].reverse().find((c) => c.cmd === 'simulator_frame');
+    expect(frameCall!.args).toMatchObject({ platform: 'android', id: 'emulator-5554' });
+    expect(host.querySelector('.sim-error'), '就绪后不该留下错误').toBeNull();
+  });
+});
+
+describe('多平台：设备清单区分型号与系统', () => {
+  it('设备行同时给出型号、系统版本与分辨率', async () => {
+    await mount();
+    const name = host!.querySelector('.sim-device-name');
+    expect(name?.textContent).toBe('Pixel 7');
+    expect(host!.querySelector('.sim-device-os')?.textContent, '系统版本是「要看哪个」的依据').toBe('Android 14');
+    expect(host!.querySelector('.sim-device-res')?.textContent).toBe('1080×2400');
+    // 第二行的细节（abi/dpi）
+    expect(host!.querySelector('.sim-device-detail')?.textContent).toContain('arm64-v8a');
+    // 完整标识放进 title：右栏放不下，但排查时要在 hover 拿得到。
+    // 第一版把它当独立一列渲染，结果 400px 宽下型号被挤成
+    // 「Medium Phone API Tirami…」（实测截图发现）。
+    const main = host!.querySelector('.sim-device-main')!;
+    expect(main.getAttribute('title')).toContain('Pixel_7');
+    expect(main.getAttribute('title')).toContain('emulator-5554');
+  });
+
+  it('四个平台都列出（不可用的也列出，点开能看到原因）', async () => {
+    await mount();
+    // 取 label 元素而不是按钮本身：按钮里还有计数徽标，
+    // textContent 会是 "Android1" 这种拼接结果
+    const labels = [...host!.querySelectorAll('.sim-tab-label')].map((e) => e.textContent);
+    expect(labels).toEqual(['Android', 'iOS', '鸿蒙', '小程序']);
+    // 有运行中设备的平台带计数
+    expect(host!.querySelector('.sim-tab-count')?.textContent).toBe('1');
+    // 点不可用的平台 → 显示原因（含可执行的下一步）
+    const iosTab = [...host!.querySelectorAll('.sim-tab')].find((t) =>
+      t.textContent?.includes('iOS'),
+    ) as HTMLButtonElement;
+    await act(async () => {
+      iosTab.click();
+    });
+    expect(host!.querySelector('.sim-empty-title')?.textContent).toContain('iOS');
+    expect(host!.querySelector('.sim-empty-hint')?.textContent, '不可用必须说清缺什么').toContain('Xcode');
+  });
+
+  it('只有 canLaunch 的平台才画「启动」按钮', async () => {
+    // 鸿蒙：工具链在、但无法从本应用启动（启动器在 DevEco 里）
+    const harmonyStatus: SimulatorStatus = {
+      android: onAndroid(),
+      ios: off('缺 Xcode'),
+      harmony: {
+        available: true,
+        reason: null,
+        tool: '/hdc',
+        devices: [
+          {
+            id: '7001', name: '鸿蒙设备 7001…', os: 'HarmonyOS', resolution: null,
+            running: true, state: 'connected', detail: null, runtimeId: '7001',
+          },
+        ],
+        canLaunch: false,
+        canInput: false,
+        inputHint: '鸿蒙的触摸注入尚未在真机上验证',
+      },
+      miniprogram: off('缺开发者工具'),
+    };
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(<SimulatorPanel status={harmonyStatus} onRefreshStatus={() => {}} />);
+    });
+    // 切到鸿蒙
+    const harmonyTab = [...host.querySelectorAll('.sim-tab')].find((t) =>
+      t.textContent?.includes('鸿蒙'),
+    ) as HTMLButtonElement;
+    await act(async () => {
+      harmonyTab.click();
+    });
+    expect(host.querySelector('.sim-device-name')?.textContent).toContain('鸿蒙设备');
+    expect(
+      [...host.querySelectorAll('button')].filter((b) => b.textContent?.trim() === '启动'),
+      '不能启动的平台不该画启动按钮（点了只会报错）',
+    ).toHaveLength(0);
+  });
+});
+
+describe('只读平台：不给触摸交互', () => {
+  it('iOS 画面拖动不发任何输入，且说明为什么点不动', async () => {
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(<SimulatorPanel status={{ ...status, ios: iosAvailable }} onRefreshStatus={() => {}} />);
+    });
+    // **必须显式切到 iOS**：Android 也有运行中设备，而默认平台选的是
+    // 顺序上第一个有运行中设备的（android）。不切的话断言的是 Android 画面。
+    const iosTab = [...host.querySelectorAll('.sim-tab')].find((t) =>
+      t.textContent?.includes('iOS'),
+    ) as HTMLButtonElement;
+    await act(async () => {
+      iosTab.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(host.querySelector('.sim-screen img'), 'iOS 可用时应出画面').not.toBeNull();
+    expect(img().getAttribute('alt'), '画面应标明是哪台设备').toContain('iPhone 15 Pro');
+    // 只读提示必须存在：不写用户会以为是自己点错了
+    expect(host.querySelector('.sim-readonly-hint')?.textContent).toContain('只读');
+
+    stubRect(img());
+    await pointer('pointerdown', 100, 200);
+    await pointer('pointermove', 200, 400);
+    await pointer('pointerup', 250, 500);
+    expect(lastInput(), 'iOS 不支持触摸，任何手势都不该发出输入').toBeUndefined();
+    // 也不该出现落点标记（那会让人以为点击生效了）
+    expect(host.querySelector('.sim-marker')).toBeNull();
   });
 });
 

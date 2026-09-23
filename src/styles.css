@@ -3810,9 +3810,10 @@ body {
 }
 
 /* ══ 模拟器面板 ═══════════════════════════════════════════════════════
-   画面用 adb 实时截图（单帧约 350ms），点击/滑动直接作用到设备。
-   与参照的区别：可用就真给画面，不可用就说清缺什么——不画一个永远空着的
-   手机框（参照在未装 Xcode 时给的正是那种报错面板，本机实测即此情形）。 */
+   四平台（Android / iOS / 鸿蒙 / 小程序）：平台标签 → 设备列表（型号 +
+   系统 + 分辨率）→ 实时画面。与参照的区别：可用就真给画面，不可用就说清
+   缺什么——不画一个永远空着的手机框（参照在未装 Xcode 时给的正是那种
+   报错面板，本机实测即此情形）。 */
 .sim-panel {
   display: flex; flex-direction: column;
   /* **必须用 flex 而不是 height: 100%**：父级 `.workbench-body` 是
@@ -3822,27 +3823,45 @@ body {
      用 flex: 1 + min-height: 0 让高度由容器决定，不被内容反推。 */
   flex: 1 1 auto; min-height: 0;
 }
-.sim-bar {
-  display: flex; align-items: center; gap: 6px;
-  padding: 8px 10px; flex-wrap: wrap;
+
+/* ── 平台标签 ────────────────────────────────────────────────────────
+   四个平台全列（含不可用的）：用户需要知道本机装了哪几个、缺哪个。
+   不可用的用**降饱和 + 灰点**表达，而不是隐藏——隐藏会让人以为
+   我们不支持那个平台。 */
+.sim-tabs {
+  display: flex; align-items: center; gap: 2px;
+  padding: 6px 8px 0;
   border-bottom: 1px solid var(--edge-soft);
+  flex-shrink: 0;
 }
-.sim-select {
-  appearance: none; background: rgba(255,255,255,0.05);
-  border: 1px solid var(--edge-soft); border-radius: var(--r-xs);
-  color: var(--t2); font: inherit; font-size: 11.5px;
-  padding: 3px 7px; max-width: 180px; cursor: pointer;
+.sim-tab {
+  appearance: none; background: transparent; border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--t3); font: inherit; font-size: 11.5px;
+  padding: 5px 8px 6px;
+  display: flex; align-items: center; gap: 5px;
+  cursor: pointer; white-space: nowrap;
 }
-.sim-select option { background: #1a1e26; color: var(--t1); }
-.sim-icon-btn {
-  appearance: none; background: transparent; border: 1px solid transparent;
-  border-radius: var(--r-xs); color: var(--t3);
-  width: 24px; height: 22px; display: grid; place-items: center; cursor: pointer;
+.sim-tab:hover { color: var(--t1); }
+.sim-tab.is-active { color: var(--t1); border-bottom-color: var(--accent); }
+/* 不可用：仍然可点（点开看原因），但视觉上退后一层 */
+.sim-tab.is-off { color: var(--t4); }
+.sim-tab.is-off:hover { color: var(--t3); }
+.sim-tab-label { line-height: 1; }
+/* 可用性圆点：实心 = 工具链齐备，空心 = 缺工具 */
+.sim-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  border: 1px solid var(--t4); flex-shrink: 0;
 }
-.sim-icon-btn:hover:not(:disabled) {
-  background: rgba(255,255,255,0.07); border-color: var(--edge-soft); color: var(--t1);
+.sim-dot.is-on { background: var(--ok, #4ade80); border-color: var(--ok, #4ade80); }
+/* 运行中设备计数：一眼看出哪个平台「正在跑东西」 */
+.sim-tab-count {
+  font-size: 10px; line-height: 1;
+  padding: 2px 4px; border-radius: var(--r-xs);
+  background: rgba(255,255,255,0.08); color: var(--t2);
+  font-variant-numeric: tabular-nums;
 }
-.sim-icon-btn:disabled { opacity: .45; cursor: default; }
+.sim-refresh { margin-left: auto; }
 
 /* 画面区：图片按可用空间等比缩放（不裁切——裁切会让坐标换算失效） */
 .sim-screen {
@@ -3873,6 +3892,18 @@ body {
   touch-action: none;
   /* 截图是位图：放大时保持像素锐利，避免糊成一片无法辨认控件 */
   image-rendering: -webkit-optimize-contrast;
+}
+/* 只读画面（iOS / 未验证的平台）：把「不可交互」表达清楚。
+   降低不透明度会让人以为画面有问题，所以只改光标与一道细边框。 */
+.sim-screen.is-readonly img { cursor: default; }
+.sim-readonly-hint {
+  position: absolute; left: 12px; right: 12px; bottom: 12px;
+  font-size: 10.5px; line-height: 1.5;
+  padding: 5px 8px; border-radius: var(--r-xs);
+  /* 画面是深色的设备截图，提示用半透明底衬保证可读 */
+  background: rgba(12,14,18,0.82); color: var(--t3);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
 }
 
 /* 落点标记：点击后立刻出现的确认。
@@ -3917,31 +3948,125 @@ body {
   .sim-marker { animation: none; opacity: 0.8; }
 }
 
-.sim-empty {
-  flex: 1; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; gap: 8px;
-  padding: 24px 20px; text-align: center; color: var(--t4);
+/* ── 设备列表 ────────────────────────────────────────────────────────
+   每台设备两行：第一行型号 + 系统 + 状态，第二行分辨率 + 细节 + id。
+   **可滚动且限高**：设备多时不能让列表把画面区挤没（画面才是主体）。 */
+.sim-devices {
+  display: flex; flex-direction: column;
+  gap: 1px; padding: 4px;
+  max-height: 132px; overflow-y: auto;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--edge-soft);
 }
-.sim-empty-title { margin: 0; font-size: 12.5px; color: var(--t2); }
-.sim-empty-hint { margin: 0; font-size: 11px; line-height: 1.55; color: var(--t4); max-width: 300px; }
-/* 进行中的提示：中性色而不是警告色——一切正常，只是需要等。 */
-.sim-notice {
-  margin: 0; padding: 7px 11px;
-  font-size: 11px; line-height: 1.5;
-  color: var(--t3); background: rgba(255,255,255,0.04);
+.sim-devices-empty {
+  margin: 0; padding: 10px 8px;
+  font-size: 11px; line-height: 1.55; color: var(--t4);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.sim-tool-hint {
+  font-size: 10px; color: var(--t4);
+  word-break: break-all; font-family: var(--mono, monospace);
+}
+.sim-device {
+  display: flex; align-items: center; gap: 4px;
+  border-radius: var(--r-xs);
+  padding: 1px;
+}
+.sim-device:hover { background: rgba(255,255,255,0.035); }
+/* 选中态用左侧竖条 + 微微提亮：不用整块高亮，那会和「运行中」的语义打架 */
+.sim-device.is-active {
+  background: rgba(255,255,255,0.05);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.sim-device-main {
+  appearance: none; background: transparent; border: 0;
+  font: inherit; text-align: left; cursor: pointer;
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 4px 6px; color: inherit;
+}
+.sim-device-row {
+  display: flex; align-items: baseline; gap: 6px;
+  min-width: 0;
+}
+/* 型号：占据第一行剩余空间。**不设 max-width**——原先限了 45%，
+   在 400px 右栏里被系统版本与操作按钮一起挤成「Medium Phone API Tirami…」，
+   而型号正是用户挑设备的依据（实测截图发现）。缺的信息用省略号表达。 */
+.sim-device-name {
+  font-size: 11.5px; color: var(--t1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  flex: 1 1 auto; min-width: 0;
+}
+/* 系统版本：多平台并存时这是「要看哪个」的首要依据。
+   放在第二行行首并**不收缩**：它是最不该被截断的信息之一。 */
+.sim-device-os {
+  font-size: 10.5px; color: var(--t2);
+  white-space: nowrap; flex-shrink: 0;
+}
+.sim-state {
+  font-size: 10px; color: var(--t4);
+  white-space: nowrap; flex-shrink: 0;
+  /* 与型号拉开：型号可能被截断到贴着状态文字，留一点呼吸 */
+  margin-left: auto;
+}
+.sim-state.is-running { color: var(--ok, #4ade80); }
+/* 第二行：次要信息（分辨率 / abi / dpi / id），整体退到 t4 */
+.sim-device-sub {
+  font-size: 10px; color: var(--t4);
+  gap: 8px; overflow: hidden;
+}
+.sim-device-sub > span {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sim-device-res { color: var(--t3); flex-shrink: 0; }
+/* 细节行是第二行里最次要的（abi/dpi/tag），让它先被截断 */
+.sim-device-detail { flex: 1 1 auto; min-width: 0; }
+.sim-device-act { flex-shrink: 0; }
+
+/* 底部操作条（硬件键 + 手势提示） */
+.sim-bar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px; flex-wrap: wrap;
   border-top: 1px solid var(--edge-soft);
-  /* 不收缩：提示被压扁就没法读了 */
   flex-shrink: 0;
 }
+.sim-bar-hint { font-size: 10.5px; color: var(--t4); }
+.sim-icon-btn {
+  appearance: none; background: transparent; border: 1px solid transparent;
+  border-radius: var(--r-xs); color: var(--t3);
+  width: 24px; height: 22px; display: grid; place-items: center; cursor: pointer;
+}
+.sim-icon-btn:hover:not(:disabled) {
+  background: rgba(255,255,255,0.07); border-color: var(--edge-soft); color: var(--t1);
+}
+.sim-icon-btn:disabled { opacity: .45; cursor: default; }
+
+.sim-empty {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px;
+  padding: 24px 20px; text-align: center; color: var(--t4);
+  /* 内容可能很长（安装指引含路径与命令）——允许滚动，
+     否则长理由会把「重新检测」按钮挤出可视区。 */
+  overflow-y: auto;
+}
+.sim-empty-title { margin: 0; font-size: 12.5px; color: var(--t2); }
+.sim-empty-hint {
+  margin: 0; font-size: 11px; line-height: 1.55; color: var(--t4);
+  max-width: 320px;
+  /* 路径/命令里没有空格，必须允许在任意位置换行 */
+  word-break: break-word;
+}
+.sim-empty-tool {
+  margin: 0; font-size: 10px; color: var(--t4);
+  font-family: var(--mono, monospace);
+  word-break: break-all; max-width: 320px;
+}
+/* 进行中的提示：中性色而不是警告色——一切正常，只是需要等。 */
 .sim-error {
   margin: 0; padding: 7px 11px;
   font-size: 11px; line-height: 1.5;
   color: var(--warn); background: rgba(251,191,36,0.09);
   border-top: 1px solid rgba(251,191,36,0.25);
-}
-.sim-note {
   flex-shrink: 0;
-  margin: 0; padding: 6px 11px;
-  font-size: 10.5px; line-height: 1.5; color: var(--t4);
-  border-top: 1px solid var(--edge-soft);
 }

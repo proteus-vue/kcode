@@ -796,37 +796,42 @@ fn store_attachment(
     })
 }
 
-/// 探测本机模拟器可用性（Android / iOS）。
+/// 探测本机四个平台的模拟器/设备可用性。
 #[tauri::command]
 async fn simulator_probe() -> Result<simulator::SimulatorStatus, CommandError> {
     Ok(simulator::probe().await)
 }
 
-/// 启动一个 Android 模拟器。
+/// 启动一个设备。`platform` 取 `android` / `ios`。
 #[tauri::command]
-async fn simulator_start(avd: String) -> Result<(), CommandError> {
-    simulator::start(&avd).await.map_err(CommandError::from)
+async fn simulator_start(platform: String, id: String) -> Result<(), CommandError> {
+    let p = simulator::Platform::parse(&platform).map_err(CommandError::from)?;
+    simulator::start(p, &id).await.map_err(CommandError::from)
 }
 
-/// 关闭一个运行中的模拟器。
+/// 关闭一个运行中的设备。
 #[tauri::command]
-async fn simulator_stop(serial: String) -> Result<(), CommandError> {
-    let out = simulator::stop(&serial).await.map_err(CommandError::from);
+async fn simulator_stop(platform: String, id: String) -> Result<(), CommandError> {
+    let p = simulator::Platform::parse(&platform).map_err(CommandError::from)?;
+    let out = simulator::stop(p, &id).await.map_err(CommandError::from);
     // 无论停止成功与否都清掉帧缓存：缓存留着会让「重新启动同一台设备后
-    // 首帧被判为未变」而面板空白
-    simulator::forget_frame(&serial);
+    // 首帧被判为未变」而面板空白。
+    // 键与 `simulator::frame` 内部一致（`平台:设备`），否则清了个不存在的键。
+    simulator::forget_frame(&format!("{}:{}", p.label(), id));
     out
 }
 
 /// 取一帧模拟器画面（data URL + 设备尺寸）。
 #[tauri::command]
 async fn simulator_frame(
-    serial: String,
+    platform: String,
+    id: String,
     // `force`：前端手上没有帧时传 true（首次选中、切换设备、重启后）——
     // 否则服务端可能判定「与上一帧相同」而不下发，面板会空着。
     force: Option<bool>,
 ) -> Result<SimulatorFrame, CommandError> {
-    let cap = simulator::frame(&serial, force.unwrap_or(false))
+    let p = simulator::Platform::parse(&platform).map_err(CommandError::from)?;
+    let cap = simulator::frame(p, &id, force.unwrap_or(false))
         .await
         .map_err(CommandError::from)?;
     Ok(SimulatorFrame { data_url: cap.data_url, width: cap.width, height: cap.height })
@@ -845,8 +850,12 @@ struct SimulatorFrame {
 
 /// 向模拟器发送输入（tap / swipe / back / home），坐标为设备坐标。
 #[tauri::command]
+// Tauri 命令的参数来自 invoke 的具名键，逐个列出是它的契约形式；
+// 收成结构体会要求前端改传一个嵌套对象（不值得为 lint 改协议）。
+#[allow(clippy::too_many_arguments)]
 async fn simulator_input(
-    serial: String,
+    platform: String,
+    id: String,
     action: String,
     x1: Option<i64>,
     y1: Option<i64>,
@@ -854,10 +863,15 @@ async fn simulator_input(
     y2: Option<i64>,
     duration_ms: Option<u64>,
 ) -> Result<(), CommandError> {
-    let (x1, y1, x2, y2) = (x1.unwrap_or(0), y1.unwrap_or(0), x2.unwrap_or(0), y2.unwrap_or(0));
-    simulator::input(&serial, &action, x1, y1, x2, y2, duration_ms.unwrap_or(120))
-        .await
-        .map_err(CommandError::from)
+    let p = simulator::Platform::parse(&platform).map_err(CommandError::from)?;
+    let t = simulator::Touch {
+        x1: x1.unwrap_or(0),
+        y1: y1.unwrap_or(0),
+        x2: x2.unwrap_or(0),
+        y2: y2.unwrap_or(0),
+        duration_ms: duration_ms.unwrap_or(120),
+    };
+    simulator::input(p, &id, &action, t).await.map_err(CommandError::from)
 }
 
 /// 保存**粘贴**的图片附件（剪贴板只有字节，没有路径）。

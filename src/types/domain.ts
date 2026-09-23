@@ -565,32 +565,63 @@ export interface ImageAttachment {
 /** 输入区可携带的附件。 */
 export type ComposerAttachment = WebElementAttachment | ImageAttachment;
 
-/** adb 可见的设备。 */
-export interface AdbDevice {
-  serial: string;
-  /** `device` / `offline` / `unauthorized` … */
+/** 模拟器/设备所属平台。 */
+export type SimulatorPlatform = 'android' | 'ios' | 'harmony' | 'miniprogram';
+
+/** 一台可展示的模拟器/设备（四平台共用）。 */
+export interface DeviceEntry {
+  /**
+   * 平台内的**身份**标识。
+   *
+   * Android 是 AVD 名（`Pixel_4a_API_30`）——用户启动时用的就是它；
+   * iOS 是 UDID；鸿蒙是 connect key。
+   */
+  id: string;
+  /** 展示名（型号，如 `Pixel 4a API 30` / `iPhone 15 Pro`）。 */
+  name: string;
+  /** 系统名与版本（`Android 13` / `iOS 17.0`）。取不到为 null——后端不编造。 */
+  os: string | null;
+  /** 分辨率（`1080×2340`）。 */
+  resolution: string | null;
+  /** 是否正在运行（可截图/可输入）。 */
+  running: boolean;
+  /** 原始状态串（`device` / `offline` / `Booted` / `stopped` …）。 */
   state: string;
-  model: string | null;
+  /** 附加细节（abi · dpi · 镜像 tag）。 */
+  detail: string | null;
+  /**
+   * **取画面 / 发输入 / 关闭**用的句柄（未运行时为 null）。
+   *
+   * 与 `id` 分开是必要的：Android 上 `id` 是 AVD 名，而这个字段是
+   * adb serial（`emulator-5554`）——两者没有可推导的关系，端口每次启动都可能变。
+   * 把 AVD 名当 serial 传给 adb 会得到一个与根因无关的报错。
+   */
+  runtimeId: string | null;
 }
 
-/** iOS 侧可用性。不可用时 `reason` 含原因与安装指引。 */
-export interface IosStatus {
+/** 一个平台的能力与设备清单。 */
+export interface PlatformStatus {
+  /** 工具链是否齐备（齐备才能列设备）。 */
   available: boolean;
+  /** 不可用/部分可用时的原因与**可执行的下一步**。 */
   reason: string | null;
+  /** 探测到的工具路径（排查「为什么找不到我的模拟器」时有用）。 */
+  tool: string | null;
+  devices: DeviceEntry[];
+  /** 能否从本应用**启动**设备（鸿蒙为 false：无独立启动器）。 */
+  canLaunch: boolean;
+  /** 能否发送触摸输入（iOS 为 false：simctl 没有触摸命令）。 */
+  canInput: boolean;
+  /** `canInput` 为 false 时的原因（iOS 是平台限制，鸿蒙是我们未验证）。 */
+  inputHint: string | null;
 }
 
-/** Android 侧可用性。 */
-export interface AndroidStatus {
-  available: boolean;
-  reason: string | null;
-  avds: string[];
-  devices: AdbDevice[];
-}
-
-/** 模拟器整体可用性（由后端探测本机工具链得出）。 */
+/** 四平台的整体状态。**四个平台都要显示**，不可用也要列出（附原因）。 */
 export interface SimulatorStatus {
-  ios: IosStatus;
-  android: AndroidStatus;
+  android: PlatformStatus;
+  ios: PlatformStatus;
+  harmony: PlatformStatus;
+  miniprogram: PlatformStatus;
 }
 
 /** 一帧画面及其设备尺寸（用于坐标换算）。 */

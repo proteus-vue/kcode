@@ -1,30 +1,47 @@
 /**
- * 模拟器面板。
+ * 模拟器面板：四个平台的设备清单 + 实时画面 + 触摸输入。
  *
- * # 与参照客户端的差别（实测本机后定的）
+ * # 为什么要有平台层
  *
- * 参照（MiMo）在未装完整 Xcode 时给的是一个**报错的面板**：一部手机框里
- * 写「未安装完整 Xcode，无法在模拟器中运行」。本机实测也是这个情形
- * （只有 CommandLineTools，`simctl` 不存在）——所以那种面板是它的真实状态，
- * 不是设计。
+ * 四个平台的工具链完全不同（adb / simctl / hdc / 微信开发者工具），**能从
+ * 命令行做到的事也不同**：
  *
- * 而我们这台机器上 **Android 可用**（2 个 AVD，`adb exec-out screencap`
- * 单帧约 350ms）。因此这里不抄「一律显示手机框 + 报错」，而是：
+ * | 平台 | 启动 | 取画面 | 触摸输入 |
+ * |---|---|---|---|
+ * | Android | ✅ `emulator -avd` | ✅ `adb screencap` | ✅ `adb shell input` |
+ * | iOS | ✅ `simctl boot` | ✅ `simctl io` | ❌ **simctl 没有触摸命令** |
+ * | 鸿蒙 | ❌ 启动器在 DevEco 里 | 🟡 待验证 | 🟡 待验证 |
+ * | 小程序 | ❌ 由开发者工具管理 | ❌ 未接入 | ❌ 未接入 |
  *
- * - **可用就真给画面**：Android 走 adb 截图，能点、能滑、能返回；
- * - **不可用就说清缺什么、怎么装**，并且**该侧不出现在选项里**，
- *   而不是画一个永远空着的手机框。
+ * 这些差异不是配置项而是工具链的既成事实，所以界面按
+ * `canLaunch` / `canInput` 两个能力位渲染：**不能做的事不画按钮**
+ * （项目约定：不给空入口）。iOS 的画面区因此是可看不可点的，
+ * 并把原因写在画面下方——而不是画一层点了没反应的触摸板。
+ *
+ * # 型号与系统为什么要分开显示
+ *
+ * 只列 AVD 目录名（`Medium_Phone_API_TiramisuPrivacySandbox`）等于让用户
+ * 自己解析「这是哪台机器、跑什么系统」。而多平台并存时这更必要：
+ * 同一个 App 要验的是「这个系统版本上的表现」，系统版本是首要信息，
+ * 型号是次要信息。两者都在设备条目上，一眼可见。
  *
  * # 性能：只在可见时取帧
  *
  * 1080×2340 的 PNG 约 580KB，base64 后约 780KB。按 600ms 轮询约 1.3MB/s，
  * 只在面板可见时才取——不可见时取帧是纯浪费，而且会拖慢其它 IPC。
+ * 服务端另做逐字节去重（内容未变时只回尺寸），前端据此跳过 setState。
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { extractErrorMessage } from '../stores/useKcode';
 import { invoke } from '@tauri-apps/api/core';
 import { Icon } from './Icon';
-import type { SimulatorFrame, SimulatorStatus } from '../types/domain';
+import type {
+  DeviceEntry,
+  PlatformStatus,
+  SimulatorFrame,
+  SimulatorPlatform,
+  SimulatorStatus,
+} from '../types/domain';
 import { classifyGesture, type Gesture } from './simulatorGesture';
 
 /** 轮询间隔。实测单帧 350ms，取 600ms 留出余量避免请求堆积。 */
@@ -33,6 +50,39 @@ const POLL_MS = 600;
 /** 落点标记的显示时长——够看清、又不至于停留到干扰下一次操作。 */
 const MARKER_MS = 420;
 
+/** 平台顺序：列表顺序固定，用户切换回来时位置不变（不按可用性重排）。 */
+const PLATFORMS: { key: SimulatorPlatform; label: string }[] = [
+  { key: 'android', label: 'Android' },
+  { key: 'ios', label: 'iOS' },
+  { key: 'harmony', label: '鸿蒙' },
+  { key: 'miniprogram', label: '小程序' },
+];
+
+/**
+ * 设备状态的中文说明。
+ *
+ * 为什么不能只显示一个红点：`offline` 与「没启动」的处置方式完全不同
+ * （前者是设备连着但连不通，重启 adb 或等设备响应；后者是去启动它）。
+ * 一个红点会让用户以为两种情况一样。
+ */
+function stateLabel(state: string, running: boolean): string {
+  if (running) return '运行中';
+  switch (state) {
+    case 'stopped':
+      return '未启动';
+    case 'Shutdown':
+      return '已关机';
+    case 'offline':
+      return '离线';
+    case 'unauthorized':
+      return '未授权';
+    case 'Booting':
+      return '启动中';
+    default:
+      return state;
+  }
+}
+
 export function SimulatorPanel({
   status,
   onRefreshStatus,
@@ -40,21 +90,12 @@ export function SimulatorPanel({
   status: SimulatorStatus | null;
   onRefreshStatus: () => void;
 }) {
-  const [avd, setAvd] = useState<string>('');
-  const [serial, setSerial] = useState<string>('');
-  /**
-   * 当前画面。**state 里始终有图像**——服务端下发「内容未变」时
-   * 不动它（见 grab），所以这里不需要处理 dataUrl 为 null 的情况。
-   */
-  const [frame, setFrame] = useState<{ dataUrl: string; width: number; height: number } | null>(null);
+  /** 当前查看的平台。默认第一个可用的（全部不可用时仍是 android，界面会说明）。 */
+  const [platform, setPlatform] = useState<SimulatorPlatform | null>(null);
+  /** 当前选中的设备 id（不是 runtimeId——见 DeviceEntry 的说明）。 */
+  const [deviceId, setDeviceId] = useState<string>('');
+  const [frame, setFrame] = useState<SimulatorFrame | null>(null);
   const [error, setError] = useState<string | null>(null);
-  /**
-   * 进行中的提示（等待设备就绪等）。
-   *
-   * 与 `error` 分开：`error` 是「出错了」，这里是「正在等」——
-   * 混用会让等待中的提示带上报错的视觉重量（红色），明明一切正常。
-   */
-  const [notice, setNotice] = useState<string | null>(null);
   /**
    * 设备级操作（启动/关闭/切换）进行中。
    *
@@ -70,100 +111,116 @@ export function SimulatorPanel({
   const polling = useRef(true);
   /** 正在进行的指针手势（未抬起时为非空）。 */
   const gestureRef = useRef<{ x: number; y: number; t: number } | null>(null);
-  /**
-   * 拖动轨迹的 SVG 元素（直接改属性，不走 React）。
-   *
-   * `pointermove` 每次手指移动都会触发（一秒几十次），而 React 的
-   * setState → 重渲染 → 重绘链路在这个频率下会明显掉帧——**而轨迹只是
-   * 一个装饰**，不值得为它让整块画面参与重渲染。所以直接写 DOM 属性。
-   *
-   * 这是本项目里少见的「绕过 React」，理由写在这里：性能可测、影响可隔离
-   * （只动一个 `<line>` 的两个坐标）。
-   */
-  const dragLineRef = useRef<SVGLineElement | null>(null);
-  /** 是否有进行中的手势（只用于容器 class 切换，粒度粗、触发少）。 */
+  /** 当前按下/拖动的落点（用于显示标记）。null = 无手势。 */
   const [dragging, setDragging] = useState(false);
   /** 手势结束后短暂保留的标记（点击的反馈）。 */
   const [marker, setMarker] = useState<{ x: number; y: number } | null>(null);
-  /**
-   * 标记的清除定时器。
-   *
-   * 必须持有并清理：连续点击会叠出多个定时器，**先前的那个会把新标记
-   * 提前清掉**，表现为「快速点几下时标记一闪就没」。
-   */
-  const markerTimer = useRef<number | null>(null);
   /** 取帧是否在途——避免输入后的补帧与轮询叠加。 */
   const grabbing = useRef(false);
+  /**
+   * 手上是否已经有一帧。
+   *
+   * # 为什么用 ref 而不是读 `frame` 状态
+   *
+   * `force` 的语义是「我没有帧，必须给我图像」。若在 `grab` 里读 `frame`
+   * 状态，`grab` 就依赖 `frame` → 轮询 effect 依赖 `grab` → **每收到一帧就
+   * 重建定时器**，于是变成「帧一到就立刻再取一帧」：轮询间隔从 600ms 退化成
+   * 「取帧耗时」（实测 350ms），持续满载。这正是帧去重要避免的那种忙等。
+   * 用 ref 记录「有没有帧」，依赖链就断开了。
+   */
+  const hasFrame = useRef(false);
+  /** 标记定时器（卸载与重触发时要清）。 */
+  const markerTimer = useRef<number | null>(null);
+  /** 拖动轨迹线（直接写 DOM 属性，见 onPointerMove）。 */
+  const dragLineRef = useRef<SVGLineElement | null>(null);
 
-  // 默认选中第一个可用设备；没有设备时不自动启动（启动是重操作，要用户点）
-  useEffect(() => {
-    if (serial || !status) return;
-    const ready = status.android.devices.find((d) => d.state === 'device');
-    if (ready) setSerial(ready.serial);
-  }, [status, serial]);
+  /** 当前平台的状态（未选平台时为 null）。 */
+  const plat: PlatformStatus | null = platform && status ? status[platform] : null;
 
   /**
-   * AVD 下拉框的默认值。
+   * 选定初始平台：优先第一个「有运行中设备」的，其次第一个可用的。
    *
-   * **必须回填到 state**：`<select>` 的 value 写了 `avd || avds[0]` 兜底，
-   * 界面看着有选中项，但 `startAvd` 读的是 `avd`——它一直是空的，
-   * 于是点「启动」**静默无反应**（不报错、不启动、什么也不发生）。
-   * 只有用户手动改过一次下拉框才会填上，这正是「只有一个 AVD 时点启动没反应」
-   * 的原因。这里把界面显示的值与 state 对齐。
+   * **优先有运行中设备的平台**：用户点开这个面板想看的是画面，
+   * 而一个可用但没有任何运行中设备的平台只能显示一份设备清单。
    */
   useEffect(() => {
-    if (avd || !status) return;
-    const first = status.android.avds[0];
-    if (first) setAvd(first);
-  }, [status, avd]);
+    if (platform || !status) return;
+    const withRunning = PLATFORMS.find((p) =>
+      status[p.key].devices.some((d) => d.running),
+    );
+    const firstUsable = PLATFORMS.find((p) => status[p.key].available);
+    setPlatform((withRunning ?? firstUsable ?? PLATFORMS[0]).key);
+  }, [status, platform]);
 
-  /**
-   * 取一帧。
-   *
-   * `force` 用于「手上没有帧」的场景（首次选中设备、切换设备、重启）：
-   * 服务端会跳过内容比对一定下发，否则可能因「与上一帧相同」而不给画面，
-   * 而前端又没有帧，面板就空着。
-   */
-  const grab = useCallback(
-    async (force = false) => {
-      if (!serial) return;
-      // 在途保护：输入后的补帧与 600ms 轮询可能撞在一起。
-      // 不挡会让请求堆积（单帧实测 350ms，叠三个就明显滞后于操作）。
-      if (grabbing.current) return;
-      grabbing.current = true;
-      try {
-        const f = await invoke<SimulatorFrame>('simulator_frame', { serial, force });
-        // **内容未变时跳过 setState**：这是卡顿的主要来源。
-        // 一次 setFrame 会让整块画面重新解码（1080×2340 位图）+ 重绘，
-        // 而画面静止时这份工作完全白做——它还会与用户的触摸操作抢主线程。
-        //
-        // 未变时**只更新尺寸**（坐标换算依赖它，且尺寸变化本身就是内容变化前的
-        // 先行信号，例如旋转屏幕）；已有图像则原样保留。
-        if (f.dataUrl === null) {
-          setFrame((prev) => (prev ? { ...prev, width: f.width, height: f.height } : prev));
-        } else {
-          setFrame({ dataUrl: f.dataUrl, width: f.width, height: f.height });
+  /** 选定初始设备：运行中的优先（那是能出画面的那台）。 */
+  useEffect(() => {
+    if (!plat) return;
+    if (plat.devices.some((d) => d.id === deviceId)) return;
+    const target = plat.devices.find((d) => d.running) ?? plat.devices[0];
+    setDeviceId(target?.id ?? '');
+    // 换平台/换设备后手上那帧作废：留着会显示上一台设备的画面，
+    // 而用户会以为「新设备就是这个样子」。同时清掉 hasFrame，
+    // 让新设备的第一帧走 force（否则服务端可能判「未变」而不下发）。
+    setFrame(null);
+    hasFrame.current = false;
+    setError(null);
+  }, [plat, deviceId]);
+
+  /** 当前选中的设备条目。 */
+  const device: DeviceEntry | null =
+    plat?.devices.find((d) => d.id === deviceId) ?? null;
+
+  /** 取画面/输入用的句柄（未运行或平台不支持时为 null）。 */
+  const runtimeId = device?.runtimeId ?? null;
+
+  /** 取一帧。 */
+  const grab = useCallback(async () => {
+    if (!platform || !runtimeId) return;
+    // 在途保护：输入后的补帧与 600ms 轮询可能撞在一起。
+    // 不挡会让请求堆积（单帧实测 350ms，叠三个就明显滞后于操作）。
+    if (grabbing.current) return;
+    grabbing.current = true;
+    try {
+      // force 的语义是「手上没有帧时必须拿到图像」：首帧、以及服务端可能
+      // 记得旧内容时（切换设备回来）都要传 true。读 ref 而不是 frame 状态，
+      // 否则依赖链会让轮询随每帧重启（见 hasFrame 的说明）。
+      const f = await invoke<SimulatorFrame>('simulator_frame', {
+        platform,
+        id: runtimeId,
+        force: !hasFrame.current,
+      });
+      if (!f.dataUrl) {
+        // 内容与上一帧相同 → **跳过 setState**：省掉一次 780KB 传输 +
+        // 250 万像素解码 + 重绘（触摸时的主要卡顿源）。
+        // 但仍要更新尺寸：旋转屏幕后尺寸会变，而画面内容可能恰好相同。
+        if (hasFrame.current) setFrame((prev) => (prev ? { ...prev, width: f.width, height: f.height } : f));
+        else {
+          // 万一服务端在 force 下也没给图像（不该发生），至少记下尺寸，
+          // 否则画面区会一直停在「正在获取画面…」
+          setFrame(f);
         }
-        setError(null);
-      } catch (e) {
-        // 取帧失败常见于设备正在启动/关闭。不清空最后一帧——
-        // 清掉会让面板闪成空白，而保持上一帧更能说明「它刚才还在」。
-        setError(extractErrorMessage(e));
-      } finally {
-        grabbing.current = false;
+      } else {
+        setFrame(f);
       }
-    },
-    [serial],
-  );
+      hasFrame.current = true;
+      setError(null);
+    } catch (e) {
+      // 取帧失败常见于设备正在启动/关闭。不清空最后一帧——
+      // 清掉会让面板闪成空白，而保持上一帧更能说明「它刚才还在」。
+      setError(extractErrorMessage(e));
+    } finally {
+      grabbing.current = false;
+    }
+  }, [platform, runtimeId]);
 
   useEffect(() => {
-    if (!serial) {
+    if (!platform || !runtimeId) {
       setFrame(null);
+      hasFrame.current = false;
       return;
     }
     polling.current = true;
-    // 强制：刚选中设备时前端没有帧，不能依赖服务端的去重判断
-    void grab(true);
+    void grab();
     const t = setInterval(() => {
       // 页面不可见时跳过：省掉 1.3MB/s 的无效搬运
       if (polling.current && !document.hidden) void grab();
@@ -177,17 +234,17 @@ export function SimulatorPanel({
       clearInterval(t);
       document.removeEventListener('visibilitychange', onVis);
     };
-  }, [serial, grab]);
+  }, [platform, runtimeId, grab]);
 
   /**
    * 把界面坐标换算成设备坐标并发出一次输入。
    *
    * 换算在显示尺寸与设备尺寸之间做等比映射，并**夹紧到设备范围**——
-   * 手指滑到画面外时坐标会超出（见 map 的 clamp）。
+   * 手指滑到画面外时坐标会超出。
    */
   const sendInput = useCallback(
     async (action: string, cx: number, cy: number, x2 = 0, y2 = 0, durationMs = 120) => {
-      if (!serial || !frame || !imgRef.current) return;
+      if (!platform || !runtimeId || !frame || !imgRef.current) return;
       const r = imgRef.current.getBoundingClientRect();
       const map = (px: number, py: number, dispW: number, dispH: number, devW: number, devH: number) => {
         if (!Number.isFinite(px) || !Number.isFinite(py) || dispW <= 0 || dispH <= 0) return null;
@@ -201,7 +258,8 @@ export function SimulatorPanel({
       setInputBusy(true);
       try {
         await invoke('simulator_input', {
-          serial,
+          platform,
+          id: runtimeId,
           action,
           x1: p1[0],
           y1: p1[1],
@@ -222,7 +280,7 @@ export function SimulatorPanel({
         setInputBusy(false);
       }
     },
-    [serial, frame, grab],
+    [platform, runtimeId, frame, grab],
   );
 
   /** 硬件键（返回/主屏）：不经坐标换算，直接发。 */
@@ -233,9 +291,6 @@ export function SimulatorPanel({
 
   /**
    * 手势结束：判定点击/滑动后发出，并留下落点标记。
-   *
-   * `suppressClickRef` 用于抑制浏览器在滑动后补派的那次 click——
-   * 不抑制会让「滑一下」额外在落点触发一次点击，而用户完全没点。
    */
   const finishGesture = useCallback(
     (start: { x: number; y: number; t: number }, end: { x: number; y: number }) => {
@@ -265,60 +320,58 @@ export function SimulatorPanel({
     [],
   );
 
-  const startAvd = useCallback(async () => {
-    if (!avd) return;
-    setBusy(true);
-    setNotice(`已启动 ${avd}，正在等待设备就绪（冷启动通常 10–30 秒）…`);
-    try {
-      await invoke('simulator_start', { avd });
-
-      // **等设备真的出现，而不是让用户自己点刷新**。
-      //
-      // 后端 `simulator_start` 是 spawn 后立即返回（模拟器是独立进程，
-      // 可能在本应用关闭后继续运行），所以返回时设备还没注册到 adb。
-      // 原先这里只打印一句「请稍候刷新」——用户的下一步必然是自己点
-      // 刷新按钮，而「该刷新了」这件事本不该由人判断。
-      //
-      // 用**条件轮询 + 上限**：每 2 秒探测一次，最多 60 秒。
-      // 不用固定等待：就绪时间取决于机器（快则 8 秒、慢则半分钟），
-      // 定死会要么白等要么不够。
-      const deadline = Date.now() + 60_000;
-      let found = false;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 2000));
-        try {
-          const st = await invoke<SimulatorStatus>('simulator_probe');
-          const ready = st.android.devices.find((d) => d.state === 'device');
-          if (ready) {
-            setSerial(ready.serial);
-            setNotice(null);
-            found = true;
-            onRefreshStatus();
-            break;
-          }
-        } catch {
-          // 探测本身失败（adb 忙）不算致命，继续等
-        }
-      }
-      if (!found) {
-        // 超时如实说明，并保留手动入口（刷新按钮仍在）
-        setNotice(`${avd} 在 60 秒内未就绪。设备可能启动失败，可点刷新重试。`);
+  const startDevice = useCallback(
+    async (id: string) => {
+      if (!platform) return;
+      setBusy(true);
+      setError(null);
+      try {
+        await invoke('simulator_start', { platform, id });
+        // 冷启动十几秒，给用户明确预期
         onRefreshStatus();
+
+        // **等设备真的出现，而不是让用户自己点刷新**。
+        //
+        // 后端 `simulator_start` 是 spawn 后立即返回（模拟器是独立进程，
+        // 可能在本应用关闭后继续运行），所以返回时设备还没注册到 adb。
+        // 原先这里只打印一句「请稍候刷新」——用户的下一步必然是自己点
+        // 刷新按钮，而「该刷新了」这件事本不该由人判断。
+        //
+        // 用**条件轮询 + 上限**：每 2 秒探测一次，最多 90 秒。
+        // 不用固定等待：就绪时间取决于机器（快则 8 秒、慢则半分钟），
+        // 定死会要么白等要么不够。
+        const deadline = Date.now() + 90_000;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 2000));
+          try {
+            const st = await invoke<SimulatorStatus>('simulator_probe');
+            const p = st[platform];
+            const ready = p.devices.find((d) => d.id === id && d.running);
+            if (ready) {
+              onRefreshStatus();
+              setDeviceId(ready.id);
+              return;
+            }
+          } catch {
+            // 探测本身失败（设备端忙）不算致命，继续等
+          }
+        }
+        setError(`${id} 在 90 秒内未就绪。设备可能启动失败，可点刷新重试。`);
+        onRefreshStatus();
+      } catch (e) {
+        setError(extractErrorMessage(e));
+      } finally {
+        setBusy(false);
       }
-    } catch (e) {
-      setError(extractErrorMessage(e));
-      setNotice(null);
-    } finally {
-      setBusy(false);
-    }
-  }, [avd, onRefreshStatus]);
+    },
+    [platform, onRefreshStatus],
+  );
 
   const stopDevice = useCallback(async () => {
-    if (!serial) return;
+    if (!platform || !device) return;
     setBusy(true);
     try {
-      await invoke('simulator_stop', { serial });
-      setSerial('');
+      await invoke('simulator_stop', { platform, id: device.id });
       setFrame(null);
       onRefreshStatus();
     } catch (e) {
@@ -326,187 +379,268 @@ export function SimulatorPanel({
     } finally {
       setBusy(false);
     }
-  }, [serial, onRefreshStatus]);
+  }, [platform, device, onRefreshStatus]);
 
-  // ── 两侧都不可用：说清缺什么、怎么装 ──────────────────────────────────
-  const androidOk = status?.android.available ?? false;
-  const iosOk = status?.ios.available ?? false;
-  if (status && !androidOk && !iosOk) {
+  /** 各平台的运行中设备数，用于标签上的计数。 */
+  const counts = useMemo(() => {
+    const out = {} as Record<SimulatorPlatform, number>;
+    for (const p of PLATFORMS) {
+      out[p.key] = status?.[p.key].devices.filter((d) => d.running).length ?? 0;
+    }
+    return out;
+  }, [status]);
+
+  if (!status) {
     return (
       <div className="sim-empty">
         <Icon name="devices" size={22} />
-        <p className="sim-empty-title">本机没有可用的模拟器</p>
-        {status.android.reason && <p className="sim-empty-hint">{status.android.reason}</p>}
-        {status.ios.reason && <p className="sim-empty-hint">{status.ios.reason}</p>}
-        <button className="btn btn-mini" onClick={onRefreshStatus}>
-          重新检测
-        </button>
+        <p className="sim-empty-title">正在检测本机模拟器…</p>
       </div>
     );
   }
 
-  const ready = status?.android.devices.filter((d) => d.state === 'device') ?? [];
+  const running = device?.running ?? false;
+  // 画面是否可交互：平台支持触摸 + 设备在跑 + 手上有帧
+  const interactive = (plat?.canInput ?? false) && running && !!frame;
 
   return (
     <div className="sim-panel">
-      {/* 顶部：设备选择与操作 */}
-      <div className="sim-bar">
-        <select
-          className="sim-select"
-          value={serial}
-          onChange={(e) => setSerial(e.target.value)}
-          disabled={busy}
-        >
-          <option value="">{ready.length ? '选择设备…' : '无运行中的模拟器'}</option>
-          {ready.map((d) => (
-            <option key={d.serial} value={d.serial}>
-              {d.model ?? d.serial}
-            </option>
-          ))}
-        </select>
-
-        {/* 没有运行中的设备时，提供启动入口（列出已创建的 AVD） */}
-        {ready.length === 0 && (status?.android.avds.length ?? 0) > 0 && (
-          <>
-            <select
-              className="sim-select"
-              value={avd || status?.android.avds[0]}
-              onChange={(e) => setAvd(e.target.value)}
-              disabled={busy}
-            >
-              {status!.android.avds.map((a) => (
-                <option key={a} value={a}>
-                  {a}
-                </option>
-              ))}
-            </select>
-            <button className="btn btn-mini" onClick={() => void startAvd()} disabled={busy}>
-              启动
-            </button>
-          </>
-        )}
-
-        {serial && (
-          <>
+      {/* ── 平台选择 ────────────────────────────────────────────────
+          四个平台**全部列出**（含不可用的）：用户需要知道本机装了哪几个、
+          缺哪个。隐藏不可用的平台只会让人以为我们不支持那个平台。 */}
+      <div className="sim-tabs" role="tablist" aria-label="模拟器平台">
+        {PLATFORMS.map(({ key, label }) => {
+          const p = status[key];
+          const active = key === platform;
+          return (
             <button
-              className="sim-icon-btn"
-              title="返回键"
-              disabled={busy}
-              onClick={() => sendKey('back')}
+              key={key}
+              role="tab"
+              aria-selected={active}
+              className={`sim-tab ${active ? 'is-active' : ''} ${p.available ? '' : 'is-off'}`}
+              onClick={() => setPlatform(key)}
+              title={p.available ? undefined : (p.reason ?? '不可用')}
             >
-              <Icon name="arrow-left" size={13} />
+              <span className={`sim-dot ${p.available ? 'is-on' : ''}`} aria-hidden="true" />
+              <span className="sim-tab-label">{label}</span>
+              {/* 有运行中设备时给计数：一眼看出哪个平台「正在跑东西」 */}
+              {counts[key] > 0 && <span className="sim-tab-count">{counts[key]}</span>}
             </button>
-            <button
-              className="sim-icon-btn"
-              title="主屏键"
-              disabled={busy}
-              onClick={() => sendKey('home')}
-            >
-              <Icon name="dot" size={13} />
-            </button>
-            <button
-              className="sim-icon-btn"
-              title="关闭模拟器"
-              disabled={busy}
-              onClick={() => void stopDevice()}
-            >
-              <Icon name="stop" size={13} />
-            </button>
-          </>
-        )}
-
-        <button className="sim-icon-btn" title="重新检测" onClick={onRefreshStatus}>
+          );
+        })}
+        <button className="sim-icon-btn sim-refresh" title="重新检测" onClick={onRefreshStatus}>
           <Icon name="refresh" size={13} />
         </button>
       </div>
 
-      {/* 画面：点击与滑动直接作用到设备。
-          手势判定用**图片坐标**（要换算成设备坐标），
-          落点标记用**容器坐标**（要定位到 DOM），两者分开算。 */}
-      {frame ? (
-        <div className={`sim-screen ${inputBusy ? 'is-busy' : ''} ${dragging ? 'is-dragging' : ''}`}>
-          <img
-            ref={imgRef}
-            src={frame.dataUrl}
-            alt="模拟器画面"
-            draggable={false}
-            onPointerDown={(e) => {
-              const img = e.currentTarget.getBoundingClientRect();
-              const x = e.clientX - img.left;
-              const y = e.clientY - img.top;
-              // 捕获指针：手指滑出图片范围后仍能收到 move/up，
-              // 否则滑到边缘就断掉，长距离滑动做不出来
-              e.currentTarget.setPointerCapture(e.pointerId);
-              gestureRef.current = { x, y, t: performance.now() };
-              setDragging(true);
-            }}
-            onPointerMove={(e) => {
-              const start = gestureRef.current;
-              const line = dragLineRef.current;
-              if (!start || !line) return;
-              const img = e.currentTarget.getBoundingClientRect();
-              const box = e.currentTarget.parentElement!.getBoundingClientRect();
-              // 直接改 SVG 属性：这条路一秒几十次，走 React 会掉帧
-              line.setAttribute('x1', String(start.x + (img.left - box.left)));
-              line.setAttribute('y1', String(start.y + (img.top - box.top)));
-              line.setAttribute('x2', String(e.clientX - box.left));
-              line.setAttribute('y2', String(e.clientY - box.top));
-            }}
-            onPointerUp={(e) => {
-              const start = gestureRef.current;
-              if (!start) return;
-              gestureRef.current = null;
-              setDragging(false);
-              const img = e.currentTarget.getBoundingClientRect();
-              finishGesture(start, { x: e.clientX - img.left, y: e.clientY - img.top });
-            }}
-            onPointerCancel={() => {
-              // 系统取消（来电、手势被接管）：不发出任何输入——
-              // 用户没完成这次操作，替他补一次点击是错的
-              gestureRef.current = null;
-              setDragging(false);
-            }}
-          />
-
-          {/* 拖动中的轨迹线：给「我正在滑」一个即时反馈，
-              不必等 350ms 后的补帧。
-              坐标由 pointermove 直接写 DOM（见 dragLineRef 的说明）。 */}
-          {dragging && (
-            <svg className="sim-drag" aria-hidden="true">
-              <line ref={dragLineRef} x1="0" y1="0" x2="0" y2="0" />
-            </svg>
-          )}
-
-          {/* 落点标记：点击后立刻出现，说明「收到了」。
-              没有它，用户只能靠画面变化判断点击是否生效，
-              而点到无响应区域时根本无法区分是自己没点到还是设备没反应。 */}
-          {marker && (
-            <span className="sim-marker" style={{ left: marker.x, top: marker.y }} aria-hidden="true" />
-          )}
-        </div>
-      ) : (
+      {/* ── 平台不可用：说清缺什么、怎么装 ─────────────────────────── */}
+      {!plat?.available && (
         <div className="sim-empty">
           <Icon name="devices" size={20} />
           <p className="sim-empty-title">
-            {serial ? '正在获取画面…' : '选择一个运行中的模拟器'}
+            {PLATFORMS.find((p) => p.key === platform)?.label} 不可用
           </p>
-          <p className="sim-empty-hint">
-            {serial
-              ? '首次取帧可能需要几秒。'
-              : status?.android.avds.length
-                ? `已创建 ${status.android.avds.length} 个模拟器，可直接启动。`
-                : '尚未创建任何模拟器（可用 Android Studio 的 Device Manager 创建）。'}
-          </p>
+          {plat?.reason && <p className="sim-empty-hint">{plat.reason}</p>}
+          {plat?.tool && <p className="sim-empty-tool">工具：{plat.tool}</p>}
         </div>
       )}
 
-      {notice && <p className="sim-notice">{notice}</p>}
-      {error && <p className="sim-error">{error}</p>}
+      {plat?.available && (
+        <>
+          {/* ── 设备列表：型号 + 系统 + 分辨率 ───────────────────── */}
+          <div className="sim-devices">
+            {plat.devices.length === 0 && (
+              <p className="sim-devices-empty">
+                {plat.canLaunch
+                  ? '尚未创建任何模拟器（可用 Android Studio 的 Device Manager 创建）。'
+                  : '当前没有连接的设备。'}
+                {plat.tool && <span className="sim-tool-hint">工具：{plat.tool}</span>}
+              </p>
+            )}
+            {plat.devices.map((d) => (
+              <div
+                key={d.id}
+                className={`sim-device ${d.id === deviceId ? 'is-active' : ''} ${
+                  d.running ? 'is-running' : ''
+                }`}
+              >
+                <button
+                  className="sim-device-main"
+                  onClick={() => setDeviceId(d.id)}
+                  // 完整标识放进 title：400px 宽的右栏里放不下，但排查
+                  // 「启动的到底是哪个」时需要能对上命令行（`emulator -avd X`）。
+                  title={`${d.id}${d.runtimeId ? ` · ${d.runtimeId}` : ''}`}
+                >
+                  {/* 第一行只放**型号 + 状态**：型号是用户挑设备的依据，
+                      曾被系统版本与按钮一起挤到只剩「Medium Phone API Tirami…」。
+                      系统版本挪到第二行行首，两行都读得全。 */}
+                  <span className="sim-device-row">
+                    <span className="sim-device-name">{d.name}</span>
+                    <span className={`sim-state ${d.running ? 'is-running' : ''}`}>
+                      {stateLabel(d.state, d.running)}
+                    </span>
+                  </span>
+                  {/* 第二行：系统版本 → 分辨率 → 细节（细节最先被截断，它最次要） */}
+                  <span className="sim-device-row sim-device-sub">
+                    {d.os && <span className="sim-device-os">{d.os}</span>}
+                    {d.resolution && <span className="sim-device-res">{d.resolution}</span>}
+                    {d.detail && <span className="sim-device-detail">{d.detail}</span>}
+                  </span>
+                </button>
 
-      {/* iOS 不可用时：在 Android 面板下方如实说明，而不是藏起来 */}
-      {!iosOk && status?.ios.reason && (
-        <p className="sim-note">iOS：{status.ios.reason}</p>
+                {/* 操作按钮：能启动才给「启动」，能关才给「关闭」。
+                    不可启动的平台（鸿蒙/小程序）一个按钮都不画——
+                    画一个点了会报错的按钮比没有更糟。 */}
+                {!d.running && plat.canLaunch && (
+                  <button
+                    className="btn btn-mini sim-device-act"
+                    disabled={busy}
+                    onClick={() => void startDevice(d.id)}
+                  >
+                    启动
+                  </button>
+                )}
+                {d.running && plat.canLaunch && d.id === deviceId && (
+                  <button
+                    className="sim-icon-btn"
+                    title="关闭设备"
+                    disabled={busy}
+                    onClick={() => void stopDevice()}
+                  >
+                    <Icon name="stop" size={13} />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* ── 画面区 ─────────────────────────────────────────────
+              点击与滑动直接作用到设备。手势判定用**图片坐标**（要换算成
+              设备坐标），落点标记用**容器坐标**（要定位到 DOM），两者分开算。 */}
+          {frame ? (
+            <div
+              className={`sim-screen ${inputBusy ? 'is-busy' : ''} ${
+                dragging ? 'is-dragging' : ''
+              } ${interactive ? '' : 'is-readonly'}`}
+            >
+              <img
+                ref={imgRef}
+                src={frame.dataUrl ?? undefined}
+                alt={`${device?.name ?? '模拟器'}的画面`}
+                draggable={false}
+                onPointerDown={(e) => {
+                  // 只读模式下不接管指针：没有输入能力时让事件照常冒泡，
+                  // 用户仍能选中/拖动图片而不产生「点了没反应」的错觉
+                  if (!interactive) return;
+                  const img = e.currentTarget.getBoundingClientRect();
+                  const x = e.clientX - img.left;
+                  const y = e.clientY - img.top;
+                  // 捕获指针：手指滑出图片范围后仍能收到 move/up，
+                  // 否则滑到边缘就断掉，长距离滑动做不出来
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  gestureRef.current = { x, y, t: performance.now() };
+                  setDragging(true);
+                }}
+                onPointerMove={(e) => {
+                  const start = gestureRef.current;
+                  const line = dragLineRef.current;
+                  if (!start || !line) return;
+                  const img = e.currentTarget.getBoundingClientRect();
+                  const box = e.currentTarget.parentElement!.getBoundingClientRect();
+                  // 直接改 SVG 属性：这条路一秒几十次，走 React 会掉帧
+                  line.setAttribute('x1', String(start.x + (img.left - box.left)));
+                  line.setAttribute('y1', String(start.y + (img.top - box.top)));
+                  line.setAttribute('x2', String(e.clientX - box.left));
+                  line.setAttribute('y2', String(e.clientY - box.top));
+                }}
+                onPointerUp={(e) => {
+                  const start = gestureRef.current;
+                  if (!start) return;
+                  gestureRef.current = null;
+                  setDragging(false);
+                  const img = e.currentTarget.getBoundingClientRect();
+                  finishGesture(start, { x: e.clientX - img.left, y: e.clientY - img.top });
+                }}
+                onPointerCancel={() => {
+                  // 系统取消（来电、手势被接管）：不发出任何输入——
+                  // 用户没完成这次操作，替他补一次点击是错的
+                  gestureRef.current = null;
+                  setDragging(false);
+                }}
+              />
+
+              {/* 拖动中的轨迹线：给「我正在滑」一个即时反馈，
+                  不必等 350ms 后的补帧。
+                  坐标由 pointermove 直接写 DOM（见 dragLineRef 的说明）。 */}
+              {dragging && (
+                <svg className="sim-drag" aria-hidden="true">
+                  <line ref={dragLineRef} x1="0" y1="0" x2="0" y2="0" />
+                </svg>
+              )}
+
+              {/* 落点标记：点击后立刻出现，说明「收到了」。
+                  没有它，用户只能靠画面变化判断点击是否生效，
+                  而点到无响应区域时根本无法区分是自己没点到还是设备没反应。 */}
+              {marker && (
+                <span className="sim-marker" style={{ left: marker.x, top: marker.y }} aria-hidden="true" />
+              )}
+
+              {/* 只读提示：贴在画面底部，说明**为什么**点不动。
+                  不写这句的话用户会以为是自己点错了位置。 */}
+              {!interactive && plat.inputHint && (
+                <span className="sim-readonly-hint">{plat.inputHint}</span>
+              )}
+            </div>
+          ) : (
+            <div className="sim-empty">
+              <Icon name="devices" size={20} />
+              <p className="sim-empty-title">
+                {!device
+                  ? '选择一台设备'
+                  : !device.running
+                    ? `${device.name} 未运行`
+                    : '正在获取画面…'}
+              </p>
+              <p className="sim-empty-hint">
+                {!device
+                  ? '设备列表为空。'
+                  : !device.running
+                    ? plat.canLaunch
+                      ? '点设备行上的「启动」按钮开机（冷启动通常 10–30 秒）。'
+                      : '该平台的设备需要在其自带工具里启动（本应用无法代劳）。'
+                    : '首次取帧可能需要几秒。'}
+              </p>
+            </div>
+          )}
+
+          {/* ── 硬件键：只有能输入才有意义 ────────────────────────── */}
+          {running && plat.canInput && (
+            <div className="sim-bar">
+              <button
+                className="sim-icon-btn"
+                title="返回键"
+                disabled={busy || inputBusy}
+                onClick={() => sendKey('back')}
+              >
+                <Icon name="arrow-left" size={13} />
+              </button>
+              <button
+                className="sim-icon-btn"
+                title="主屏键"
+                disabled={busy || inputBusy}
+                onClick={() => sendKey('home')}
+              >
+                <Icon name="dot" size={13} />
+              </button>
+              <span className="sim-bar-hint">
+                在画面上点击或拖动即可操作设备
+              </span>
+            </div>
+          )}
+        </>
       )}
+
+      {error && <p className="sim-error">{error}</p>}
     </div>
   );
 }

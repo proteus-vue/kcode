@@ -190,9 +190,29 @@ describe('模拟器画面必须装得进容器（防被裁掉）', () => {
     expect(block, '不该用 height: 100%').not.toContain('height: 100%');
   });
 
-  it('底部提示不参与收缩（压扁就读不了）', () => {
-    expect(rule('.sim-notice {')).toContain('flex-shrink: 0');
-    expect(rule('.sim-note {')).toContain('flex-shrink: 0');
+  it('底部条与错误提示不参与收缩（压扁就读不了）', () => {
+    // 改版后 `.sim-notice`/`.sim-note` 已并入设备行与只读提示，
+    // 剩下这两个仍然贴边、必须固定高度的元素。
+    expect(rule('.sim-bar {')).toContain('flex-shrink: 0');
+    expect(rule('.sim-error {')).toContain('flex-shrink: 0');
+  });
+
+  it('设备列表限高可滚（设备多时不能把画面挤没）', () => {
+    // 画面才是这个面板的主体：列表无限增长会把 `.sim-screen` 压到 0 高，
+    // 表现为「有设备但看不到画面」。
+    const block = rule('.sim-devices {');
+    expect(block).toContain('max-height');
+    expect(block).toContain('overflow-y: auto');
+    expect(block, '列表不该抢走画面的伸展空间').toContain('flex-shrink: 0');
+  });
+
+  it('平台标签栏不参与收缩', () => {
+    expect(rule('.sim-tabs {')).toContain('flex-shrink: 0');
+  });
+
+  it('只读画面不隐藏内容（降透明度会让人以为画面坏了）', () => {
+    const block = rule('.sim-screen.is-readonly img');
+    expect(block, '只读只改光标，不改可读性').not.toContain('opacity');
   });
 });
 
