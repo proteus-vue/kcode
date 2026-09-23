@@ -23,6 +23,7 @@
  * 「推送到 <remote>/<branch>」，而不是点一下就发出去。
  */
 import { useState } from 'react';
+import { extractErrorMessage } from '../stores/useKcode';
 import type { GitStatus } from '../types/domain';
 import { Icon } from './Icon';
 
@@ -83,7 +84,7 @@ export function GitPanel({
       setComposing(false);
       onRefresh();
     } catch (e) {
-      setError(String(e));
+      setError(extractErrorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -97,7 +98,7 @@ export function GitPanel({
       await onPush();
       onRefresh();
     } catch (e) {
-      setError(String(e));
+      setError(extractErrorMessage(e));
     } finally {
       setBusy(false);
     }

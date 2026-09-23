@@ -27,6 +27,7 @@
  * 的第一手信息。没有它，用户无法区分「换了模型」和「同一模型变差了」。
  */
 import { useState } from 'react';
+import { extractErrorMessage } from '../stores/useKcode';
 import { Icon } from './Icon';
 import { STATUS_LABEL, stepIcon, stepLabel } from './ProcessPanel';
 import { isDeclined, contextUsage, guardianSummary, turnDisplayStatus } from '../stores/store';
@@ -83,7 +84,7 @@ function GitSection({
       setOpen(false);
       onRefresh();
     } catch (e) {
-      setError(String(e));
+      setError(extractErrorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -97,7 +98,7 @@ function GitSection({
       await onPush();
       onRefresh();
     } catch (e) {
-      setError(String(e));
+      setError(extractErrorMessage(e));
     } finally {
       setBusy(false);
     }

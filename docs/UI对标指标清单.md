@@ -117,7 +117,7 @@
 | FB-03 | SVG 非 emoji | 跨平台 | Icon | ✅ | — |
 | FB-04 | 快捷键真实注册 | 可按可用 | 仅文案 | ❌ | P1 |
 | FB-05 | 长任务可停且状态不丢 | 中断 | Stop+溯源 | 🟡 | — |
-| FB-06 | 错误可读文案 | 不吞错 | extractError | ✅ | — |
+| FB-06 | 错误可读文案 | 不吞错 | `extractErrorMessage`（Tauri 的 `invoke` 抛的是**反序列化对象**，不是 Error 实例——朴素写法会显示 `[object Object]`，实测踩过）。**静态检查覆盖全仓**：禁止 `instanceof Error ? x.message : String(x)` 与 `String(err)` 两种朴素模式，只允许 helper 自身的兜底分支；守卫用注入真实模式验证过会报错。9 项 helper 测试（逐种抛出形态） | ✅ | — |
 | FB-07 | WKWebView 右键有兜底 | 真机 | DOM 测试 | ✅ | — |
 | FB-08 | 待审批全局角标 | 指挥台 | 仅侧栏 | 🟡 | P2 |
 

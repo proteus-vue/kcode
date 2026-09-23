@@ -19,6 +19,7 @@
  * 读到但没有内容。**任何一种都不留白屏**——空白让人以为界面坏了。
  */
 import { useCallback, useEffect, useState } from 'react';
+import { extractErrorMessage } from '../stores/useKcode';
 import { invoke } from '@tauri-apps/api/core';
 import { Icon } from './Icon';
 import { ItemCard } from './ItemCard';
@@ -62,7 +63,7 @@ export function SubagentPanel({
       setDetail({ kind: 'ok', snapshot: snap });
     } catch (e) {
       // 读不到是**预期内的常态**（线程可能已被回收），如实说明而不是报错弹窗
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = extractErrorMessage(e);
       setDetail({ kind: 'error', message: msg });
     }
   }, []);

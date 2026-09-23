@@ -33,7 +33,7 @@ import {
 } from './attachmentImage';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { inTauri } from '../stores/useKcode';
+import { inTauri, extractErrorMessage } from '../stores/useKcode';
 /** 后端 save_attachment / attach_local_image 的返回。 */
 interface SavedAttachment {
   path: string;
@@ -367,7 +367,7 @@ export function Composer({
           size: saved.size,
         });
       } catch (err) {
-        setAttachError(err instanceof Error ? err.message : String(err));
+        setAttachError(extractErrorMessage(err));
       }
     }
     addImages(out);
@@ -443,7 +443,7 @@ export function Composer({
               size: saved.size,
             });
           } catch (err) {
-            setAttachError(err instanceof Error ? err.message : String(err));
+            setAttachError(extractErrorMessage(err));
           }
         }
         addImages(out);

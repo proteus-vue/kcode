@@ -7,6 +7,7 @@
  * 用行内「⋯」而非右键：WKWebView 会抢占右键弹系统菜单（见 Workbench 注释）。
  */
 import { useState } from 'react';
+import { extractErrorMessage } from '../stores/useKcode';
 import { invoke } from '@tauri-apps/api/core';
 
 export interface ThreadMenuProps {
@@ -35,7 +36,7 @@ export function ThreadMenu({
     try {
       await fn();
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      onError(extractErrorMessage(e));
     }
   };
 

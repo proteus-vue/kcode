@@ -21,6 +21,7 @@
  * 只在面板可见时才取——不可见时取帧是纯浪费，而且会拖慢其它 IPC。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { extractErrorMessage } from '../stores/useKcode';
 import { invoke } from '@tauri-apps/api/core';
 import { Icon } from './Icon';
 import type { SimulatorFrame, SimulatorStatus } from '../types/domain';
@@ -147,7 +148,7 @@ export function SimulatorPanel({
       } catch (e) {
         // 取帧失败常见于设备正在启动/关闭。不清空最后一帧——
         // 清掉会让面板闪成空白，而保持上一帧更能说明「它刚才还在」。
-        setError(e instanceof Error ? e.message : String(e));
+        setError(extractErrorMessage(e));
       } finally {
         grabbing.current = false;
       }
@@ -216,7 +217,7 @@ export function SimulatorPanel({
         // 加固定等待只会让反馈更慢。
         void grab();
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        setError(extractErrorMessage(e));
       } finally {
         setInputBusy(false);
       }
@@ -305,7 +306,7 @@ export function SimulatorPanel({
         onRefreshStatus();
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(extractErrorMessage(e));
       setNotice(null);
     } finally {
       setBusy(false);
@@ -321,7 +322,7 @@ export function SimulatorPanel({
       setFrame(null);
       onRefreshStatus();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(extractErrorMessage(e));
     } finally {
       setBusy(false);
     }
