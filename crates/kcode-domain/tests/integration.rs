@@ -282,6 +282,65 @@ impl Harness {
                             None,
                         );
                         self.console.push(ev);
+                        // **不立刻 break**：`turn/completed` 与各个 item 的
+                        // `item/completed` 之间**没有顺序保证**，高负载下命令项的
+                        // 完成事件可能晚于此到达。原先一收到 turn/completed 就
+                        // 退出循环，于是断言「未找到完成的 commandExecution item」
+                        // 间歇失败（本机与 CI 都出现过，单独重跑就好——
+                        // 这类抖动会训练人忽略红灯）。
+                        //
+                        // **条件等待**（而不是固定宽限期）：轮询直到「已收到
+                        // 结束的 commandExecution item」或超时。
+                        //
+                        // 一开始写成固定 500ms，高负载下仍会失败——因为负载高时
+                        // 迟到可能超过这个数。固定时长是在赌延迟上界，而正确的
+                        // 判据是「目标状态是否出现」。这与本项目一贯的等待纪律
+                        // 一致：条件探测 + 上限，而不是 sleep（见 §3.13 的同类
+                        // 教训：夹具不确定性会同时制造假阴性与假阳性）。
+                        let grace = tokio::time::Instant::now() + Duration::from_secs(10);
+                        loop {
+                            // 已收到结束的命令项 → 不必再等
+                            let seen_done = self
+                                .log
+                                .all_events()
+                                .map(|evs| {
+                                    evs.iter().any(|e| {
+                                        e.kind == event_kind::ITEM_COMPLETED
+                                            && e.payload["body"]["kind"].as_str()
+                                                == Some("commandExecution")
+                                    })
+                                })
+                                .unwrap_or(false);
+                            if seen_done {
+                                break;
+                            }
+                            let left = grace.saturating_duration_since(tokio::time::Instant::now());
+                            if left.is_zero() {
+                                break;
+                            }
+                            let Some(next) = self.transport.next_inbound(left).await else { break };
+                            if let Incoming::Notification { method, params } = &next {
+                                if method == "item/started" || method == "item/completed" {
+                                    let turn = params["turnId"].as_str().unwrap_or(&turn_id);
+                                    let item =
+                                        self.projector.project_item(&thread_id, turn, &params["item"]);
+                                    let kind = if method == "item/started" {
+                                        event_kind::ITEM_STARTED
+                                    } else {
+                                        event_kind::ITEM_COMPLETED
+                                    };
+                                    self.record(
+                                        kind,
+                                        serde_json::to_value(&item).unwrap(),
+                                        params.to_string(),
+                                        Some(&thread_id),
+                                        Some(turn),
+                                        Some(&item.id),
+                                    );
+                                }
+                            }
+                            self.console.push(next);
+                        }
                         break;
                     }
                     _ => {}
