@@ -203,6 +203,62 @@ fn exec_command(cmd: &str, escalated: bool) -> Value {
     })
 }
 
+/// 把 Item 列表压成一行短摘要，供断言失败时定位。
+///
+/// # 为什么诊断信息必须写进断言消息
+///
+/// CI（Linux runner）上出现过「命令 Item 完全没产生」的失败，而当时只有一句
+/// `未找到命令 Item`——它无法区分三种完全不同的情况：
+///
+/// 1. 命令**根本没被执行**（沙箱起不来 / 模型没发出调用）；
+/// 2. 命令执行了但**失败**，Item 类型是别的；
+/// 3. Item 存在但 `replay_items` 没重放出来。
+///
+/// 而 CI 的注解面板只显示短行、完整日志需要仓库 admin 权限（开发机没有），
+/// 所以「再跑一次看看」也拿不到更多线索。**断言自己把现场说清楚**，
+/// 才是这种情况下的唯一有效手段。这也与项目一贯的主张一致：
+/// 失败报告必须可行动（见 docs/协议勘误与修正.md §3.23）。
+///
+/// 输出形如 `userMessage,agentMessage(failed),cmd:inProgress`——短、可读、
+/// 足以判断上面三种情况中的哪一种。
+fn summarize_items(items: &[kcode_domain::Item]) -> String {
+    use kcode_domain::ItemBody as B;
+    let tags: Vec<String> = items
+        .iter()
+        .map(|i| match &i.body {
+            B::UserMessage { .. } => "userMessage".to_owned(),
+            B::AgentMessage { .. } => "agentMessage".to_owned(),
+            B::Reasoning { .. } => "reasoning".to_owned(),
+            B::Plan { .. } => "plan".to_owned(),
+            B::CommandExecution { status, exit_code, aggregated_output, command, .. } => format!(
+                "cmd[{status:?}/exit={exit_code:?}/out={}B]{}",
+                aggregated_output.as_ref().map(|o| o.len()).unwrap_or(0),
+                // 命令本身也带上：沙箱拒绝与命令写错的表现不同
+                command.chars().take(40).collect::<String>()
+            ),
+            B::FileChange { status, changes } => {
+                format!("fileChange[{status:?}/{} 个文件]", changes.len())
+            }
+            B::ToolCall { tool, .. } => format!("toolCall[{tool}]"),
+            B::WebSearch { .. } => "webSearch".to_owned(),
+            B::ImageView { path } => format!("imageView[{path}]"),
+            B::ContextCompaction => "compaction".to_owned(),
+            B::CollabAgent { .. } => "collabAgent".to_owned(),
+            B::Other { protocol_type } => format!("other[{protocol_type}]"),
+        })
+        .collect();
+    if tags.is_empty() {
+        "（无任何 Item）".to_owned()
+    } else {
+        tags.join(", ")
+    }
+}
+
+/// 复现命令：断言失败时提示如何在本地重跑该用例（CI 与本地环境不同）。
+fn rerun_hint(name: &str) -> String {
+    format!("本地重跑：cargo test -p kcode-app --test acceptance {name} -- --nocapture")
+}
+
 struct Harness {
     service: AgentService,
     events: tokio::sync::broadcast::Receiver<AppEvent>,
@@ -378,11 +434,23 @@ async fn history_survives_restart() {
     // 等这一轮结束
     let done = h
         .wait_for(Duration::from_secs(25), |ev| match ev {
-            AppEvent::TurnCompleted { .. } => Some(()),
+            // 连状态一起取出（TurnStatus 是 Copy，解引用后返回值而非引用）：
+            // 轮次是否 failed 决定了后面「没有命令 Item」的根因方向
+            // （命令侧报错 vs 执行结果根本没落库）。
+            AppEvent::TurnCompleted { status, .. } => Some(*status),
             _ => None,
         })
         .await;
-    assert!(done.is_some(), "首轮未正常结束");
+    let turn_status = done.expect("首轮未正常结束");
+    assert_eq!(
+        turn_status,
+        TurnStatus::Completed,
+        "首轮应以 completed 收尾，实际 {turn_status:?}；items：{}",
+        summarize_items(&{
+            let log = kcode_domain::EventLog::open(&h.log_path).unwrap();
+            kcode_app::replay_items(&log, &thread_id).unwrap()
+        })
+    );
 
     let home = h.home_path();
 
@@ -413,7 +481,17 @@ async fn history_survives_restart() {
     let cmd = items_after
         .iter()
         .find(|i| matches!(i.body, kcode_domain::ItemBody::CommandExecution { .. }))
-        .expect("未找到命令 Item");
+        .unwrap_or_else(|| {
+            panic!(
+                "未找到命令 Item。\n\
+                 实际 items：{}\n\
+                 轮次状态：{turn_status:?}（若为 failed，说明命令侧出错而非重放问题）\n\
+                 这能区分「命令没跑」与「跑了但类型不符」——CI 注解只显示短行，\n\
+                 所以现场必须写在这里。\n{}",
+                summarize_items(&items_after),
+                rerun_hint("history_survives_restart"),
+            )
+        });
     if let kcode_domain::ItemBody::CommandExecution { status, .. } = &cmd.body {
         assert_eq!(*status, ItemStatus::Completed, "重放后状态未保持终态");
     }
@@ -581,7 +659,22 @@ async fn turn_diff_reaches_ui_with_real_content() {
         }
     }
 
-    let parsed = latest_diff.expect("未收到带内容的 TurnDiffUpdated 事件");
+    let parsed = latest_diff.unwrap_or_else(|| {
+        // 未有 diff 事件时把现场说清楚：命令是否跑过、轮次什么状态。
+        // CI 注解只显示短行，所以诊断必须写进消息本身。
+        let items = {
+            let log = kcode_domain::EventLog::open(&h.log_path).unwrap();
+            kcode_app::replay_items(&log, &info.thread_id).unwrap()
+        };
+        panic!(
+            "未收到带内容的 TurnDiffUpdated 事件。\n\
+             实际 items：{}\n\
+             （若完全不见 fileChange 项，说明 apply_patch 没被执行；\n\
+             若只见 cmd 项，说明补丁走了命令通道但未产生文件变更）\n{}",
+            summarize_items(&items),
+            rerun_hint("turn_diff_reaches_ui_with_real_content"),
+        )
+    });
     let stats = parsed.stats();
     assert_eq!(stats.added, 2, "整轮 diff 应含 2 行新增，实际 {stats:?}");
     assert_eq!(stats.removed, 0);
@@ -749,11 +842,12 @@ async fn long_output_is_delivered_intact() {
 
     let done = h
         .wait_for(Duration::from_secs(40), |ev| match ev {
-            AppEvent::TurnCompleted { .. } => Some(()),
+            AppEvent::TurnCompleted { status, .. } => Some(*status),
             _ => None,
         })
         .await;
     assert!(done.is_some(), "长输出轮次未结束");
+    let turn_status = done.unwrap();
 
     let log = kcode_domain::EventLog::open(&h.log_path).unwrap();
     let items = kcode_app::replay_items(&log, &info.thread_id).unwrap();
@@ -764,7 +858,15 @@ async fn long_output_is_delivered_intact() {
         _ => None,
     });
 
-    let (output, status) = cmd_item.expect("未找到命令 Item");
+    let (output, status) = cmd_item.unwrap_or_else(|| {
+        panic!(
+            "未找到命令 Item。\n\
+             轮次状态：{turn_status:?}；实际 items：{}\n\
+             （命令若是被沙箱拒绝，这里会看到 cmd[...] 之外的形态或完全没有 cmd 项）\n{}",
+            summarize_items(&items),
+            rerun_hint("long_output_is_delivered_intact"),
+        )
+    });
     assert_eq!(status, ItemStatus::Completed, "长输出命令应正常完成");
 
     if let Some(out) = output {
