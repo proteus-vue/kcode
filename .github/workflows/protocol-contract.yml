@@ -139,6 +139,12 @@ jobs:
       - name: 沙箱前提自检（仅失败时执行）
         if: failure()
         run: |
+          # `set +e`：本步骤全是诊断命令，任何一条非零退出都不该终止脚本。
+          # 踩过一次：`out=$(cmd)` 在 `set -e` 下遇非零立即退出，导致后面更
+          # 重要的探针（工具面、zsh 检查）根本没跑，注解里只剩前半段。
+          # 诊断步骤的职责是**尽量多收集**，不是「全部成功」。
+          set +e
+
           collect() {
             echo "kernel: $(uname -r)"
             echo "userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo '（无此文件）')"
@@ -146,6 +152,14 @@ jobs:
             echo "landlock_in_lsm: $(grep -c landlock /sys/kernel/security/lsm 2>/dev/null || echo '（读不到）')"
             echo "bwrap: $(command -v bwrap || echo '未安装')"
             echo "seccomp: $(grep Seccomp /proc/self/status 2>/dev/null | head -1 || echo '未知')"
+            # **zsh 是关键**：codex 用 `/bin/zsh -lc '<cmd>'` 执行命令
+            # （本地实测的 commandExecution.item.command 形如
+            #  `/bin/zsh -lc 'echo kcode-plain-probe'`）。若 runner 上没有
+            # zsh，命令无法执行，而 app-server **不报错**——表现为
+            # 「轮次正常收尾、没有任何命令 Item」，正是本 job 的症状。
+            echo "zsh: $(command -v zsh || echo '未安装')"
+            echo "zsh_bin: $([[ -x /bin/zsh ]] && echo '存在' || echo '不存在')"
+            echo "bash: $(command -v bash || echo '未安装')"
           }
           {
             echo '### Linux 沙箱前提'
@@ -178,12 +192,17 @@ jobs:
             echo "::error::sandbox 实测 exit=$rc out=$(echo "$out" | head -3 | tr '\n' ' ')"
           fi
 
+          # **最贴近现场的一步**：用与集成测试相同的方式跑一次真实命令，
+          # 直接观察 app-server 是否产生 commandExecution Item。沙箱前提、
+          # doctor、工具面都只是间接证据，这一步才是与失败现象同构的复现。
+          echo "---- 真实命令执行（与集成测试同构）----"
+          if [[ -n "$BIN" ]]; then
+            node scripts/probe-exec.mjs "$BIN" 2>&1 | while IFS= read -r line; do
+              [[ -n "$line" ]] && echo "::error::probe $line"
+            done
+          fi
+
           # 工具面探测：app-server 在本机公布的 shell 工具名是什么。
-          # codex 有两个名字，取决于 unified_exec 特性是否启用：
-          # 启用 → exec_command（测试用的就是这个），关闭 → shell。
-          # 若 Linux 上默认关闭，mock 发的 exec_command 会被静默丢弃，
-          # 症状恰好是「轮次正常收尾但没有任何命令 Item」。这个探针一次
-          # 就能证实或排除（见 scripts/probe-tools.mjs 的说明）。
           echo "---- 工具面探测 ----"
           if [[ -n "$BIN" ]]; then
             node scripts/probe-tools.mjs "$BIN" 2>&1 | while IFS= read -r line; do

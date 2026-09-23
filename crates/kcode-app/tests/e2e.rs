@@ -535,11 +535,32 @@ async fn thread_search_filters_by_keyword() {
     h.service.send_turn(&t1, "ALPHAKEY 的任务").await.unwrap();
     let t2 = h.start_thread().await;
     h.service.send_turn(&t2, "BETAKEY 的任务").await.unwrap();
-    tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // 不过滤：应至少返回两个
-    let all = h.service.list_threads_remote(None).await.expect("列举失败");
-    assert!(all.len() >= 2, "应返回至少 2 个线程，实际 {}", all.len());
+    // **条件等待，而不是固定 sleep**。
+    //
+    // 早先这里是 `sleep(2s)` 然后直接断言可搜——那是「够用就好」的等待：
+    // 负载高时（例如与其它 crate 的测试并发跑）内容尚未落库，`thread/list`
+    // 只返回 0~1 个线程，于是 `filtered.len() < all.len()` 随机失败。
+    // 表现为间歇性红灯、重跑就好——这类抖动会训练人忽略失败
+    // （本项目已有同款教训，见 docs/协议勘误与修正.md §3.13）。
+    //
+    // 改成轮询直到服务端可见两个线程（带上限）：正确，而且通常更快，
+    // 因为第一轮往往就满足，不必白等满 2 秒。
+    let all = {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let list = h.service.list_threads_remote(None).await.expect("列举失败");
+            if list.len() >= 2 || tokio::time::Instant::now() >= deadline {
+                break list;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+    assert!(
+        all.len() >= 2,
+        "等服务端可见 2 个线程超时，实际 {} 个（内容未落库或列表未刷新）",
+        all.len()
+    );
     // 服务端应带 preview 字段
     assert!(
         all.iter().any(|t| t.preview.is_some()),
@@ -557,6 +578,12 @@ async fn thread_search_filters_by_keyword() {
         "带关键词应过滤掉不匹配的线程（{}/{}）",
         filtered.len(),
         all.len()
+    );
+    // 命中性也要断言：只断言「变少了」的话，过滤条件写反（返回不匹配的）
+    // 同样能让上一条通过——那样「搜索结果只含匹配项」就会因为空集而平凡成立。
+    assert!(
+        !filtered.is_empty(),
+        "关键词应至少命中自己那条线程（ALPHAKEY），实际 0 条——过滤条件可能写反了"
     );
     assert!(
         filtered.iter().all(|t| t
