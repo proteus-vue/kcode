@@ -178,6 +178,19 @@ jobs:
             echo "::error::sandbox 实测 exit=$rc out=$(echo "$out" | head -3 | tr '\n' ' ')"
           fi
 
+          # 工具面探测：app-server 在本机公布的 shell 工具名是什么。
+          # codex 有两个名字，取决于 unified_exec 特性是否启用：
+          # 启用 → exec_command（测试用的就是这个），关闭 → shell。
+          # 若 Linux 上默认关闭，mock 发的 exec_command 会被静默丢弃，
+          # 症状恰好是「轮次正常收尾但没有任何命令 Item」。这个探针一次
+          # 就能证实或排除（见 scripts/probe-tools.mjs 的说明）。
+          echo "---- 工具面探测 ----"
+          if [[ -n "$BIN" ]]; then
+            node scripts/probe-tools.mjs "$BIN" 2>&1 | while IFS= read -r line; do
+              [[ -n "$line" ]] && echo "::error::probe $line"
+            done
+          fi
+
       - name: 静态检查
         run: cargo clippy --workspace --all-targets -- -D warnings
 
