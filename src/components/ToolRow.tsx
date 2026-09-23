@@ -178,13 +178,39 @@ export function ToolRow({
   }
 
   if (item.body.kind === 'imageView') {
+    const path = item.body.path;
     return (
       <div className="tool-row">
-        <span className="tool-row-head static">
+        <div className="tool-row-head static">
           <span className="tool-icon"><Icon name="file" /></span>
           <span className="tool-kind">图片</span>
-          <span className="tool-summary mono">{item.body.path}</span>
-        </span>
+          {/* 路径可点：会话里"看了哪张图"正是事后最想确认的东西，
+              而当时只显示了一行不可点的文字。
+              **不做自动切右栏**——那会打断用户正在看的 diff。 */}
+          {onOpenFile ? (
+            <button
+              className="tool-summary mono is-clickable"
+              title={`在右栏查看 ${path}`}
+              onClick={() => onOpenFile(path)}
+            >
+              {path}
+            </button>
+          ) : (
+            <span className="tool-summary mono">{path}</span>
+          )}
+          {onOpenFile && (
+            <span className="tool-meta">
+              <button
+                className="tool-open-right"
+                title="在右栏查看"
+                aria-label={`在右栏查看 ${path}`}
+                onClick={() => onOpenFile(path)}
+              >
+                <Icon name="panel-right" size={11} />
+              </button>
+            </span>
+          )}
+        </div>
       </div>
     );
   }

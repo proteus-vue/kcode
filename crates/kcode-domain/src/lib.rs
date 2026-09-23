@@ -36,8 +36,8 @@ pub use changeset::{
     ReviewState,
 };
 pub use model::{
-    Approval, ApprovalDecision, ApprovalScope, Item, ItemBody, ItemStatus, Thread, ThreadStatus,
-    Turn, TurnDisplayStatus, TurnStatus,
+    AgentState, Approval, ApprovalDecision, ApprovalScope, Item, ItemBody, ItemStatus, Thread,
+    ThreadStatus, Turn, TurnDisplayStatus, TurnStatus,
 };
 pub use project::Projector;
 pub use redact::{is_sensitive_key, redact, Redaction};

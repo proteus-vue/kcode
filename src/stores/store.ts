@@ -36,6 +36,13 @@ export interface TurnState {
   id: string;
   status: TurnStatus;
   itemIds: string[];
+  /**
+   * 本轮耗时（毫秒）。null = 协议未提供或该轮尚未结束。
+   *
+   * 由 `turn/completed` 的 `durationMs` 填充（后端从协议原样带出），
+   * **不在前端计时**：前端从收到 turnStarted 起算会把网络往返与排队算进去。
+   */
+  durationMs: number | null;
 }
 
 export interface ThreadState {
@@ -151,7 +158,7 @@ export function newThreadState(threadId: string, cwd = ''): ThreadState {
 
 /** 取出轮次，缺失时返回新对象（同样不写回，保持纯函数）。 */
 function getOrCreateTurn(th: ThreadState, turnId: string, status: TurnStatus = 'inProgress'): TurnState {
-  return th.turns[turnId] ?? { id: turnId, status, itemIds: [] };
+  return th.turns[turnId] ?? { id: turnId, status, itemIds: [], durationMs: null };
 }
 
 /**
@@ -299,7 +306,14 @@ export function reduce(state: RootState, event: AppEvent): RootState {
     case 'turnCompleted': {
       next.threads = { ...state.threads };
       const base = getOrCreateThread(state, event.threadId);
-      const turn: TurnState = { ...getOrCreateTurn(base, event.turnId), status: event.status };
+      const prev = getOrCreateTurn(base, event.turnId);
+      const turn: TurnState = {
+        ...prev,
+        status: event.status,
+        // `?? null` 而不是 `?? prev.durationMs`：重放同一条 completed 时
+        // 结果必须一致；而协议缺字段就该显示为空，不沿用上一次的旧值。
+        durationMs: event.durationMs ?? null,
+      };
       next.threads[event.threadId] = {
         ...base,
         turns: { ...base.turns, [event.turnId]: turn },
@@ -462,7 +476,7 @@ export function rebuildThread(
   threadId: string,
   cwd: string,
   items: Item[],
-  turns: { turnId: string; status: TurnStatus }[],
+  turns: { turnId: string; status: TurnStatus; durationMs?: number | null }[],
   changeSets: ChangeSet[],
 ): RootState {
   const base = state.threads[threadId] ?? newThreadState(threadId, cwd);
@@ -484,6 +498,9 @@ export function rebuildThread(
       id: t.turnId,
       status: t.status,
       itemIds: byTurn.get(t.turnId) ?? prev?.itemIds ?? [],
+      // 重启后耗时来自后端快照（它从 turn_completed 载荷里重建）。
+      // 缺字段时保留已有值——重建不应把内存里已拿到的耗时抹掉。
+      durationMs: t.durationMs ?? prev?.durationMs ?? null,
     };
     if (!seen.has(t.turnId)) {
       seen.add(t.turnId);
@@ -495,7 +512,7 @@ export function rebuildThread(
     if (!seen.has(turnId)) {
       seen.add(turnId);
       order.push(turnId);
-      nextTurns[turnId] = { id: turnId, status: 'completed', itemIds: ids };
+      nextTurns[turnId] = { id: turnId, status: 'completed', itemIds: ids, durationMs: null };
     }
   }
 

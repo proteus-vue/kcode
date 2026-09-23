@@ -180,8 +180,38 @@ export type ItemBody =
   | { kind: 'webSearch'; query: string }
   | { kind: 'imageView'; path: string }
   | { kind: 'contextCompaction' }
-  | { kind: 'collabAgent'; description: string }
+  /**
+   * 协作 / 子 Agent 活动。
+   *
+   * 协议有两个形状不同的 item 归到这里，字段各自独立：
+   * - `collabAgentToolCall`：`tool` / `status` / `receiverThreadIds` / `agents` / `prompt`
+   * - `subAgentActivity`：`activityKind` / `agentThreadId` / `agentPath`
+   *
+   * 早先这里只有一个 `description` 且填的是协议类型名，界面显示成
+   * 「协作：collabAgentToolCall」——术语泄漏 + 信息全丢，已修正。
+   */
+  | {
+      kind: 'collabAgent';
+      /** 协议原始类型（兜底展示与排查用，不直接呈现给用户）。 */
+      source: string;
+      tool?: string | null;
+      status?: string | null;
+      receiverThreadIds: string[];
+      agents: AgentState[];
+      prompt?: string | null;
+      activityKind?: string | null;
+      agentThreadId?: string | null;
+      agentPath?: string | null;
+    }
   | { kind: 'other'; protocolType: string };
+
+/** 一个子代理的当前状态（协议 `agentsStates` 表的一项）。 */
+export interface AgentState {
+  threadId: string;
+  /** `pendingInit` / `running` / `completed` / `errored` / `shutdown` / `notFound`。 */
+  status: string;
+  message: string | null;
+}
 
 export interface Item {
   id: string;
@@ -236,7 +266,17 @@ export type AppEvent =
   | { type: 'itemUpserted'; threadId: string; turnId: string; item: Item; completed: boolean }
   | { type: 'approvalRequired'; approval: Approval }
   | { type: 'approvalResolved'; requestId: string; threadId: string }
-  | { type: 'turnCompleted'; threadId: string; turnId: string; status: TurnStatus }
+  | {
+      type: 'turnCompleted';
+      threadId: string;
+      turnId: string;
+      status: TurnStatus;
+      /**
+       * 该轮耗时（毫秒），协议 `Turn.durationMs` 原样带出。
+       * null = 协议未提供（此时**不显示**，不用本地计时凑一个）。
+       */
+      durationMs?: number | null;
+    }
   | { type: 'outputDelta'; threadId: string; itemId: string; delta: string }
   | {
       type: 'textDelta';

@@ -108,7 +108,11 @@ describe('多轮渲染：流式内容只属于它自己那一轮', () => {
     const items = el.querySelector('.turn-items')!;
     const children = Array.from(items.children);
     const progressIdx = children.indexOf(progress as Element);
-    const contentIdx = children.findIndex((c) => c.className.includes('item-card') || c.className.includes('agent-message'));
+    // 流式回退块的类名是 .bubble.agent（原先用的 .item-card/.agent-message
+    // 在样式表里 0 条规则，是死类名——已改为真实存在的类名）
+    const contentIdx = children.findIndex(
+      (c) => c.className.includes('bubble') || c.className.includes('item-card'),
+    );
     expect(contentIdx, '应有内容节点').toBeGreaterThanOrEqual(0);
     expect(progressIdx, '转圈应在内容之后').toBeGreaterThan(contentIdx);
   });

@@ -103,6 +103,15 @@ pub enum AppEvent {
         thread_id: String,
         turn_id: String,
         status: TurnStatus,
+        /// 该轮耗时（毫秒）。协议 `Turn.durationMs` 原样带出，未知时为 None。
+        ///
+        /// **由协议给出而不是本地计时**：本地从 `turn/started` 起算会把网络
+        /// 往返与排队时间也算进去，而用户想知道的是「这轮实际工作了多久」。
+        ///
+        /// 单位陷阱：协议里 `startedAt` / `completedAt` 是**秒**，只有
+        /// `durationMs` 是毫秒——两者混用会差 1000 倍。
+        #[serde(default)]
+        duration_ms: Option<i64>,
     },
     #[serde(rename_all = "camelCase")]
     OutputDelta {
@@ -559,6 +568,12 @@ pub struct ThreadSummary {
 pub struct TurnSnapshot {
     pub turn_id: String,
     pub status: TurnStatus,
+    /// 该轮耗时（毫秒）。从 `turn_completed` 事件载荷里的 `turn.durationMs` 取。
+    ///
+    /// **必须重建**：整轮耗时只在 `turn/completed` 那一帧的载荷里出现一次，
+    /// 不从这里带出来的话，应用重启后所有历史轮次的耗时就永久丢失了。
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
 }
 
 /// 从事件日志重建的完整线程快照。
@@ -1961,8 +1976,12 @@ async fn handle_incoming(
                 let turn = &params["turn"];
                 let turn_id = turn["id"].as_str().unwrap_or_default().to_owned();
                 let status = Projector::project_turn_status(turn).unwrap_or(TurnStatus::Failed);
+                // 整轮耗时由协议给出（`Turn.durationMs`，毫秒）。缺字段时
+                // 如实为 None —— 不用本地时间戳凑一个，那会把网络与排队
+                // 时间算成「工作时长」，比不显示更误导。
+                let duration_ms = turn.get("durationMs").and_then(Value::as_i64);
                 record(log, event_kind::TURN_COMPLETED, Some(&thread_id), Some(&turn_id), None, params).await;
-                emit(AppEvent::TurnCompleted { thread_id, turn_id, status });
+                emit(AppEvent::TurnCompleted { thread_id, turn_id, status, duration_ms });
             }
 
             // 审批被解决（本端/其他客户端应答，或服务端超时）。多窗口收敛靠它。
@@ -2291,9 +2310,9 @@ pub fn load_thread_snapshot(log: &EventLog, thread_id: &str) -> DomainResult<Thr
             }
             k if k == event_kind::TURN_STARTED || k == event_kind::TURN_COMPLETED => {
                 if let Some(tid) = rec.turn_id.clone() {
+                    let turn_obj = rec.payload.get("turn");
                     let status = if k == event_kind::TURN_COMPLETED {
-                        rec.payload
-                            .get("turn")
+                        turn_obj
                             .and_then(|t| t.get("status"))
                             .and_then(Value::as_str)
                             .and_then(TurnStatus::from_protocol)
@@ -2301,9 +2320,18 @@ pub fn load_thread_snapshot(log: &EventLog, thread_id: &str) -> DomainResult<Thr
                     } else {
                         TurnStatus::InProgress
                     };
+                    let duration_ms =
+                        turn_obj.and_then(|t| t.get("durationMs")).and_then(Value::as_i64);
                     match turns.iter_mut().find(|t| t.turn_id == tid) {
-                        Some(slot) => slot.status = status,
-                        None => turns.push(TurnSnapshot { turn_id: tid, status }),
+                        Some(slot) => {
+                            slot.status = status;
+                            // 只在有值时覆盖：turns 列表里先出现的是
+                            // turn_started（无耗时），后出现 turn_completed（有）
+                            if duration_ms.is_some() {
+                                slot.duration_ms = duration_ms;
+                            }
+                        }
+                        None => turns.push(TurnSnapshot { turn_id: tid, status, duration_ms }),
                     }
                 }
             }
@@ -2467,12 +2495,15 @@ mod tests {
             thread_id: "th".into(),
             turn_id: "tu".into(),
             status: TurnStatus::Completed,
+            duration_ms: Some(6500),
         };
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["type"], "turnCompleted");
         assert!(v.get("threadId").is_some(), "keys: {v}");
         assert!(v.get("turnId").is_some(), "keys: {v}");
         assert!(v.get("thread_id").is_none(), "不应出现 snake_case");
+        // 整轮耗时：前端按毫秒直接展示，字段名与单位都要钉住
+        assert_eq!(v["durationMs"], 6500, "耗时必须是毫秒且 camelCase：{v}");
 
         let ev2 = AppEvent::ApprovalRequired {
             approval: Approval {

@@ -95,8 +95,31 @@ impl Projector {
                 path: item.get("path").and_then(Value::as_str).unwrap_or_default().to_owned(),
             },
             "contextCompaction" => ItemBody::ContextCompaction,
+            // 两个形状不同的协作 item 都归到这里，但**字段各自解析**——
+            // 早先只存协议类型名（`ty`），界面于是显示「协作：collabAgentToolCall」：
+            // 既是内部术语泄漏，又把「谁在干什么、什么状态」全丢了。
             "collabAgentToolCall" | "subAgentActivity" => ItemBody::CollabAgent {
-                description: ty.to_owned(),
+                source: ty.to_owned(),
+                tool: item.get("tool").and_then(Value::as_str).map(str::to_owned),
+                status: item.get("status").and_then(Value::as_str).map(str::to_owned),
+                receiver_thread_ids: item
+                    .get("receiverThreadIds")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                agents: extract_agent_states(item),
+                prompt: item.get("prompt").and_then(Value::as_str).map(str::to_owned),
+                activity_kind: item.get("kind").and_then(Value::as_str).map(str::to_owned),
+                agent_thread_id: item
+                    .get("agentThreadId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                agent_path: item.get("agentPath").and_then(Value::as_str).map(str::to_owned),
             },
             other => ItemBody::Other { protocol_type: other.to_owned() },
         }
@@ -328,6 +351,31 @@ fn extract_text(item: &Value) -> String {
         }
     }
     String::new()
+}
+
+/// 从 `collabAgentToolCall` item 中抽取各子代理的状态表。
+///
+/// 协议形状是 `agentsStates: { [threadId]: { status, message } }`——是个**映射**，
+/// 而 UI 需要的是稳定顺序的列表（映射在 JSON 里没有顺序保证，直接遍历会让
+/// 「派了 3 个子代理」的展示顺序每次都可能不同）。这里按 threadId 排序成 Vec。
+fn extract_agent_states(item: &Value) -> Vec<AgentState> {
+    let Some(map) = item.get("agentsStates").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut out: Vec<AgentState> = map
+        .iter()
+        .map(|(thread_id, v)| AgentState {
+            thread_id: thread_id.clone(),
+            status: v
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned(),
+            message: v.get("message").and_then(Value::as_str).map(str::to_owned),
+        })
+        .collect();
+    out.sort_by(|a, b| a.thread_id.cmp(&b.thread_id));
+    out
 }
 
 /// 从 `fileChange` item 中抽取变更条目。
@@ -744,6 +792,106 @@ mod tests {
         match p.project_item_body(&item) {
             ItemBody::AgentMessage { text } => assert_eq!(text, "第一行\n第二行"),
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// 子代理信息**必须解析成可用字段**，而不是协议类型名。
+    ///
+    /// 这条测试守的是一个真实缺陷：早先 `CollabAgent` 只存一个 description，
+    /// 而填进去的是 `item["type"]`——界面直接显示「协作：collabAgentToolCall」。
+    /// 既是内部术语泄漏，又把「谁在干、什么状态」全丢了。
+    #[test]
+    fn projects_collab_agent_tool_call_fields() {
+        let p = Projector::new("/ws");
+        // 形状取自协议 CollabAgentToolCall（字段名与类型按 schema 构造）
+        let item = json!({
+            "type": "collabAgentToolCall",
+            "id": "c1",
+            "tool": "spawnAgent",
+            "status": "inProgress",
+            "senderThreadId": "th-main",
+            "receiverThreadIds": ["th-sub-1", "th-sub-2"],
+            "prompt": "调研一下这个协议",
+            "model": null,
+            "reasoningEffort": null,
+            "agentsStates": {
+                "th-sub-2": { "status": "running", "message": null },
+                "th-sub-1": { "status": "completed", "message": "done" }
+            }
+        });
+        let body = p.project_item_body(&item);
+        match &body {
+            ItemBody::CollabAgent {
+                source, tool, status, receiver_thread_ids, agents, prompt, ..
+            } => {
+                assert_eq!(source, "collabAgentToolCall");
+                assert_eq!(tool.as_deref(), Some("spawnAgent"));
+                assert_eq!(status.as_deref(), Some("inProgress"));
+                assert_eq!(receiver_thread_ids.len(), 2, "两个对端代理都要保留");
+                assert_eq!(prompt.as_deref(), Some("调研一下这个协议"));
+                assert_eq!(agents.len(), 2);
+                // 排序保证展示稳定：JSON 映射本身无序，直接遍历会让顺序随机
+                assert_eq!(agents[0].thread_id, "th-sub-1", "应按 threadId 排序");
+                assert_eq!(agents[0].status, "completed");
+                assert_eq!(agents[0].message.as_deref(), Some("done"));
+                assert_eq!(agents[1].status, "running");
+            }
+            other => panic!("应投影为 CollabAgent：{other:?}"),
+        }
+    }
+
+    /// `subAgentActivity` 是另一种形状，字段名完全不同——必须各自解析。
+    #[test]
+    fn projects_sub_agent_activity_fields() {
+        let p = Projector::new("/ws");
+        let item = json!({
+            "type": "subAgentActivity",
+            "id": "a1",
+            "kind": "completed",
+            "agentThreadId": "th-sub-9",
+            "agentPath": "/root/agents/sub-9"
+        });
+        match &p.project_item_body(&item) {
+            ItemBody::CollabAgent {
+                source,
+                activity_kind,
+                agent_thread_id,
+                agent_path,
+                tool,
+                agents,
+                ..
+            } => {
+                assert_eq!(source, "subAgentActivity");
+                assert_eq!(activity_kind.as_deref(), Some("completed"));
+                assert_eq!(agent_thread_id.as_deref(), Some("th-sub-9"));
+                assert_eq!(agent_path.as_deref(), Some("/root/agents/sub-9"));
+                // 这两个字段只属于 collabAgentToolCall，此处应为空——
+                // 若解析时错用了同一组字段名，这里会非空
+                assert!(tool.is_none(), "subAgentActivity 没有 tool 字段");
+                assert!(agents.is_empty(), "subAgentActivity 没有 agentsStates");
+            }
+            other => panic!("应投影为 CollabAgent：{other:?}"),
+        }
+    }
+
+    /// 缺失 `agentsStates` 时不应 panic，也不该编造代理。
+    #[test]
+    fn collab_agent_without_agents_states_is_empty_not_fabricated() {
+        let p = Projector::new("/ws");
+        let item = json!({
+            "type": "collabAgentToolCall",
+            "id": "c2",
+            "tool": "wait",
+            "status": "completed",
+            "senderThreadId": "th-main",
+            "receiverThreadIds": []
+        });
+        match &p.project_item_body(&item) {
+            ItemBody::CollabAgent { agents, receiver_thread_ids, .. } => {
+                assert!(agents.is_empty(), "没有状态表就不该造出代理");
+                assert!(receiver_thread_ids.is_empty());
+            }
+            other => panic!("应投影为 CollabAgent：{other:?}"),
         }
     }
 }

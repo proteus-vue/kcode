@@ -85,6 +85,8 @@
      输入框（15px）、候选列表各算出一个宽度，很难真正对齐；固定像素同源。
      外层 min(..., 100%) 让窄窗口下自然收缩为「填满可用宽度」。 */
   --read-width: min(1120px, 100%);
+  /* 轮间距。此前是散在 .turn 里的裸值 26px——令牌化后调一处即可。 */
+  --turn-gap: 26px;
 
   /* 滚动条宽度。**必须与 ::-webkit-scrollbar 的 width 一致**——
      两处分开写就会出现「输入框与正文差几像素」这种没人能一眼归因的错位。
@@ -476,7 +478,8 @@ body {
    放在 .turn 上还有一个作用：限制的是「一轮对话」整体，
    用户消息气泡（右对齐）与助手回复共用同一条栏宽，不会各宽各的。 */
 .turn {
-  margin-bottom: 26px;
+  /* 轮间距令牌化：与圆角/栏宽同一套做法——散落的裸值改起来容易漏。 */
+  margin-bottom: var(--turn-gap);
   max-width: var(--read-width);
   /* 栏宽内居中：宽窗口下正文不会贴着左栏边缘，
      两侧留白均等，视线落点稳定在中间。 */
@@ -614,6 +617,8 @@ body {
   display: flex; opacity: 0;
 }
 .tool-row:hover .tool-chevron { opacity: 1; }
+/* 聚合行与单条工具行同一套交互：箭头也是悬停才出现 */
+.tool-group:hover .tool-chevron { opacity: 1; }
 .tool-chevron.open { transform: rotate(90deg); opacity: 1; }
 
 /* ── 运行态：文字上从左往右扫过的高光 ────────────────────────────────
@@ -1102,6 +1107,109 @@ body {
 .revert-confirm-text code { font-size: 11px; color: var(--danger); }
 .revert-confirm-note { margin: 0 0 8px; font-size: 11px; line-height: 1.55; color: var(--t3); }
 .revert-confirm-actions { display: flex; gap: 6px; }
+
+/* ── 工具聚合行（连续同类动作折叠） ─────────────────────────────────── */
+
+/* 组本身不加边框与底色：它只是"若干行的容器"，加壳会让时间线多一层
+   视觉重量——而聚合的目的恰恰是**减重**。 */
+.tool-group { margin: 2px 0; }
+.tool-group-body {
+  /* 展开后的成员缩进一级，表明它们从属于上面那行摘要 */
+  padding-left: 10px;
+  margin-left: 6px;
+  border-left: 1px solid var(--edge-soft);
+}
+.tool-group .tool-row-head { padding-left: 0; }
+.tool-group.is-running .tool-summary {
+  background-image: linear-gradient(
+    100deg, var(--t4) 0%, var(--t4) 38%, var(--t1) 50%, var(--t4) 62%, var(--t4) 100%
+  );
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: tool-sweep 2.1s linear infinite;
+}
+
+/* 可点的摘要文本：常态与普通摘要无差别，悬停才提示可点
+   （常驻下划线会让每一条路径都变成链接的样子，很吵）。 */
+.tool-summary.is-clickable {
+  background: none; border: none; padding: 0; text-align: left;
+  font: inherit; font-family: var(--mono); font-size: 11.5px;
+  color: var(--t3); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tool-summary.is-clickable:hover { color: var(--t1); }
+.tool-open-right {
+  display: grid; place-items: center; width: 18px; height: 16px; padding: 0;
+  border: none; background: transparent; color: var(--t4); cursor: pointer;
+  border-radius: var(--r-xs);
+}
+.tool-open-right:hover { color: var(--t2); background: rgba(255,255,255,0.07); }
+
+/* ── 子代理行 ───────────────────────────────────────────────────────── */
+
+.collab-body { padding-left: 22px; }
+.collab-label {
+  margin: 6px 0 4px; font-size: 10.5px; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--t4);
+}
+.collab-agents { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.collab-agent { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--t3); }
+.collab-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: var(--t4); }
+.collab-agent.tone-running .collab-dot { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+.collab-agent.tone-ok .collab-dot { background: var(--ok); }
+.collab-agent.tone-warn .collab-dot { background: var(--warn); }
+.collab-agent.tone-danger .collab-dot { background: var(--danger); }
+.collab-agent-id { color: var(--t4); }
+.collab-agent-status { flex-shrink: 0; }
+.collab-agent.tone-running .collab-agent-status { color: var(--accent); }
+.collab-agent.tone-danger .collab-agent-status { color: var(--danger); }
+.collab-agent-msg {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--t4);
+}
+.chip-running { color: var(--accent); background: transparent; border-color: rgba(106,165,255,0.35); }
+.chip-ok { color: var(--ok); background: transparent; border-color: rgba(74,222,128,0.35); }
+.chip-warn { color: var(--warn); background: transparent; border-color: rgba(251,191,36,0.35); }
+.chip-danger { color: var(--danger); background: transparent; border-color: rgba(248,113,113,0.35); }
+.chip-idle { color: var(--t3); background: transparent; border-color: var(--edge-soft); }
+
+/* ── 轮次收尾：耗时 + 可展开的工作详情 ──────────────────────────────── */
+
+.turn-footer { margin-top: 6px; }
+.turn-footer-head {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: none; border: none; padding: 2px 6px 2px 0;
+  font: inherit; font-size: 11.5px; color: var(--t4); cursor: pointer;
+  border-radius: var(--r-xs);
+}
+.turn-footer-head:disabled { cursor: default; }
+.turn-footer-head:not(:disabled):hover { color: var(--t3); }
+.turn-footer-chevron { display: flex; transition: transform .15s; }
+.turn-footer-chevron.open { transform: rotate(90deg); }
+
+.turn-detail {
+  margin-top: 5px; padding: 8px 10px;
+  background: rgba(0,0,0,0.2);
+  border: 1px solid var(--edge-soft);
+  border-radius: var(--r-sm);
+}
+.turn-detail-stats {
+  list-style: none; margin: 0 0 6px; padding: 0;
+  display: flex; flex-wrap: wrap; gap: 4px 14px;
+}
+.turn-detail-stats li { display: flex; align-items: baseline; gap: 4px; font-size: 11.5px; }
+.turn-detail-num { color: var(--t1); font-weight: 600; }
+.turn-detail-label { color: var(--t4); }
+.turn-detail-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.turn-detail-file {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: none; border: none; padding: 1px 0;
+  font: inherit; font-size: 11.5px; color: var(--t3); cursor: pointer;
+}
+.turn-detail-file:hover { color: var(--t1); }
+.turn-detail-files li > .turn-detail-file { cursor: default; }
 
 /* ── Markdown ───────────────────────────────────────────────────────── */
 

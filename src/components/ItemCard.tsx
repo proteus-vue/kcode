@@ -9,9 +9,19 @@
  */
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { Item } from '../types/domain';
+import type { Item, ItemBody } from '../types/domain';
+import { Icon } from './Icon';
 import { Markdown } from './Markdown';
 import { ToolRow } from './ToolRow';
+import {
+  activityLabel,
+  agentRollup,
+  agentStatusLabel,
+  callStatusLabel,
+  shortId,
+  statusTone,
+  toolLabel,
+} from './collabAgent';
 
 export function ItemCard({
   item,
@@ -91,8 +101,10 @@ export function ItemCard({
       return <div className="divider-row">上下文已压缩</div>;
 
     case 'collabAgent':
-      return <div className="divider-row">协作：{item.body.description}</div>;
-
+      // 子代理活动。**不显示协议类型名**——用户要看的是「派了谁、在干什么、
+      // 什么状态」，而不是 `collabAgentToolCall` 这个枚举值。
+      // 两个形状不同的 item 都在这里渲染（见下方 CollabAgentRow）。
+      return <CollabAgentRow body={item.body} />;
     // 过程性动作交给 ToolRow
     case 'commandExecution':
     case 'fileChange':
@@ -109,6 +121,114 @@ export function ItemCard({
         </div>
       );
   }
+}
+
+/**
+ * 子代理活动行：紧凑单行 + 点击展开。
+ *
+ * 与 `ToolRow` 同一套视觉语言（图标 + 类型 + 摘要 + 折叠箭头，常态弱化），
+ * 因为它在时间线里扮演的角色相同——**过程性动作**，不该与正文争焦点。
+ * 差异只在展开内容：这里展开的是「各代理的状态表」，不是命令输出。
+ */
+function CollabAgentRow({ body }: { body: Extract<ItemBody, { kind: 'collabAgent' }> }) {
+  const [open, setOpen] = useState(false);
+
+  const isCall = body.source === 'collabAgentToolCall';
+  const tone = statusTone(isCall ? body.status : body.activityKind);
+
+  // 摘要：两种来源各自成句。宁可短，也不堆字段——
+  // 细节点开就有，单行塞满反而看不清发生了什么。
+  const summary = isCall
+    ? [
+        agentRollup(body.agents) || (body.receiverThreadIds.length > 0
+          ? `${body.receiverThreadIds.length} 个代理`
+          : ''),
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : `${activityLabel(body.activityKind)}${
+        body.agentPath ? ` · ${body.agentPath.split('/').filter(Boolean).pop() ?? ''}` : ''
+      }`;
+
+  const status = isCall ? callStatusLabel(body.status) : '';
+  const hasDetail =
+    body.agents.length > 0 || Boolean(body.prompt) || body.receiverThreadIds.length > 0;
+
+  return (
+    <div className={`tool-row collab-row tone-${tone}`}>
+      <button
+        className="tool-row-head"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        disabled={!hasDetail}
+        title={hasDetail ? '展开查看详情' : undefined}
+      >
+        <span className="tool-icon">
+          <Icon name="devices" />
+        </span>
+        <span className="tool-kind">{isCall ? toolLabel(body.tool) : '子代理'}</span>
+        <span className="tool-summary">{summary}</span>
+        <span className="tool-meta">
+          {status && <span className={`chip chip-${tone}`}>{status}</span>}
+          {!isCall && body.agentThreadId && (
+            <span className="dim mono">{shortId(body.agentThreadId)}</span>
+          )}
+        </span>
+        {/* 无详情时不给箭头：点了没反应的箭头比没有箭头更糟 */}
+        {hasDetail && (
+          <span className={`tool-chevron ${open ? 'open' : ''}`}>
+            <Icon name="chevron" size={12} />
+          </span>
+        )}
+      </button>
+
+      {open && hasDetail && (
+        <div className="tool-body collab-body">
+          {body.prompt && (
+            <>
+              <p className="collab-label">任务</p>
+              <pre className="tool-output">{body.prompt}</pre>
+            </>
+          )}
+
+          {body.agents.length > 0 && (
+            <>
+              <p className="collab-label">代理状态</p>
+              <ul className="collab-agents">
+                {body.agents.map((a) => (
+                  <li key={a.threadId} className={`collab-agent tone-${statusTone(a.status)}`}>
+                    <span className="collab-dot" />
+                    <span className="collab-agent-id mono" title={a.threadId}>
+                      {shortId(a.threadId)}
+                    </span>
+                    <span className="collab-agent-status">{agentStatusLabel(a.status)}</span>
+                    {/* 协议给的说明文本可为空——空就不占位 */}
+                    {a.message && <span className="collab-agent-msg">{a.message}</span>}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
+          {body.receiverThreadIds.length > 0 && body.agents.length === 0 && (
+            <>
+              <p className="collab-label">涉及代理</p>
+              <ul className="collab-agents">
+                {body.receiverThreadIds.map((id) => (
+                  <li key={id} className="collab-agent tone-idle">
+                    <span className="collab-dot" />
+                    <span className="collab-agent-id mono" title={id}>
+                      {shortId(id)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**

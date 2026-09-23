@@ -102,6 +102,23 @@ impl ItemStatus {
     }
 }
 
+/// 一个子代理的当前状态（协议 `agentsStates` 表的一项）。
+///
+/// `thread_id` 是协议里该表的键；它同时也是「在侧栏/时间线里追这个子代理」
+/// 的唯一标识——协议没有给更友好的名字，所以界面上按短 id 展示。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentState {
+    pub thread_id: String,
+    /// `pendingInit` / `running` / `interrupted` / `completed` / `errored` /
+    /// `shutdown` / `notFound`。**保留原始字符串**而不是映射成枚举：协议随时
+    /// 可能加新状态，映射表会让新状态变成「未知」而丢掉信息。
+    pub status: String,
+    /// 该代理的说明文本（协议 `message`，可为 null）。
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
 /// Item 类别。协议 `ThreadItem` 有 19 种变体，这里归并为 UI 需要的粒度。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -151,9 +168,53 @@ pub enum ItemBody {
     #[serde(rename_all = "camelCase")]
     ImageView { path: String },
     ContextCompaction,
-    /// 协作/子 Agent 活动。
+    /// 协作 / 子 Agent 活动。
+    ///
+    /// # 为什么不能压成一个字符串
+    ///
+    /// 协议有**两个形状不同**的 item 归到这里：
+    ///
+    /// - `collabAgentToolCall`：主 Agent 调用协作工具（`spawnAgent` / `wait` /
+    ///   `closeAgent` …），带 `tool`、`status`、对端线程 id、各代理的状态表；
+    /// - `subAgentActivity`：某个子代理的生命周期事件（`started` / `completed` …），
+    ///   带 `agentThreadId` 与 `agentPath`。
+    ///
+    /// 此前这里只存了一个 `description`，而填进去的是**协议类型名**——界面上
+    /// 直接显示成「协作：collabAgentToolCall」。两个后果都是实打实的：
+    /// 把内部术语漏给了用户，而「谁在干什么、什么状态」这些真正的信息全丢了。
     #[serde(rename_all = "camelCase")]
-    CollabAgent { description: String },
+    CollabAgent {
+        /// 协议原始类型（`collabAgentToolCall` / `subAgentActivity`）。
+        ///
+        /// 保留用于兜底展示与排查，**不直接呈现给用户**——用户要看的是
+        /// 「派了 2 个子代理，1 个在跑」，不是协议枚举名。
+        #[serde(default)]
+        source: String,
+        /// 被调用的协作工具（仅 `collabAgentToolCall`）。
+        #[serde(default)]
+        tool: Option<String>,
+        /// 调用状态：`inProgress` / `completed` / `failed` / `interrupted`。
+        #[serde(default)]
+        status: Option<String>,
+        /// 涉及的对端代理线程 id（`spawnAgent` 时即新建的那个）。
+        #[serde(default)]
+        receiver_thread_ids: Vec<String>,
+        /// 各代理的当前状态（协议 `agentsStates` 表）。
+        #[serde(default)]
+        agents: Vec<AgentState>,
+        /// 该协作调用的任务说明（协议 `prompt`）。
+        #[serde(default)]
+        prompt: Option<String>,
+        /// 活动类型（仅 `subAgentActivity`）：`started` / `interacted` /
+        /// `interrupted` / `completed`。
+        #[serde(default)]
+        activity_kind: Option<String>,
+        /// 活动所属的代理线程 id 与路径（仅 `subAgentActivity`）。
+        #[serde(default)]
+        agent_thread_id: Option<String>,
+        #[serde(default)]
+        agent_path: Option<String>,
+    },
     /// 其余协议变体（hookPrompt / sleep / imageGeneration / reviewMode 等）的兜底。
     #[serde(rename_all = "camelCase")]
     Other { protocol_type: String },

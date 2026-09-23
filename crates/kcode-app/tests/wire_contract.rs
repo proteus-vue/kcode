@@ -97,7 +97,21 @@ fn item_body_wire_format_is_camel_case() {
         ItemBody::WebSearch { query: "q".into() },
         ItemBody::ImageView { path: "/i.png".into() },
         ItemBody::ContextCompaction,
-        ItemBody::CollabAgent { description: "sub".into() },
+        ItemBody::CollabAgent {
+            source: "collabAgentToolCall".into(),
+            tool: Some("spawnAgent".into()),
+            status: Some("inProgress".into()),
+            receiver_thread_ids: vec!["t-sub".into()],
+            agents: vec![kcode_domain::AgentState {
+                thread_id: "t-sub".into(),
+                status: "running".into(),
+                message: None,
+            }],
+            prompt: Some("do it".into()),
+            activity_kind: None,
+            agent_thread_id: None,
+            agent_path: None,
+        },
         ItemBody::Other { protocol_type: "future".into() },
     ];
 
@@ -233,6 +247,7 @@ fn app_events_wire_format_is_camel_case() {
             thread_id: "th".into(),
             turn_id: "tu".into(),
             status: TurnStatus::Completed,
+            duration_ms: Some(1234),
         },
         AppEvent::OutputDelta {
             thread_id: "th".into(),
