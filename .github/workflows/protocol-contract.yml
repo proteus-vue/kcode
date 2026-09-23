@@ -177,17 +177,15 @@ jobs:
 
       - name: 失败用例摘要（仅失败时执行）
         if: failure()
+        # 统一用 scripts/ci-summarize-failures.sh：它按「注解上限」设计输出
+        # ——只打 FAILED 行与 error[...] 行，而不是 tail -40（后者会撞上限，
+        # 把真正的 error 行挤掉。本步骤一度如此，导致编译错误看不见）。
         run: |
-          if grep -qE '^test .* \.\.\. FAILED' /tmp/rust-tests.log 2>/dev/null; then
-            while IFS= read -r line; do
-              echo "::error::$line"
-            done < <(grep -E '^test .* \.\.\. FAILED' /tmp/rust-tests.log)
-          else
-            # 没有 FAILED 行说明是编译失败或环境问题，把尾部错误打出来
-            tail -40 /tmp/rust-tests.log | while IFS= read -r line; do
-              [[ -n "$line" ]] && echo "::error::$line"
-            done
-          fi
+          bash scripts/ci-summarize-failures.sh /tmp/rust-tests.log
+          echo "---- 编译错误（若上层未给出）----"
+          grep -nE "^(error|error\[)" /tmp/rust-tests.log | head -10 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
 
       - name: 集成测试（真实 app-server 进程 + 本地 mock 模型）
         run: |
