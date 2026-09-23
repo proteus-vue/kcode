@@ -365,10 +365,42 @@ pub async fn stop(serial: &str) -> Result<(), String> {
     run_stdout(&adb, &["-s", serial, "emu", "kill"], CMD_TIMEOUT).await.map(|_| ())
 }
 
+/// 一帧画面的抓取结果。
+#[derive(Debug, Clone)]
+pub struct Captured {
+    /// data URL。`None` 表示**内容与上一帧逐字节相同**，前端无需更新。
+    pub data_url: Option<String>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// 上一帧的 PNG 字节（按 serial）。用于跳过内容未变的帧。
+///
+/// # 为什么必须去重
+///
+/// 1080×2340 的 PNG 约 580KB，base64 后 780KB。前端每收到一帧都要
+/// **解码 250 万像素并重绘**——这是整个面板里最贵的操作。而模拟器画面
+/// 大多数时候是静止的（用户在读、在思考），此时 adb 仍会逐字节返回
+/// 同一份 PNG。不比对就是每 600ms 白做一次「传 780KB + 解码 + 重绘」，
+/// 表现为触摸操作时的卡顿：轮询与用户的交互在抢主线程。
+///
+/// 比对用**逐字节相等**而不是哈希：哈希碰撞会让画面永久冻结，
+/// 而那种缺陷不报错、只表现为「卡住了」——580KB 内存换确定性，值得。
+fn frame_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 /// 取一帧画面，返回 data URL 与设备尺寸。
 ///
 /// 尺寸一并返回：前端据它把点击坐标换算回设备空间（见 `to_device_coords`）。
-pub async fn frame(serial: &str) -> Result<(String, u32, u32), String> {
+///
+/// `force` 为 true 时**不走去重**，一定返回图像。前端在「手上没有帧」时
+/// 必须传 true（首次选中设备、切换设备回来、停止后重启）——否则服务端
+/// 认为「这帧没变」而前端却没有帧，面板会空着。
+pub async fn frame(serial: &str, force: bool) -> Result<Captured, String> {
     let adb = adb_path().ok_or("未找到 adb")?;
     let mut cmd = Command::new(&adb);
     cmd.args(["-s", serial, "exec-out", "screencap", "-p"])
@@ -388,9 +420,38 @@ pub async fn frame(serial: &str) -> Result<(String, u32, u32), String> {
     // PNG 头里带尺寸（IHDR 从第 16 字节起，宽高各 4 字节大端）。
     // 不用图像库：只为读两个整数引入依赖不划算。
     let (w, h) = png_dimensions(&png).unwrap_or((0, 0));
+
+    // 内容未变 → 只回尺寸，前端跳过整条「setState → 解码 → 重绘」链路
+    if is_unchanged(serial, &png, force) {
+        return Ok(Captured { data_url: None, width: w, height: h });
+    }
+
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
-    Ok((format!("data:image/png;base64,{b64}"), w, h))
+    Ok(Captured { data_url: Some(format!("data:image/png;base64,{b64}")), width: w, height: h })
+}
+
+/// 判断这一帧是否与上次下发的相同，并顺手更新缓存。
+///
+/// 抽成独立函数是为了**能直接测**：这条判定错了不会报错，只会表现为
+/// 「画面卡住不动」或「面板空白」——正是最需要测试覆盖的那类逻辑。
+/// 副作用（更新缓存）与判定写在同一个函数里，避免调用方漏掉更新。
+fn is_unchanged(serial: &str, png: &[u8], force: bool) -> bool {
+    let mut cache = frame_cache().lock().unwrap_or_else(|e| e.into_inner());
+    let same = !force && cache.get(serial).is_some_and(|last| last == png);
+    if !same {
+        cache.insert(serial.to_owned(), png.to_vec());
+    }
+    same
+}
+
+/// 忘掉某台设备的帧缓存。
+///
+/// 设备关闭时必须调用：否则下次启动同一台设备时，若首帧恰好与关掉前
+/// 最后一帧相同（例如都是同一个桌面），会被判为「未变」而不下发画面。
+pub fn forget_frame(serial: &str) {
+    let mut cache = frame_cache().lock().unwrap_or_else(|e| e.into_inner());
+    cache.remove(serial);
 }
 
 /// 从 PNG 字节里读宽高（IHDR 固定位置）。
@@ -548,6 +609,45 @@ mod tests {
         assert_eq!(to_device_coords(1.0, 1.0, 100.0, 100.0, 0, 0), None);
     }
 
+    /// 帧去重的核心契约：同样的字节只下发一次，除非显式要求强制。
+    ///
+    /// 这几条都是**静默**失败：判错了不会有报错，只会表现为
+    /// 「画面卡住不动」或「面板空白」——所以用测试把边界钉住。
+    #[test]
+    fn frame_cache_dedupes_identical_bytes() {
+        let serial = "test-dedupe-ser";
+        forget_frame(serial);
+
+        // 第一次：无缓存 → 必须下发
+        assert!(!is_unchanged(serial, b"PNG-A", false), "首次应下发");
+
+        // 同样的字节：不下发
+        assert!(is_unchanged(serial, b"PNG-A", false), "相同内容应跳过");
+
+        // 内容变了：下发
+        assert!(!is_unchanged(serial, b"PNG-B", false), "内容变化应下发");
+
+        // force：即使相同也下发（前端手上没有帧时必须能拿到）
+        assert!(!is_unchanged(serial, b"PNG-B", true), "force 应无视去重");
+
+        forget_frame(serial);
+        // 忘记之后：同字节也重新下发
+        assert!(!is_unchanged(serial, b"PNG-B", false), "forget 后应重新下发");
+    }
+
+    /// 不同设备各自缓存，互不影响（否则切换设备会显示上一台的判断结果）。
+    #[test]
+    fn frame_cache_is_per_serial() {
+        forget_frame("dedupe-a");
+        forget_frame("dedupe-b");
+        assert!(!is_unchanged("dedupe-a", b"X", false));
+        // b 从未见过 X，不该因为它与 a 的缓存相同而被判为未变
+        assert!(!is_unchanged("dedupe-b", b"X", false), "不同设备应各自判断");
+        assert!(is_unchanged("dedupe-a", b"X", false));
+        forget_frame("dedupe-a");
+        forget_frame("dedupe-b");
+    }
+
     #[test]
     fn png_dimensions_reads_ihdr() {
         // 构造一个最小的 PNG 头（签名 + IHDR 长度/类型 + 宽高）
@@ -642,11 +742,29 @@ mod live_tests {
             return;
         };
 
-        let (data_url, w, h) = frame(&dev.serial).await.expect("取帧失败");
+        // 先清缓存：这台设备可能刚被别的测试取过帧
+        forget_frame(&dev.serial);
+        let cap = frame(&dev.serial, false).await.expect("取帧失败");
+        let data_url = cap.data_url.expect("首次取帧必须带图像");
+        let (w, h) = (cap.width, cap.height);
         assert!(data_url.starts_with("data:image/png;base64,"), "应为 PNG data URL");
         // 尺寸必须解析出来：前端靠它把点击换算回设备坐标
         assert!(w > 0 && h > 0, "未能从 PNG 头解析尺寸（w={w} h={h}）");
         assert!(w >= 320 && h >= 320, "尺寸不像手机屏幕：{w}x{h}");
+
+        // **真机验证去重**：立刻再取一帧。模拟器画面在 350ms 内几乎不可能变化，
+        // 所以应被判为「未变」而只回尺寸——这正是省掉 780KB 传输与解码的依据。
+        let again = frame(&dev.serial, false).await.expect("二次取帧失败");
+        assert!(
+            again.data_url.is_none(),
+            "画面未变时应跳过图像下发（若这里失败，说明去重没生效或设备画面在跳动）"
+        );
+        assert_eq!(again.width, w, "跳过图像时仍须返回尺寸");
+
+        // force 必须能拿到图像：前端手上没有帧时靠它
+        let forced = frame(&dev.serial, true).await.expect("强制取帧失败");
+        assert!(forced.data_url.is_some(), "force=true 时必须返回图像");
+        forget_frame(&dev.serial);
 
         // 顺带验证一次输入：点屏幕正中（不应报错）
         input(&dev.serial, "tap", (w / 2) as i64, (h / 2) as i64, 0, 0, 120)

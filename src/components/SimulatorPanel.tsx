@@ -41,8 +41,19 @@ export function SimulatorPanel({
 }) {
   const [avd, setAvd] = useState<string>('');
   const [serial, setSerial] = useState<string>('');
-  const [frame, setFrame] = useState<SimulatorFrame | null>(null);
+  /**
+   * 当前画面。**state 里始终有图像**——服务端下发「内容未变」时
+   * 不动它（见 grab），所以这里不需要处理 dataUrl 为 null 的情况。
+   */
+  const [frame, setFrame] = useState<{ dataUrl: string; width: number; height: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * 进行中的提示（等待设备就绪等）。
+   *
+   * 与 `error` 分开：`error` 是「出错了」，这里是「正在等」——
+   * 混用会让等待中的提示带上报错的视觉重量（红色），明明一切正常。
+   */
+  const [notice, setNotice] = useState<string | null>(null);
   /**
    * 设备级操作（启动/关闭/切换）进行中。
    *
@@ -58,10 +69,28 @@ export function SimulatorPanel({
   const polling = useRef(true);
   /** 正在进行的指针手势（未抬起时为非空）。 */
   const gestureRef = useRef<{ x: number; y: number; t: number } | null>(null);
-  /** 当前按下/拖动的落点（用于显示标记）。null = 无手势。 */
-  const [pointer, setPointer] = useState<{ x: number; y: number; from?: { x: number; y: number } } | null>(null);
+  /**
+   * 拖动轨迹的 SVG 元素（直接改属性，不走 React）。
+   *
+   * `pointermove` 每次手指移动都会触发（一秒几十次），而 React 的
+   * setState → 重渲染 → 重绘链路在这个频率下会明显掉帧——**而轨迹只是
+   * 一个装饰**，不值得为它让整块画面参与重渲染。所以直接写 DOM 属性。
+   *
+   * 这是本项目里少见的「绕过 React」，理由写在这里：性能可测、影响可隔离
+   * （只动一个 `<line>` 的两个坐标）。
+   */
+  const dragLineRef = useRef<SVGLineElement | null>(null);
+  /** 是否有进行中的手势（只用于容器 class 切换，粒度粗、触发少）。 */
+  const [dragging, setDragging] = useState(false);
   /** 手势结束后短暂保留的标记（点击的反馈）。 */
   const [marker, setMarker] = useState<{ x: number; y: number } | null>(null);
+  /**
+   * 标记的清除定时器。
+   *
+   * 必须持有并清理：连续点击会叠出多个定时器，**先前的那个会把新标记
+   * 提前清掉**，表现为「快速点几下时标记一闪就没」。
+   */
+  const markerTimer = useRef<number | null>(null);
   /** 取帧是否在途——避免输入后的补帧与轮询叠加。 */
   const grabbing = useRef(false);
 
@@ -72,25 +101,59 @@ export function SimulatorPanel({
     if (ready) setSerial(ready.serial);
   }, [status, serial]);
 
-  /** 取一帧。 */
-  const grab = useCallback(async () => {
-    if (!serial) return;
-    // 在途保护：输入后的补帧与 600ms 轮询可能撞在一起。
-    // 不挡会让请求堆积（单帧实测 350ms，叠三个就明显滞后于操作）。
-    if (grabbing.current) return;
-    grabbing.current = true;
-    try {
-      const f = await invoke<SimulatorFrame>('simulator_frame', { serial });
-      setFrame(f);
-      setError(null);
-    } catch (e) {
-      // 取帧失败常见于设备正在启动/关闭。不清空最后一帧——
-      // 清掉会让面板闪成空白，而保持上一帧更能说明「它刚才还在」。
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      grabbing.current = false;
-    }
-  }, [serial]);
+  /**
+   * AVD 下拉框的默认值。
+   *
+   * **必须回填到 state**：`<select>` 的 value 写了 `avd || avds[0]` 兜底，
+   * 界面看着有选中项，但 `startAvd` 读的是 `avd`——它一直是空的，
+   * 于是点「启动」**静默无反应**（不报错、不启动、什么也不发生）。
+   * 只有用户手动改过一次下拉框才会填上，这正是「只有一个 AVD 时点启动没反应」
+   * 的原因。这里把界面显示的值与 state 对齐。
+   */
+  useEffect(() => {
+    if (avd || !status) return;
+    const first = status.android.avds[0];
+    if (first) setAvd(first);
+  }, [status, avd]);
+
+  /**
+   * 取一帧。
+   *
+   * `force` 用于「手上没有帧」的场景（首次选中设备、切换设备、重启）：
+   * 服务端会跳过内容比对一定下发，否则可能因「与上一帧相同」而不给画面，
+   * 而前端又没有帧，面板就空着。
+   */
+  const grab = useCallback(
+    async (force = false) => {
+      if (!serial) return;
+      // 在途保护：输入后的补帧与 600ms 轮询可能撞在一起。
+      // 不挡会让请求堆积（单帧实测 350ms，叠三个就明显滞后于操作）。
+      if (grabbing.current) return;
+      grabbing.current = true;
+      try {
+        const f = await invoke<SimulatorFrame>('simulator_frame', { serial, force });
+        // **内容未变时跳过 setState**：这是卡顿的主要来源。
+        // 一次 setFrame 会让整块画面重新解码（1080×2340 位图）+ 重绘，
+        // 而画面静止时这份工作完全白做——它还会与用户的触摸操作抢主线程。
+        //
+        // 未变时**只更新尺寸**（坐标换算依赖它，且尺寸变化本身就是内容变化前的
+        // 先行信号，例如旋转屏幕）；已有图像则原样保留。
+        if (f.dataUrl === null) {
+          setFrame((prev) => (prev ? { ...prev, width: f.width, height: f.height } : prev));
+        } else {
+          setFrame({ dataUrl: f.dataUrl, width: f.width, height: f.height });
+        }
+        setError(null);
+      } catch (e) {
+        // 取帧失败常见于设备正在启动/关闭。不清空最后一帧——
+        // 清掉会让面板闪成空白，而保持上一帧更能说明「它刚才还在」。
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        grabbing.current = false;
+      }
+    },
+    [serial],
+  );
 
   useEffect(() => {
     if (!serial) {
@@ -98,7 +161,8 @@ export function SimulatorPanel({
       return;
     }
     polling.current = true;
-    void grab();
+    // 强制：刚选中设备时前端没有帧，不能依赖服务端的去重判断
+    void grab(true);
     const t = setInterval(() => {
       // 页面不可见时跳过：省掉 1.3MB/s 的无效搬运
       if (polling.current && !document.hidden) void grab();
@@ -177,7 +241,11 @@ export function SimulatorPanel({
       const g: Gesture = classifyGesture(start, end, performance.now() - start.t);
       // 点击用落点；滑动用起点→终点
       setMarker(g.kind === 'tap' ? { x: g.x, y: g.y } : { x: g.x2, y: g.y2 });
-      window.setTimeout(() => setMarker(null), MARKER_MS);
+      if (markerTimer.current !== null) window.clearTimeout(markerTimer.current);
+      markerTimer.current = window.setTimeout(() => {
+        setMarker(null);
+        markerTimer.current = null;
+      }, MARKER_MS);
 
       if (g.kind === 'tap') {
         void sendInput('tap', g.x, g.y);
@@ -188,20 +256,61 @@ export function SimulatorPanel({
     [sendInput],
   );
 
+  // 卸载时清掉标记定时器（否则会在已卸载的组件上 setState）
+  useEffect(
+    () => () => {
+      if (markerTimer.current !== null) window.clearTimeout(markerTimer.current);
+    },
+    [],
+  );
+
   const startAvd = useCallback(async () => {
     if (!avd) return;
     setBusy(true);
+    setNotice(`已启动 ${avd}，正在等待设备就绪（冷启动通常 10–30 秒）…`);
     try {
       await invoke('simulator_start', { avd });
-      setError(null);
-      // 冷启动十几秒：给用户明确预期，而不是让他盯着空面板
-      setError(`已启动 ${avd}，冷启动通常需要 10–30 秒，请稍候刷新。`);
+
+      // **等设备真的出现，而不是让用户自己点刷新**。
+      //
+      // 后端 `simulator_start` 是 spawn 后立即返回（模拟器是独立进程，
+      // 可能在本应用关闭后继续运行），所以返回时设备还没注册到 adb。
+      // 原先这里只打印一句「请稍候刷新」——用户的下一步必然是自己点
+      // 刷新按钮，而「该刷新了」这件事本不该由人判断。
+      //
+      // 用**条件轮询 + 上限**：每 2 秒探测一次，最多 60 秒。
+      // 不用固定等待：就绪时间取决于机器（快则 8 秒、慢则半分钟），
+      // 定死会要么白等要么不够。
+      const deadline = Date.now() + 60_000;
+      let found = false;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const st = await invoke<SimulatorStatus>('simulator_probe');
+          const ready = st.android.devices.find((d) => d.state === 'device');
+          if (ready) {
+            setSerial(ready.serial);
+            setNotice(null);
+            found = true;
+            onRefreshStatus();
+            break;
+          }
+        } catch {
+          // 探测本身失败（adb 忙）不算致命，继续等
+        }
+      }
+      if (!found) {
+        // 超时如实说明，并保留手动入口（刷新按钮仍在）
+        setNotice(`${avd} 在 60 秒内未就绪。设备可能启动失败，可点刷新重试。`);
+        onRefreshStatus();
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      setNotice(null);
     } finally {
       setBusy(false);
     }
-  }, [avd]);
+  }, [avd, onRefreshStatus]);
 
   const stopDevice = useCallback(async () => {
     if (!serial) return;
@@ -314,7 +423,7 @@ export function SimulatorPanel({
           手势判定用**图片坐标**（要换算成设备坐标），
           落点标记用**容器坐标**（要定位到 DOM），两者分开算。 */}
       {frame ? (
-        <div className={`sim-screen ${inputBusy ? 'is-busy' : ''} ${pointer ? 'is-dragging' : ''}`}>
+        <div className={`sim-screen ${inputBusy ? 'is-busy' : ''} ${dragging ? 'is-dragging' : ''}`}>
           <img
             ref={imgRef}
             src={frame.dataUrl}
@@ -322,31 +431,31 @@ export function SimulatorPanel({
             draggable={false}
             onPointerDown={(e) => {
               const img = e.currentTarget.getBoundingClientRect();
-              const box = e.currentTarget.parentElement!.getBoundingClientRect();
               const x = e.clientX - img.left;
               const y = e.clientY - img.top;
               // 捕获指针：手指滑出图片范围后仍能收到 move/up，
               // 否则滑到边缘就断掉，长距离滑动做不出来
               e.currentTarget.setPointerCapture(e.pointerId);
               gestureRef.current = { x, y, t: performance.now() };
-              setPointer({ x: e.clientX - box.left, y: e.clientY - box.top });
+              setDragging(true);
             }}
             onPointerMove={(e) => {
               const start = gestureRef.current;
-              if (!start) return;
+              const line = dragLineRef.current;
+              if (!start || !line) return;
               const img = e.currentTarget.getBoundingClientRect();
               const box = e.currentTarget.parentElement!.getBoundingClientRect();
-              setPointer({
-                x: e.clientX - box.left,
-                y: e.clientY - box.top,
-                from: { x: start.x + (img.left - box.left), y: start.y + (img.top - box.top) },
-              });
+              // 直接改 SVG 属性：这条路一秒几十次，走 React 会掉帧
+              line.setAttribute('x1', String(start.x + (img.left - box.left)));
+              line.setAttribute('y1', String(start.y + (img.top - box.top)));
+              line.setAttribute('x2', String(e.clientX - box.left));
+              line.setAttribute('y2', String(e.clientY - box.top));
             }}
             onPointerUp={(e) => {
               const start = gestureRef.current;
               if (!start) return;
               gestureRef.current = null;
-              setPointer(null);
+              setDragging(false);
               const img = e.currentTarget.getBoundingClientRect();
               finishGesture(start, { x: e.clientX - img.left, y: e.clientY - img.top });
             }}
@@ -354,15 +463,16 @@ export function SimulatorPanel({
               // 系统取消（来电、手势被接管）：不发出任何输入——
               // 用户没完成这次操作，替他补一次点击是错的
               gestureRef.current = null;
-              setPointer(null);
+              setDragging(false);
             }}
           />
 
           {/* 拖动中的轨迹线：给「我正在滑」一个即时反馈，
-              不必等 350ms 后的补帧 */}
-          {pointer?.from && (
+              不必等 350ms 后的补帧。
+              坐标由 pointermove 直接写 DOM（见 dragLineRef 的说明）。 */}
+          {dragging && (
             <svg className="sim-drag" aria-hidden="true">
-              <line x1={pointer.from.x} y1={pointer.from.y} x2={pointer.x} y2={pointer.y} />
+              <line ref={dragLineRef} x1="0" y1="0" x2="0" y2="0" />
             </svg>
           )}
 
@@ -389,6 +499,7 @@ export function SimulatorPanel({
         </div>
       )}
 
+      {notice && <p className="sim-notice">{notice}</p>}
       {error && <p className="sim-error">{error}</p>}
 
       {/* iOS 不可用时：在 Android 面板下方如实说明，而不是藏起来 */}

@@ -3065,6 +3065,9 @@ body {
 .workbench-body > .panel:has(.subagent-timeline) { overflow-y: auto; }
 .workbench-body > .terminal,
 .workbench-body > .file-tree { flex: 1; min-height: 0; }
+/* 模拟器同理：它需要尽可能高的画面区。
+   （.sim-panel 自身已声明 flex，这里显式列出便于与本组的其它场景对齐。） */
+.workbench-body > .sim-panel { flex: 1 1 auto; min-height: 0; }
 
 .workbench-foot {
   flex-shrink: 0; padding: 7px 2px 0;
@@ -3737,7 +3740,12 @@ body {
    手机框（参照在未装 Xcode 时给的正是那种报错面板，本机实测即此情形）。 */
 .sim-panel {
   display: flex; flex-direction: column;
-  height: 100%; min-height: 0;
+  /* **必须用 flex 而不是 height: 100%**：父级 `.workbench-body` 是
+     flex 列容器（带 gap），`height: 100%` 在 flex item 上按内容计算，
+     于是面板高度不含下方的提示行 → 画面区被 `overflow: hidden` 裁掉一截，
+     底部按钮（如「Accept & continue」那一带）看不全。
+     用 flex: 1 + min-height: 0 让高度由容器决定，不被内容反推。 */
+  flex: 1 1 auto; min-height: 0;
 }
 .sim-bar {
   display: flex; align-items: center; gap: 6px;
@@ -3763,13 +3771,23 @@ body {
 
 /* 画面区：图片按可用空间等比缩放（不裁切——裁切会让坐标换算失效） */
 .sim-screen {
-  flex: 1; min-height: 0; display: grid; place-items: center;
+  /* **用 flex 而不是 grid 居中**：`place-items: center` 会让图片成为
+     grid item，而 grid item 的 `max-height: 100%` 在轨道高度未显式定死时
+     不生效——实测图片取到 765px 而容器只有 624px，底部超出 152px 被
+     `overflow: hidden` 裁掉（表现为「Accept & continue」按钮看不全）。
+     flex 下 `max-height: 100%` 有确定的解析基准，图片一定装得进容器。 */
+  flex: 1; min-height: 0;
+  display: flex; align-items: center; justify-content: center;
   padding: 12px; overflow: hidden;
   /* 落点标记与拖动轨迹的定位基准 */
   position: relative;
 }
 .sim-screen img {
+  /* 同时给 max-width/max-height 与 object-fit：等比缩放装进容器，
+     两边都不越界（只用其中一个会让另一个方向的溢出逃过裁剪）。 */
   max-width: 100%; max-height: 100%;
+  width: auto; height: auto;
+  min-height: 0;
   object-fit: contain;
   border-radius: var(--r-sm);
   border: 1px solid var(--edge);
@@ -3831,6 +3849,15 @@ body {
 }
 .sim-empty-title { margin: 0; font-size: 12.5px; color: var(--t2); }
 .sim-empty-hint { margin: 0; font-size: 11px; line-height: 1.55; color: var(--t4); max-width: 300px; }
+/* 进行中的提示：中性色而不是警告色——一切正常，只是需要等。 */
+.sim-notice {
+  margin: 0; padding: 7px 11px;
+  font-size: 11px; line-height: 1.5;
+  color: var(--t3); background: rgba(255,255,255,0.04);
+  border-top: 1px solid var(--edge-soft);
+  /* 不收缩：提示被压扁就没法读了 */
+  flex-shrink: 0;
+}
 .sim-error {
   margin: 0; padding: 7px 11px;
   font-size: 11px; line-height: 1.5;
@@ -3838,6 +3865,7 @@ body {
   border-top: 1px solid rgba(251,191,36,0.25);
 }
 .sim-note {
+  flex-shrink: 0;
   margin: 0; padding: 6px 11px;
   font-size: 10.5px; line-height: 1.5; color: var(--t4);
   border-top: 1px solid var(--edge-soft);

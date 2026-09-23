@@ -163,6 +163,39 @@ describe('子代理面板要撑满右栏（覆盖规则必须写在被覆盖者�
   });
 });
 
+describe('模拟器画面必须装得进容器（防被裁掉）', () => {
+  it('.sim-screen 用 flex 居中，不用 grid', () => {
+    // 这个断言防的是实测踩到的坑：`display: grid; place-items: center`
+    // 让图片成为 grid item，而 grid item 的 `max-height: 100%` 在轨道高度
+    // 未显式定死时不生效——实测图片 765px、容器 624px，底部超出 152px
+    // 被 overflow: hidden 裁掉，表现为底部按钮看不全。
+    const block = rule('.sim-screen {');
+    expect(block, '必须用 flex 居中').toContain('display: flex');
+    expect(block, '不该用 grid（max-height 百分比会失效）').not.toContain('display: grid');
+    expect(block, '需要有确定的高度基准').toContain('flex: 1');
+  });
+
+  it('图片同时声明两个方向的约束', () => {
+    const block = rule('.sim-screen img');
+    // 只给一个方向会让另一个方向的溢出逃过裁剪
+    expect(block).toContain('max-width: 100%');
+    expect(block).toContain('max-height: 100%');
+    expect(block).toContain('object-fit: contain');
+  });
+
+  it('模拟器面板用 flex 而不是 height:100%（高度链才能贯通）', () => {
+    const block = rule('.sim-panel {');
+    // height:100% 在 flex item 上按内容算，面板高度不含下方提示行
+    expect(block).toContain('flex: 1 1 auto');
+    expect(block, '不该用 height: 100%').not.toContain('height: 100%');
+  });
+
+  it('底部提示不参与收缩（压扁就读不了）', () => {
+    expect(rule('.sim-notice {')).toContain('flex-shrink: 0');
+    expect(rule('.sim-note {')).toContain('flex-shrink: 0');
+  });
+});
+
 describe('评论组件确实接入了 DiffViewer', () => {
   it('行工具含评论入口与（可选的）跳行入口', () => {
     expect(viewerSrc).toContain('对此行添加评论');

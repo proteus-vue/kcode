@@ -582,7 +582,14 @@ export interface SimulatorStatus {
 
 /** 一帧画面及其设备尺寸（用于坐标换算）。 */
 export interface SimulatorFrame {
-  dataUrl: string;
+  /**
+   * data URL。**null 表示内容与上一帧逐字节相同**。
+   *
+   * 服务端比对 PNG 字节，未变时只回尺寸——前端据此**跳过 setState**，
+   * 省掉一次 780KB 传输 + 250 万像素解码 + 重绘。模拟器画面大多数时候
+   * 是静止的，不去重会让轮询与用户的触摸操作抢主线程，表现为卡顿。
+   */
+  dataUrl: string | null;
   width: number;
   height: number;
 }

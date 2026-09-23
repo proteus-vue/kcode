@@ -811,21 +811,34 @@ async fn simulator_start(avd: String) -> Result<(), CommandError> {
 /// 关闭一个运行中的模拟器。
 #[tauri::command]
 async fn simulator_stop(serial: String) -> Result<(), CommandError> {
-    simulator::stop(&serial).await.map_err(CommandError::from)
+    let out = simulator::stop(&serial).await.map_err(CommandError::from);
+    // 无论停止成功与否都清掉帧缓存：缓存留着会让「重新启动同一台设备后
+    // 首帧被判为未变」而面板空白
+    simulator::forget_frame(&serial);
+    out
 }
 
 /// 取一帧模拟器画面（data URL + 设备尺寸）。
 #[tauri::command]
-async fn simulator_frame(serial: String) -> Result<SimulatorFrame, CommandError> {
-    let (data_url, width, height) = simulator::frame(&serial).await.map_err(CommandError::from)?;
-    Ok(SimulatorFrame { data_url, width, height })
+async fn simulator_frame(
+    serial: String,
+    // `force`：前端手上没有帧时传 true（首次选中、切换设备、重启后）——
+    // 否则服务端可能判定「与上一帧相同」而不下发，面板会空着。
+    force: Option<bool>,
+) -> Result<SimulatorFrame, CommandError> {
+    let cap = simulator::frame(&serial, force.unwrap_or(false))
+        .await
+        .map_err(CommandError::from)?;
+    Ok(SimulatorFrame { data_url: cap.data_url, width: cap.width, height: cap.height })
 }
 
 /// 一帧画面及其设备尺寸（前端据此换算点击坐标）。
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SimulatorFrame {
-    data_url: String,
+    /// data URL。**null 表示内容与上一帧相同**，前端应保持现有画面不动
+    /// （跳过 setState，省掉一次 780KB 传输 + 250 万像素解码 + 重绘）。
+    data_url: Option<String>,
     width: u32,
     height: u32,
 }
