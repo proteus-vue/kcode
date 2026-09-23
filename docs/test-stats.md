@@ -10,11 +10,11 @@
 | 类别 | 数量 | 失败 | 状态 |
 |---|---|---|---|
 | Rust（`cargo test -p <crate>`，四个 crate） | 281 | 0 | ✅ 全部通过 |
-| 前端（`vitest run`） | 409 | 0 | ✅ 全部通过 |
+| 前端（`vitest run`） | 422 | 0 | ✅ 全部通过 |
 | 协议契约（真实 codex 二进制端到端） | 56 | 0 | ✅ 全部通过 |
 
 Rust 按 crate 分布：kcode-bridge 75 / kcode-domain 113 / kcode-app 50 / kcode-desktop 43。
-前端覆盖 30 个测试文件；Rust 另有 1 项被显式忽略（`#[ignore]` 或文档测试，不计入通过数）。
+前端覆盖 31 个测试文件；Rust 另有 1 项被显式忽略（`#[ignore]` 或文档测试，不计入通过数）。
 
 ## Rust 明细
 

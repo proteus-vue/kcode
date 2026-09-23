@@ -966,8 +966,13 @@ body {
   padding: 4px 14px; background: rgba(106,165,255,0.07);
   color: var(--accent); font-size: 11px;
 }
-.hunk-lines { margin: 0; white-space: pre; overflow-x: auto; font-size: 11px; }
-.diff-line { display: flex; line-height: 1.55; }
+/* 横滚的归属很关键：`.hunk-lines` 是**整块 hunk 的容器**，而评论编辑器
+   也嵌在其中（每行下方）。若横滚留在这一层，长行会带着评论一起横移——
+   「保存」按钮被推出可视区，用户会以为评论存不下来。
+   所以横滚下沉到单行（`.diff-line`），评论作为行的兄弟节点不受其影响。
+   这一条由 __tests__/reviewStyles.test.ts 断言。 */
+.hunk-lines { margin: 0; font-size: 11px; }
+.diff-line { display: flex; line-height: 1.55; overflow-x: auto; white-space: pre; }
 .line-no {
   width: 38px; flex-shrink: 0; text-align: right; padding-right: 8px;
   color: var(--t4); user-select: none;
@@ -1002,8 +1007,14 @@ body {
   border: none; background: transparent; color: var(--t4);
   border-radius: var(--r-xs); cursor: pointer;
 }
-.line-tool:hover { color: var(--t2); background: rgba(255,255,255,0.07); }
+/* 悬停态压过「已评论」标记是刻意避免的：`.line-tool:hover` 的特异性 (0,2,1)
+   高于 `.line-tool.is-active` (0,2,0)，直接写会让鼠标划过时强调色丢失——
+   而用户正是想点它，恰在那一刻看不出这行有评论。
+   这条与权限选择器「危险档被通用 hover 压过」是同一类坑，见
+   __tests__/reviewStyles.test.ts 的特异性断言。 */
+.line-tool:hover:not(.is-active) { color: var(--t2); background: rgba(255,255,255,0.07); }
 .line-tool.is-active { color: var(--accent); }
+.line-tool.is-active:hover { background: var(--accent-dim); }
 
 .comment-chip {
   display: inline-flex; align-items: center; gap: 3px;
