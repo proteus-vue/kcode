@@ -206,6 +206,24 @@ approvalPolicy: anyOf, approvalsReviewer: anyOf, baseInstructions: string|null, 
 对真 app-server 验证：形状不对时该轮根本起不来，所以「轮次能完成」就是
 形状正确的证据。
 
+### ⚠️ `thread/revert` 只改会话历史，**不还原本地文件**
+
+名字的直觉是「还原代码」，实际不是。锁定版本的 schema 自己写明：
+
+```
+ThreadRevertParams.beforeTurnId:
+  "Turn excluded from the replacement history, together with every later turn."
+  "This only changes persisted conversation history. It does not revert local file changes."
+```
+
+已废弃的 `thread/rollback` 说得更直白：`"...Clients are responsible for
+reverting these changes."`
+
+**所以逐文件撤销必须客户端自己做**（我们走 git：`kcode-bridge/src/git.rs::revert_file`，
+已暂存先撤出暂存区、已跟踪恢复自索引、未跟踪则删除）。若照方法名直接调用，
+用户点「撤销」会拿到**成功响应而文件一字未变**——接口成功、状态未变的
+静默缺陷。详见 `docs/协议勘误与修正.md` §3.24。
+
 ### `thread/compact/start` 参数形状
 
 `{"threadId": string}`，仅此一项。服务端接受后压缩结果经 `thread/compacted`
@@ -421,3 +439,4 @@ approvalPolicy: anyOf, approvalsReviewer: anyOf, baseInstructions: string|null, 
    否则界面会多出一个叫 "List" 的假设备。
 3. `offline` / `unauthorized` 的设备上执行 `screencap` 会**一直阻塞**而不是失败，
    所以：只选 `state == "device"` 的设备，且所有命令都设 3 秒超时。
+

@@ -498,7 +498,7 @@ mod tests {
     fn pick_device_requires_state_device() {
         // offline / unauthorized 上执行 screencap 会卡到超时：必须跳过
         let offline = AdbDevice { serial: "a".into(), state: "offline".into(), model: None };
-        assert!(pick_device(&[offline.clone()]).is_none());
+        assert!(pick_device(std::slice::from_ref(&offline)).is_none());
 
         let ok = AdbDevice { serial: "b".into(), state: "device".into(), model: None };
         assert_eq!(pick_device(&[offline, ok.clone()]).map(|d| d.serial.clone()), Some("b".into()));

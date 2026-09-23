@@ -49,6 +49,7 @@ const ALL: IconName[] = [
   'more',
   'arrow-left',
   'arrow-right',
+  'undo',
 ];
 
 /** 一个图标的形状元素（不含最外层 svg）。 */

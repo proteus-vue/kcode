@@ -96,6 +96,8 @@ export function Composer({
   configuredModel,
   pendingInput,
   onConsumePending,
+  pendingText,
+  onConsumePendingText,
   onSearchFiles,
   onCompact,
 }: {
@@ -128,6 +130,14 @@ export function Composer({
   pendingInput: WebElementAttachment | null;
   /** 消费完通知外部清空，避免重复追加。 */
   onConsumePending: () => void;
+  /**
+   * 外部要追加到输入框的文本（行内评论的序列化结果）。
+   *
+   * 与 `pendingInput` 相同的一次性「待办」模式：Composer 的文本是它
+   * 自己的 state，外部改不了；而这个通道让审阅面板能把评论推进来。
+   */
+  pendingText?: string | null;
+  onConsumePendingText?: () => void;
   /** `@` 引用：按查询词模糊搜索工作区文件。 */
   onSearchFiles?: (query: string) => Promise<FileMatch[]>;
   /** `/compact`：请求压缩当前线程上下文。 */
@@ -179,6 +189,27 @@ export function Composer({
     setAttachments((prev) => [...prev, pendingInput]);
     onConsumePending();
   }, [pendingInput, onConsumePending]);
+
+  /**
+   * 消费外部推来的文本（行内评论）。
+   *
+   * 追加而不是覆盖：用户可能已经打了一半的话，评论是补充材料。
+   * 追加后把光标移到末尾并聚焦——用户的下一步通常是补一句「按这个改」，
+   * 光标停在中间会让他先按一次 End。
+   */
+  useEffect(() => {
+    if (!pendingText) return;
+    setText((prev) => (prev.trim() === '' ? pendingText : `${prev}\n\n${pendingText}`));
+    onConsumePendingText?.();
+    // 等 React 把这批更新刷进 DOM 之后再定光标，否则拿到的是旧值长度
+    requestAnimationFrame(() => {
+      const el = taRef.current;
+      if (!el) return;
+      el.focus();
+      const end = el.value.length;
+      el.setSelectionRange(end, end);
+    });
+  }, [pendingText, onConsumePendingText]);
 
   /**
    * `@` 引用：文本或光标变化时重算查询词并拉取候选。

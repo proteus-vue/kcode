@@ -37,6 +37,12 @@ import { useAutoScroll } from './hooks/useAutoScroll';
 import { matchPanelShortcut, matchFocusComposerShortcut } from './hooks/panelShortcut';
 import { onColumnBandDoubleClick, onTitlebarDoubleClick } from './hooks/titlebarZoom';
 import { reviewDataFor, threadTitle } from './stores/store';
+import {
+  removeCommentsForPath,
+  serializeComments,
+  summarize,
+  type ReviewComment,
+} from './components/reviewComments';
 import { Icon } from './components/Icon';
 
 /** 取 URL 的主机名用于标签文字；解析失败就退回原串。 */
@@ -285,6 +291,56 @@ export default function App() {
         : { changeSet: null, turnDiff: null },
     [state, thread, latestTurnId],
   );
+
+  /**
+   * 行内评论（受控在这里而不是 DiffViewer 内）。
+   *
+   * 必须提升：切场景或切线程时 DiffViewer 会卸载，状态留在组件里就丢了。
+   * 而评论是「要发给模型的素材」——丢了不会报错，只会让用户白写一遍。
+   */
+  const [comments, setComments] = useState<ReviewComment[]>([]);
+
+  /**
+   * 撤销确认。
+   *
+   * 撤销是**破坏性**的：Agent 新建的未跟踪文件会被删除，git 找不回来。
+   * 所以按下之后先问，并把「会发生什么」写清楚（后端返回的 action
+   * 也据此展示，而不是笼统地说「已撤销」）。
+   */
+  const [revertTarget, setRevertTarget] = useState<string | null>(null);
+  const [revertError, setRevertError] = useState<string | null>(null);
+  const [revertBusy, setRevertBusy] = useState(false);
+
+  const doRevert = useCallback(
+    async (path: string) => {
+      setRevertBusy(true);
+      setRevertError(null);
+      try {
+        await invoke('revert_file', { path });
+        // 撤销后该文件的改动已不存在，针对它的评论也失去了锚点
+        setComments((prev) => removeCommentsForPath(prev, path));
+        await api.refreshGit();
+        setRevertTarget(null);
+      } catch (e) {
+        setRevertError(extractErrorMessage(e));
+      } finally {
+        setRevertBusy(false);
+      }
+    },
+    [api],
+  );
+
+  /**
+   * 把评论送进输入框。
+   *
+   * 走「序列化成文本」而不是新增一种附件类型：模型只认它收到的文字，
+   * 而评论必须包含文件、行号、原文与意图（见 reviewComments 的说明）。
+   */
+  const sendComments = useCallback(() => {
+    const text = serializeComments(comments);
+    if (!text) return;
+    api.appendComposerText(text);
+  }, [api, comments]);
 
   /**
    * 场景可用性。
@@ -569,6 +625,8 @@ export default function App() {
           configuredModel={api.settings?.model ?? null}
           pendingInput={api.pendingInput}
           onConsumePending={api.clearPendingInput}
+          pendingText={api.pendingText}
+          onConsumePendingText={api.clearPendingText}
           onSearchFiles={api.searchFiles}
           onCompact={() => void api.compactThread()}
         />
@@ -622,7 +680,77 @@ export default function App() {
                         void api.decideFile(latestTurnId!, f.path, decision);
                       }
                     }}
+                    comments={comments}
+                    onCommentsChange={setComments}
+                    onOpenInEditor={(path, line) => {
+                      void invoke<string>('open_in_editor', { path, line: line ?? null }).catch(
+                        (e) => api.reportError(extractErrorMessage(e)),
+                      );
+                    }}
+                    onRevertFile={(path) => {
+                      setRevertError(null);
+                      setRevertTarget(path);
+                    }}
                   />
+
+                  {/* 评论工具栏：只在有内容时出现（空工具栏是噪音）。
+                      数量与文件数都显示——用户需要知道这段文字会覆盖几个文件。 */}
+                  {comments.length > 0 && (
+                    <div className="comment-bar">
+                      <span className="comment-bar-count">
+                        <Icon name="chat" size={11} />
+                        {summarize(comments).count} 条评论 · {summarize(comments).files} 个文件
+                      </span>
+                      <button
+                        className="btn btn-mini"
+                        onClick={sendComments}
+                        title="把评论序列化成一段文字追加到输入框"
+                      >
+                        加入输入框
+                      </button>
+                      <button
+                        className="btn btn-mini btn-ghost"
+                        onClick={() => setComments([])}
+                        title="清空全部评论"
+                      >
+                        清空
+                      </button>
+                    </div>
+                  )}
+
+                  {/* 撤销确认：必须写清会发生什么。未跟踪文件的撤销是删除，
+                      git 无法找回——笼统地问「确定吗」不足以让人做判断。 */}
+                  {revertTarget && (
+                    <div className="revert-confirm">
+                      <p className="revert-confirm-text">
+                        撤销 <code>{revertTarget.split('/').pop()}</code> 的改动？
+                      </p>
+                      <p className="revert-confirm-note">
+                        已跟踪文件会恢复到上一次提交的内容；
+                        若它是本次新建的（未跟踪），则该文件会被<strong>删除</strong>，
+                        git 无法找回。
+                      </p>
+                      {revertError && <p className="git-error">{revertError}</p>}
+                      <div className="revert-confirm-actions">
+                        <button
+                          className="btn btn-mini btn-danger"
+                          disabled={revertBusy}
+                          onClick={() => void doRevert(revertTarget)}
+                        >
+                          {revertBusy ? '撤销中…' : '确认撤销'}
+                        </button>
+                        <button
+                          className="btn btn-mini btn-ghost"
+                          onClick={() => {
+                            setRevertTarget(null);
+                            setRevertError(null);
+                          }}
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <p className="panel-empty">本轮没有文件改动。</p>

@@ -577,6 +577,59 @@ async fn git_remote(state: State<'_, AppState>) -> Result<Option<String>, Comman
     .unwrap_or(None))
 }
 
+/// 撤销单个文件的未提交改动。
+///
+/// **破坏性操作**：未跟踪文件（Agent 新建的）会被删除，git 找不回来。
+/// 因此 UI 必须先确认；本命令只负责执行，不做二次询问。
+///
+/// 为什么不用协议的 `thread/revert`：实测其 schema 明确写着只替换
+/// **会话历史**、不动本地文件（"Clients are responsible for reverting
+/// these changes"）。见 `kcode_bridge::git::revert_file` 的说明。
+#[tauri::command]
+async fn revert_file(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<kcode_bridge::FileRevert, CommandError> {
+    let workspace = state.paths.workspace.clone();
+    // 路径先过工作区边界校验（与读文件同一道防线），再交给 git。
+    // git 那边还会再挡一次绝对路径与 `..`——两层都要：这一层挡的是
+    // 「访问到工作区外」，那一层挡的是「git 自己解析到工作区外」。
+    let (_, rel) = fileaccess::resolve_in_workspace_allow_missing(&workspace, &path)
+        .map_err(CommandError::from)?;
+    tauri::async_runtime::spawn_blocking(move || kcode_bridge::git::revert_file(&workspace, &rel))
+        .await
+        .map_err(|e| CommandError::from(format!("撤销失败: {e}")))?
+        .map_err(CommandError::from)
+}
+
+/// 探测本机可用的外部编辑器。
+///
+/// UI 用它决定「打开方式」按钮写什么、能不能承诺跳到行——
+/// 探测结果与用户预期不符时（本机装了多个编辑器）必须能看见。
+#[tauri::command]
+async fn editor_info() -> Result<kcode_bridge::EditorInfo, CommandError> {
+    Ok(kcode_bridge::editor::info())
+}
+
+/// 在外部编辑器里打开文件，可选跳到指定行。
+///
+/// 文件不存在时报错而不是静默失败：审阅面板里的路径可能尚未落盘
+/// （`proposed` 变更），用户需要知道「现在还没有这个文件」。
+#[tauri::command]
+async fn open_in_editor(
+    state: State<'_, AppState>,
+    path: String,
+    line: Option<u32>,
+) -> Result<String, CommandError> {
+    let workspace = state.paths.workspace.clone();
+    let (resolved, _) = fileaccess::resolve_in_workspace_allow_missing(&workspace, &path)
+        .map_err(CommandError::from)?;
+    tauri::async_runtime::spawn_blocking(move || kcode_bridge::editor::open(&resolved, line))
+        .await
+        .map_err(|e| CommandError::from(format!("打开编辑器失败: {e}")))?
+        .map_err(CommandError::from)
+}
+
 /// 枚举历史线程。
 ///
 /// **前端启动时必须调用它**，否则重启后侧栏会是空的——进程内状态会丢，
@@ -1079,6 +1132,9 @@ pub fn run() {
             git_commit,
             git_push,
             git_remote,
+            revert_file,
+            editor_info,
+            open_in_editor,
         ])
         .run(tauri::generate_context!())
         .expect("启动 KCode 失败");

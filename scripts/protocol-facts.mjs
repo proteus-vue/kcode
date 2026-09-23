@@ -237,6 +237,79 @@ for (const n of ['ThreadStartResponse', 'TurnStartResponse', 'ThreadResumeRespon
 }
 w();
 
+// ── 以下为实测补充，schema 读不出来 ───────────────────────────────────
+//
+// **必须写在生成器里**，不能只改 docs/protocol-facts.md：CI 会重跑本脚本
+// 并比对生成结果，只改产物的话下一次生成就把这些段整段删掉（这个坑真的
+// 踩过一次——四个章节被生成器静默删除，CI 判为「文档与 schema 不一致」）。
+
+w(`### ⚠️ \`fuzzyFileSearch\` 用 snake_case（与其余方法不同）`);
+w();
+w(`实测报文（codex ${version}；由 \`crates/kcode-app/tests/e2e.rs\` 的`);
+w(`\`fuzzy_search_returns_matches_in_files_key\` 复现）：`);
+w();
+w('```json');
+w(`{"files":[{"file_name":"probe.txt","indices":[12,13],`);
+w(`           "match_type":"file","path":"probe.txt","root":"/tmp/xxx","score":200}]}`);
+w('```');
+w();
+w(`- **命中列表在 \`files\` 键下**（不是 \`data\`，也不是数组直出）。`);
+w(`- **字段是 snake_case**：\`file_name\` / \`match_type\`。协议里绝大多数方法是`);
+w(`  camelCase，这里不是——读成 \`fileName\` 不报错，只会让文件名**静默变成空串**。`);
+w(`- 该方法的响应**没有**独立 definitions 条目（\`ClientRequest.oneOf\` 只给了请求侧），`);
+w(`  冻结 schema 里只有一个会话式通知 \`FuzzyFileSearchSessionUpdatedNotification\``);
+w(`  （带 \`sessionId\`）。因此形态**只能实测**，推不出来。`);
+w(`- 参数：\`{"query": string, "roots": [string]}\`，两者皆必填。`);
+w();
+w(`### ⚠️ 图片输入的形态：只有路径/URL，没有内嵌字节`);
+w();
+w(`\`turn/start\` 的 \`input\` 数组元素（\`UserInput\`）实测有 7 种：`);
+w();
+w(`| type | 载荷 | 用途 |`);
+w(`|---|---|---|`);
+w(`| \`text\` | \`text\`, \`text_elements[]\` | 正文 |`);
+w(`| \`image\` | \`url\`, \`detail\` | 网络图片 |`);
+w(`| \`localImage\` | \`path\`, \`detail\` | **本地图片（我们用的）** |`);
+w(`| \`audio\` / \`localAudio\` | \`url\` / \`path\` | 音频 |`);
+w(`| \`skill\` | \`name\`, \`path\` | 技能引用 |`);
+w(`| \`mention\` | \`name\`, \`path\` | 文件引用 |`);
+w();
+w(`**关键**：图片**没有内嵌 base64 的形式**。因此：`);
+w();
+w(`- 拖入的文件（Tauri 拖放事件直接给出绝对路径）→ 直接传路径，不必落盘；`);
+w(`- 剪贴板粘贴的图片（只有字节、没有路径）→ **必须先写到磁盘**再传路径`);
+w(`  （实现见 \`crates/kcode-desktop\` 的 \`save_attachment\`，目录固定在自己`);
+w(`  app_data 下，不接受调用方指定，避免路径注入面）。`);
+w();
+w(`由 \`crates/kcode-app/tests/e2e.rs::turn_accepts_local_image_attachment\``);
+w(`对真 app-server 验证：形状不对时该轮根本起不来，所以「轮次能完成」就是`);
+w(`形状正确的证据。`);
+w();
+w(`### ⚠️ \`thread/revert\` 只改会话历史，**不还原本地文件**`);
+w();
+w(`名字的直觉是「还原代码」，实际不是。锁定版本的 schema 自己写明：`);
+w();
+w('```');
+w(`ThreadRevertParams.beforeTurnId:`);
+w(`  "Turn excluded from the replacement history, together with every later turn."`);
+w(`  "This only changes persisted conversation history. It does not revert local file changes."`);
+w('```');
+w();
+w(`已废弃的 \`thread/rollback\` 说得更直白：\`"...Clients are responsible for`);
+w(`reverting these changes."\``);
+w();
+w(`**所以逐文件撤销必须客户端自己做**（我们走 git：\`kcode-bridge/src/git.rs::revert_file\`，`);
+w(`已暂存先撤出暂存区、已跟踪恢复自索引、未跟踪则删除）。若照方法名直接调用，`);
+w(`用户点「撤销」会拿到**成功响应而文件一字未变**——接口成功、状态未变的`);
+w(`静默缺陷。详见 \`docs/协议勘误与修正.md\` §3.24。`);
+w();
+w(`### \`thread/compact/start\` 参数形状`);
+w();
+w(`\`{"threadId": string}\`，仅此一项。服务端接受后压缩结果经 \`thread/compacted\``);
+w(`通知回传（该通知已被协议标记 deprecated，改由 \`contextCompaction\` item 承载`);
+w(`——我们两条路径都接）。`);
+w();
+
 w(`## 客户端方法全集（${clientMethods.length}）`);
 w();
 for (const m of clientMethods) w(`- \`${m}\``);
@@ -245,6 +318,28 @@ w();
 w(`## 服务端通知全集（${serverNotifs.length}）`);
 w();
 for (const m of serverNotifs) w(`- \`${m}\``);
+w();
+
+// 非协议能力（本机工具链）。同样必须留在生成器里，理由见上方说明。
+w(`## 模拟器（非协议能力，本机工具链）`);
+w();
+w(`模拟器展示不经过 codex 协议，直接调用本机工具。实测（macOS 26.5，本机）：`);
+w();
+w(`| 平台 | 工具 | 状态 |`);
+w(`|---|---|---|`);
+w(`| Android | \`$ANDROID_HOME/emulator/emulator\` + \`platform-tools/adb\` | **可用**：2 个 AVD；\`adb -s <serial> exec-out screencap -p\` 输出 1080×2340 PNG，单帧约 350ms |`);
+w(`| iOS | \`xcrun simctl\` | **不可用**：只有 CommandLineTools，没有完整 Xcode（\`simctl\` 不存在） |`);
+w();
+w(`### 两条踩到的命令细节`);
+w();
+w(`1. **输入必须经 \`shell\` 转发**：\`adb -s X input tap 100 200\` 会被 adb 当成自己的`);
+w(`   子命令，报 \`adb: unknown command input\`。正确形式是`);
+w(`   \`adb -s X shell input tap 100 200\`。截图用 \`exec-out\` 没问题（那是 adb 自己的子命令）。`);
+w(`   这个错误在纯单元测试里发现不了，由真机测试抓到。`);
+w(`2. **\`adb devices\` 第一行是表头**（\`List of devices attached\`），必须跳过，`);
+w(`   否则界面会多出一个叫 "List" 的假设备。`);
+w(`3. \`offline\` / \`unauthorized\` 的设备上执行 \`screencap\` 会**一直阻塞**而不是失败，`);
+w(`   所以：只选 \`state == "device"\` 的设备，且所有命令都设 3 秒超时。`);
 w();
 
 writeFileSync(join(ROOT, 'docs', 'protocol-facts.md'), lines.join('\n') + '\n');

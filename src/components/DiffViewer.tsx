@@ -21,7 +21,7 @@
 
 import { useMemo, useState } from 'react';
 import { Icon } from './Icon';
-import type { ChangeSet, FileChangeEntry, ParsedDiff } from '../types/domain';
+import type { ChangeSet, DiffLine, FileChangeEntry, ParsedDiff } from '../types/domain';
 import {
   changeKindClass,
   changeKindLabel,
@@ -37,6 +37,17 @@ import {
   totalsForChangeSet,
 } from '../stores/store';
 import { parseUnifiedDiff as parseForRender, stripMoveTrailer } from '../stores/store';
+import {
+  anchorOf,
+  commentKey,
+  countForPath,
+  intentLabel,
+  makeComment,
+  removeComment,
+  upsertComment,
+  type CommentIntent,
+  type ReviewComment,
+} from './reviewComments';
 
 interface Props {
   changeSet: ChangeSet | null;
@@ -46,6 +57,13 @@ interface Props {
   onDecideAll?: (decision: 'accepted' | 'rejected') => void;
   /** 点击文件路径时在右栏打开详情。 */
   onOpenFile?: (path: string) => void;
+  /** 用外部编辑器打开（可选跳到行）。不传则不显示入口。 */
+  onOpenInEditor?: (path: string, line?: number) => void;
+  /** 撤销该文件的未提交改动。不传则不显示入口。 */
+  onRevertFile?: (path: string) => void;
+  /** 行内评论的当前集合（受控）。 */
+  comments?: ReviewComment[];
+  onCommentsChange?: (next: ReviewComment[]) => void;
 }
 
 export function DiffViewer({
@@ -55,6 +73,10 @@ export function DiffViewer({
   onDecideFile,
   onDecideAll,
   onOpenFile,
+  onOpenInEditor,
+  onRevertFile,
+  comments = [],
+  onCommentsChange,
 }: Props) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [splitMode, setSplitMode] = useState(false);
@@ -123,6 +145,10 @@ export function DiffViewer({
               onDecide={onDecideFile}
               splitMode={splitMode}
               onOpenFile={onOpenFile}
+              onOpenInEditor={onOpenInEditor}
+              onRevertFile={onRevertFile}
+              comments={comments}
+              onCommentsChange={onCommentsChange}
             />
           ))}
         </section>
@@ -140,6 +166,10 @@ function FileRow({
   onDecide,
   splitMode,
   onOpenFile,
+  onOpenInEditor,
+  onRevertFile,
+  comments,
+  onCommentsChange,
 }: {
   entry: FileChangeEntry;
   workspace?: string | null;
@@ -149,10 +179,16 @@ function FileRow({
   onDecide?: (path: string, decision: 'accepted' | 'rejected') => void;
   splitMode: boolean;
   onOpenFile?: (path: string) => void;
+  onOpenInEditor?: (path: string, line?: number) => void;
+  onRevertFile?: (path: string) => void;
+  comments: ReviewComment[];
+  onCommentsChange?: (next: ReviewComment[]) => void;
 }) {
   const stats = fileStats(entry);
   const to = movedTo(entry);
   const display = relativePath(entry.path, workspace);
+  const commentCount = countForPath(comments, entry.path);
+  const canComment = Boolean(onCommentsChange);
 
   return (
     <div className={`diff-file decision-${decision}`}>
@@ -195,12 +231,43 @@ function FileRow({
             删除
           </span>
         )}
+        {commentCount > 0 && (
+          <span className="comment-chip" title={`${commentCount} 条行内评论`}>
+            <Icon name="chat" size={10} />
+            {commentCount}
+          </span>
+        )}
         <span className="file-stats">
           {stats.added > 0 && <span className="stat-added">+{stats.added}</span>}
           {stats.removed > 0 && <span className="stat-removed">−{stats.removed}</span>}
           {stats.added === 0 && stats.removed === 0 && (
             // 零行改动通常是重命名或空文件——显式说明，避免看起来像 bug
             <span className="stat-empty">{entry.kind.type === 'update' && to ? '仅重命名' : '无行变更'}</span>
+          )}
+        </span>
+        {/* 编辑与撤销放在决策按钮**之前**：这两个是「去动这个文件」，
+            与「接受/拒绝这份变更」是不同层面的动作。混在一起点击时
+            容易误触（尤其撤销是破坏性的）。 */}
+        <span className="file-actions" onClick={(e) => e.stopPropagation()}>
+          {onOpenInEditor && (
+            <button
+              className="btn-icon"
+              title={`用编辑器打开 ${entry.path}`}
+              aria-label="用编辑器打开"
+              onClick={() => onOpenInEditor(entry.path)}
+            >
+              <Icon name="edit" size={11} />
+            </button>
+          )}
+          {onRevertFile && (
+            <button
+              className="btn-icon btn-icon-danger"
+              title={`撤销 ${entry.path} 的改动`}
+              aria-label="撤销此文件的改动"
+              onClick={() => onRevertFile(entry.path)}
+            >
+              <Icon name="undo" size={11} />
+            </button>
           )}
         </span>
         {onDecide && (
@@ -233,7 +300,15 @@ function FileRow({
             <pre className="diff-content full-del">{prefixLines(entry.diff, '-', stats.removed)}</pre>
           )}
           {entry.kind.type === 'update' && (
-            <HunkView diff={entry.diff} splitMode={splitMode} />
+            <HunkView
+              diff={entry.diff}
+              splitMode={splitMode}
+              path={entry.path}
+              canComment={canComment}
+              comments={comments}
+              onCommentsChange={onCommentsChange}
+              onOpenInEditor={onOpenInEditor}
+            />
           )}
         </div>
       )}
@@ -242,16 +317,65 @@ function FileRow({
 }
 
 /** hunk 文本渲染（update 类型）。 */
-function HunkView({ diff, splitMode }: { diff: string; splitMode: boolean }) {
+function HunkView({
+  diff,
+  splitMode,
+  path,
+  canComment,
+  comments,
+  onCommentsChange,
+  onOpenInEditor,
+}: {
+  diff: string;
+  splitMode: boolean;
+  path: string;
+  canComment: boolean;
+  comments: ReviewComment[];
+  onCommentsChange?: (next: ReviewComment[]) => void;
+  onOpenInEditor?: (path: string, line?: number) => void;
+}) {
   const parsed = useMemo(() => {
     // 重命名的 diff 尾部带 `Moved to:` 标记，不是 diff 内容；
     // 不剥掉会产生噪声警告并污染行号。
     return parseForRender(stripMoveTrailer(diff));
   }, [diff]);
 
+  /** 正在编辑评论的行键。同一时刻只开一个编辑器——多开会让「发给模型的
+      文字」在视觉上与行的对应关系变模糊。 */
+  const [editing, setEditing] = useState<string | null>(null);
+
   if (parsed.hunks.length === 0) {
     return <p className="diff-empty">（无 hunk 内容）</p>;
   }
+
+  const findComment = (key: string) => comments.find((c) => c.id === key);
+
+  const commit = (line: DiffLine, intent: CommentIntent, text: string) => {
+    if (!onCommentsChange) return;
+    const a = anchorOf(line);
+    if (!a) return;
+    if (text.trim() === '') {
+      // 清空内容 = 删除这条评论，而不是留一条空的（它会被序列化层过滤掉，
+      // 但界面上仍显示角标会让人以为还有内容）
+      onCommentsChange(removeComment(comments, commentKey(path, a.side, a.line)));
+      setEditing(null);
+      return;
+    }
+    onCommentsChange(
+      upsertComment(
+        comments,
+        makeComment({
+          path,
+          side: a.side,
+          line: a.line,
+          intent,
+          text,
+          anchor: line.text,
+        }),
+      ),
+    );
+    setEditing(null);
+  };
 
   return (
     <div className="hunks">
@@ -262,20 +386,72 @@ function HunkView({ diff, splitMode }: { diff: string; splitMode: boolean }) {
         <div key={i} className="hunk">
           <div className="hunk-header">{h.header}</div>
           {splitMode ? (
-            <SplitHunk lines={h.lines} />
+            <SplitHunk
+              lines={h.lines}
+              path={path}
+              canComment={canComment}
+              comments={comments}
+              onCommentsChange={onCommentsChange}
+              onOpenInEditor={onOpenInEditor}
+            />
           ) : (
-            <pre className="hunk-lines">
+            <div className="hunk-lines">
               {h.lines.map((l, j) => (
-                <div key={j} className={`diff-line line-${l.kind}`}>
-                  <span className="line-no">{l.oldLine ?? ''}</span>
-                  <span className="line-no">{l.newLine ?? ''}</span>
-                  <span className="line-sign">
-                    {l.kind === 'added' ? '+' : l.kind === 'removed' ? '-' : ' '}
-                  </span>
-                  <span className="line-text">{l.text}</span>
+                <div key={j} className="diff-line-row">
+                  <div className={`diff-line line-${l.kind}`}>
+                    <span className="line-no">{l.oldLine ?? ''}</span>
+                    <span className="line-no">{l.newLine ?? ''}</span>
+                    <span className="line-sign">
+                      {l.kind === 'added' ? '+' : l.kind === 'removed' ? '-' : ' '}
+                    </span>
+                    <span className="line-text">{l.text}</span>
+                    {/* 行交互：评论与跳行。都放在行尾，避免遮挡代码首字符 */}
+                    <span className="line-tools">
+                      {onOpenInEditor && l.newLine !== null && (
+                        <button
+                          className="line-tool"
+                          title={`在编辑器中打开第 ${l.newLine} 行`}
+                          aria-label="在编辑器中打开此行"
+                          onClick={() => onOpenInEditor(path, l.newLine ?? undefined)}
+                        >
+                          <Icon name="edit" size={10} />
+                        </button>
+                      )}
+                      {canComment && (
+                        <button
+                          className={`line-tool ${findComment(keyOf(l, path)) ? 'is-active' : ''}`}
+                          title="对此行添加评论"
+                          aria-label="对此行添加评论"
+                          onClick={() => {
+                            const k = keyOf(l, path);
+                            setEditing(editing === k ? null : k);
+                          }}
+                        >
+                          <Icon name="chat" size={10} />
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                  {canComment && findComment(keyOf(l, path)) && (
+                    <InlineComment
+                      comment={findComment(keyOf(l, path))!}
+                      editing={editing === keyOf(l, path)}
+                      onEdit={() => setEditing(keyOf(l, path))}
+                      onCancel={() => setEditing(null)}
+                      onCommit={(intent, text) => commit(l, intent, text)}
+                    />
+                  )}
+                  {canComment && editing === keyOf(l, path) && !findComment(keyOf(l, path)) && (
+                    <CommentEditor
+                      initial=""
+                      initialIntent="change"
+                      onCancel={() => setEditing(null)}
+                      onCommit={(intent, text) => commit(l, intent, text)}
+                    />
+                  )}
                 </div>
               ))}
-            </pre>
+            </div>
           )}
         </div>
       ))}
@@ -283,7 +459,172 @@ function HunkView({ diff, splitMode }: { diff: string; splitMode: boolean }) {
   );
 }
 
-function SplitHunk({ lines }: { lines: ParsedDiff['hunks'][number]['lines'] }) {
+/** 行的评论键（同一行只有一条评论）。 */
+function keyOf(l: DiffLine, path: string): string {
+  const a = anchorOf(l);
+  return a ? commentKey(path, a.side, a.line) : '';
+}
+
+/**
+ * 已有评论的展示（只读态）。
+ *
+ * 点击进入编辑而不是直接可改：折叠区里的输入框会随滚动跑掉焦点，
+ * 而评论文本是用户敲了半天的东西，误触清空代价很高。
+ */
+function InlineComment({
+  comment,
+  editing,
+  onEdit,
+  onCancel,
+  onCommit,
+}: {
+  comment: ReviewComment;
+  editing: boolean;
+  onEdit: () => void;
+  onCancel: () => void;
+  onCommit: (intent: CommentIntent, text: string) => void;
+}) {
+  if (editing) {
+    return (
+      <CommentEditor
+        initial={comment.text}
+        initialIntent={comment.intent}
+        onCancel={onCancel}
+        onCommit={onCommit}
+      />
+    );
+  }
+  return (
+    <div className={`inline-comment intent-${comment.intent}`}>
+      <span className={`intent-badge ${comment.intent}`}>{intentLabel(comment.intent)}</span>
+      <button className="inline-comment-text" onClick={onEdit} title="点击编辑">
+        {comment.text}
+      </button>
+      <button
+        className="inline-comment-del"
+        title="删除这条评论"
+        aria-label="删除评论"
+        onClick={() => onCommit(comment.intent, '')}
+      >
+        <Icon name="close" size={10} />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * 评论编辑器。
+ *
+ * 意图（仅上下文 / 要改）用两个互斥按钮而不是下拉：这是**必须选对**的
+ * 一项，选错的后果是模型改了不该改的代码。两个可见的单选按钮比藏在
+ * 下拉里的选项更不容易漏选（默认值为「要改」，与用户点评论的初衷一致）。
+ */
+function CommentEditor({
+  initial,
+  initialIntent,
+  onCancel,
+  onCommit,
+}: {
+  initial: string;
+  initialIntent: CommentIntent;
+  onCancel: () => void;
+  onCommit: (intent: CommentIntent, text: string) => void;
+}) {
+  const [text, setText] = useState(initial);
+  const [intent, setIntent] = useState<CommentIntent>(initialIntent);
+
+  return (
+    <div className="comment-editor">
+      <div className="intent-switch" role="radiogroup" aria-label="评论意图">
+        <button
+          role="radio"
+          aria-checked={intent === 'change'}
+          className={`intent-opt ${intent === 'change' ? 'is-on' : ''}`}
+          onClick={() => setIntent('change')}
+          title="要求模型修改这一行"
+        >
+          要改
+        </button>
+        <button
+          role="radio"
+          aria-checked={intent === 'context'}
+          className={`intent-opt ${intent === 'context' ? 'is-on' : ''}`}
+          onClick={() => setIntent('context')}
+          title="只是说明这一行，请模型不要改动"
+        >
+          仅上下文
+        </button>
+      </div>
+      <textarea
+        autoFocus
+        rows={2}
+        className="comment-input"
+        value={text}
+        placeholder={intent === 'change' ? '要改成什么？' : '补充说明（不会改动代码）'}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          // ⌘/Ctrl+Enter 提交，Esc 取消。普通 Enter 留给换行——
+          // 评论常常是多行的（贴一段期望的代码）。
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            onCommit(intent, text);
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            onCancel();
+          }
+        }}
+      />
+      <div className="comment-actions">
+        <button className="btn btn-mini" onClick={() => onCommit(intent, text)}>
+          {text.trim() === '' ? '删除' : '保存'}
+        </button>
+        <button className="btn btn-mini btn-ghost" onClick={onCancel}>
+          取消
+        </button>
+        <span className="comment-hint">⌘↩ 保存</span>
+      </div>
+    </div>
+  );
+}
+
+function SplitHunk({
+  lines,
+  path,
+  canComment,
+  comments,
+  onCommentsChange,
+  onOpenInEditor,
+}: {
+  lines: ParsedDiff['hunks'][number]['lines'];
+  path: string;
+  canComment: boolean;
+  comments: ReviewComment[];
+  onCommentsChange?: (next: ReviewComment[]) => void;
+  onOpenInEditor?: (path: string, line?: number) => void;
+}) {
+  /** 并排视图里的评论编辑器：键与统一视图一致，避免切换视图后评论对不上。 */
+  const [editing, setEditing] = useState<string | null>(null);
+  const findComment = (key: string) => comments.find((c) => c.id === key);
+
+  const commit = (line: DiffLine, intent: CommentIntent, text: string) => {
+    if (!onCommentsChange) return;
+    const a = anchorOf(line);
+    if (!a) return;
+    if (text.trim() === '') {
+      onCommentsChange(removeComment(comments, commentKey(path, a.side, a.line)));
+      setEditing(null);
+      return;
+    }
+    onCommentsChange(
+      upsertComment(
+        comments,
+        makeComment({ path, side: a.side, line: a.line, intent, text, anchor: line.text }),
+      ),
+    );
+    setEditing(null);
+  };
+
   // 简单并排：删除行在左、新增行在右，上下文行两侧都显示
   const rows: { left?: typeof lines[number]; right?: typeof lines[number] }[] = [];
   for (const l of lines) {
@@ -296,26 +637,74 @@ function SplitHunk({ lines }: { lines: ParsedDiff['hunks'][number]['lines'] }) {
   }
   return (
     <div className="split-hunk">
-      {rows.map((r, i) => (
-        <div key={i} className="split-row">
-          <div className={`split-cell ${r.left ? `line-${r.left.kind}` : 'line-empty'}`}>
-            {r.left && (
-              <>
-                <span className="line-no">{r.left.oldLine ?? ''}</span>
-                <span className="line-text">{r.left.text}</span>
-              </>
+      {rows.map((r, i) => {
+        // 评论只挂在「有行号的那一侧」：并排时上下文行两侧同一个对象，
+        // 挂两次会产生两条内容相同的评论。
+        const anchorLine = r.right ?? r.left;
+        const key = anchorLine ? keyOf(anchorLine, path) : '';
+        const existing = key ? findComment(key) : undefined;
+        return (
+          <div key={i} className="split-row-wrap">
+            <div className="split-row">
+              <div className={`split-cell ${r.left ? `line-${r.left.kind}` : 'line-empty'}`}>
+                {r.left && (
+                  <>
+                    <span className="line-no">{r.left.oldLine ?? ''}</span>
+                    <span className="line-text">{r.left.text}</span>
+                  </>
+                )}
+              </div>
+              <div className={`split-cell ${r.right ? `line-${r.right.kind}` : 'line-empty'}`}>
+                {r.right && (
+                  <>
+                    <span className="line-no">{r.right.newLine ?? ''}</span>
+                    <span className="line-text">{r.right.text}</span>
+                  </>
+                )}
+                {canComment && anchorLine && (
+                  <span className="line-tools">
+                    {onOpenInEditor && anchorLine.newLine !== null && (
+                      <button
+                        className="line-tool"
+                        title={`在编辑器中打开第 ${anchorLine.newLine} 行`}
+                        aria-label="在编辑器中打开此行"
+                        onClick={() => onOpenInEditor(path, anchorLine.newLine ?? undefined)}
+                      >
+                        <Icon name="edit" size={10} />
+                      </button>
+                    )}
+                    <button
+                      className={`line-tool ${existing ? 'is-active' : ''}`}
+                      title="对此行添加评论"
+                      aria-label="对此行添加评论"
+                      onClick={() => setEditing(editing === key ? null : key)}
+                    >
+                      <Icon name="chat" size={10} />
+                    </button>
+                  </span>
+                )}
+              </div>
+            </div>
+            {canComment && existing && (
+              <InlineComment
+                comment={existing}
+                editing={editing === key}
+                onEdit={() => setEditing(key)}
+                onCancel={() => setEditing(null)}
+                onCommit={(intent, text) => commit(anchorLine!, intent, text)}
+              />
+            )}
+            {canComment && anchorLine && editing === key && !existing && (
+              <CommentEditor
+                initial=""
+                initialIntent="change"
+                onCancel={() => setEditing(null)}
+                onCommit={(intent, text) => commit(anchorLine!, intent, text)}
+              />
             )}
           </div>
-          <div className={`split-cell ${r.right ? `line-${r.right.kind}` : 'line-empty'}`}>
-            {r.right && (
-              <>
-                <span className="line-no">{r.right.newLine ?? ''}</span>
-                <span className="line-text">{r.right.text}</span>
-              </>
-            )}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

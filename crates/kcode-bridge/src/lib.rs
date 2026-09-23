@@ -42,6 +42,7 @@
 //! ```
 
 pub mod binary;
+pub mod editor;
 pub mod git;
 pub mod error;
 pub mod jsonl;
@@ -49,8 +50,9 @@ pub mod process;
 pub mod transport;
 
 pub use binary::{locate_binary, locate_binary_in, sha256_file, LockRecord, SECURITY_BASELINE};
+pub use editor::{EditorInfo, EditorLaunch};
 pub use error::{BridgeError, Result};
-pub use git::GitStatus;
+pub use git::{FileRevert, GitStatus, RevertAction};
 pub use jsonl::{Incoming, JsonlError, LineFramer, RequestId, RpcErrorPayload};
 pub use process::{is_user_default_codex_home, SpawnConfig};
 pub use transport::{

@@ -27,7 +27,7 @@
 | **L3** | React 前端：**液态玻璃三栏 UI**、审批弹窗、Diff 审阅、流式输出、Markdown、模型选择 | ✅ |
 
 <!-- test-stats:begin -->
-合计 **254 项 Rust 测试 + 377 项前端测试 + 56 项协议契约断言**——
+合计 **279 项 Rust 测试 + 409 项前端测试 + 56 项协议契约断言**——
 数字由 `scripts/test-stats.mjs` 实际运行统计，明细见 [`docs/test-stats.md`](docs/test-stats.md)。
 <!-- test-stats:end -->
 
@@ -38,8 +38,10 @@ CI 比对其结果与本文、`docs/test-stats.md` 是否一致（与协议事�
 含已验证项、**未执行项（如实记录）**，以及一处与预期不符的安全发现。
 
 尚未做的：真实模型验收（需凭据，见下方脚本）、worktree 创建与分支状态、
-`thread/archive`·`resume`·`fork` 生命周期，以及 Phase 2 的 granular approvals、
-`auto_review`、MCP、命令面板。实施计划见 [`docs/KCode落地方案.md`](docs/KCode落地方案.md)。
+`thread/resume`·`thread/fork` 生命周期（`thread/archive` 与重命名已落地），
+以及 Phase 2 的 granular approvals、`auto_review`、MCP、命令面板与快捷键注册。
+实施计划见 [`docs/KCode落地方案.md`](docs/KCode落地方案.md)；
+UI 对标的逐项状态见 [`docs/UI对标指标清单.md`](docs/UI对标指标清单.md)。
 
 ---
 

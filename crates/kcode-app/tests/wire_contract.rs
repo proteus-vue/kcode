@@ -298,7 +298,7 @@ fn token_usage_wire_format_is_readable_by_frontend() {
         },
         model_context_window: Some(200_000),
     };
-    let v = serde_json::to_value(&usage).unwrap();
+    let v = serde_json::to_value(usage).unwrap();
     assert_no_snake_case_keys(&v, "ThreadTokenUsage");
 
     assert_eq!(v["last"]["inputTokens"], 1500);
@@ -315,7 +315,7 @@ fn token_usage_wire_format_is_readable_by_frontend() {
         model_context_window: None,
         ..usage
     };
-    let v2 = serde_json::to_value(&no_window).unwrap();
+    let v2 = serde_json::to_value(no_window).unwrap();
     assert!(
         v2.as_object().unwrap().contains_key("modelContextWindow"),
         "modelContextWindow 缺失时应显式为 null：{v2}"

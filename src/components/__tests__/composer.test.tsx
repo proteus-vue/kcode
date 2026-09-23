@@ -10,7 +10,7 @@
  * 停止键是 CSS 画的方块，字重与线宽无法与其他图标对齐。
  */
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import { act } from 'react';
+import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Composer } from '../Composer';
 import type { GitStatus } from '../../types/domain';
@@ -370,5 +370,73 @@ describe('图片附件（拖入 / 粘贴）', () => {
   it('占位文案提示可粘贴/拖入图片（否则用户不知道支持）', () => {
     mount();
     expect((host!.querySelector('textarea') as HTMLTextAreaElement).placeholder).toContain('图片');
+  });
+});
+
+/**
+ * 外部推文本进输入框（审阅面板的「加入输入框」走这条路）。
+ *
+ * 关键是**追加而不是覆盖**：用户可能已经打了一半的话，评论是补充材料；
+ * 覆盖掉等于悄悄删掉他写的内容，而这不会有任何提示。
+ */
+describe('pendingText 通道', () => {
+  /** 可控 harness：能在用户输入之后再推一段文本进来。 */
+  function mountControlled() {
+    const onConsume = vi.fn();
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    let push: (t: string | null) => void = () => {};
+    function Harness() {
+      const [pendingText, setPendingText] = useState<string | null>(null);
+      push = setPendingText;
+      return (
+        <Composer
+          disabled={false}
+          onSubmit={vi.fn()}
+          models={[]}
+          selectedModel={null}
+          selectedEffort={null}
+          onSelectModel={() => {}}
+          onSelectEffort={() => {}}
+          projectName="kcode"
+          git={git}
+          permissionMode="workspaceWrite"
+          onSelectPermission={() => {}}
+          configuredModel={null}
+          pendingInput={null}
+          onConsumePending={() => {}}
+          pendingText={pendingText}
+          onConsumePendingText={onConsume}
+        />
+      );
+    }
+    act(() => {
+      root!.render(<Harness />);
+    });
+    return { push, onConsume };
+  }
+
+  it('空输入框时直接填入', () => {
+    const { push, onConsume } = mountControlled();
+    act(() => push('【文件】a.ts\n- 第 3 行：要改'));
+    expect(ta().value).toContain('【文件】a.ts');
+    expect(onConsume).toHaveBeenCalled();
+  });
+
+  it('已有正文时追加而非覆盖', () => {
+    const { push } = mountControlled();
+    type('请按下面的意见改');
+    act(() => push('【文件】a.ts'));
+    expect(ta().value).toBe('请按下面的意见改\n\n【文件】a.ts');
+  });
+
+  it('推送后清除待办，避免重复追加', () => {
+    const { push, onConsume } = mountControlled();
+    act(() => push('【文件】a.ts'));
+    act(() => push(null));
+    // 再推同一个值不会二次追加（父组件已清空）
+    expect(ta().value.match(/【文件】/g)?.length).toBe(1);
+    expect(onConsume).toHaveBeenCalledTimes(1);
   });
 });

@@ -47,6 +47,70 @@ pub fn resolve_in_workspace(workspace: &Path, requested: &str) -> Result<(PathBu
     Ok((resolved, rel))
 }
 
+/// 解析一个**可能尚不存在**的工作区内路径。
+///
+/// 用途与 `resolve_in_workspace` 不同：审阅面板里的文件有两种「不在磁盘上」
+/// 的合法情况——本轮变更还没写入工作区（`proposed`），或它刚被 Agent 删掉。
+/// 这两种情况下 `resolve_in_workspace` 会在 canonicalize 处直接失败，
+/// 报出一句和用户操作无关的「No such file or directory」。
+///
+/// 做法：文件本身存在时按常规解析；不存在时**规范化其父目录**再拼上文件名。
+/// 父目录必须真实存在且位于工作区内——所以 `../..`、指向外部的符号链接
+/// 依旧被挡住，安全性不降级。
+///
+/// 返回的是**仓库内相对路径**（供 git 使用），以及规范化后的绝对路径。
+pub fn resolve_in_workspace_allow_missing(
+    workspace: &Path,
+    requested: &str,
+) -> Result<(PathBuf, String), String> {
+    if requested.trim().is_empty() {
+        return Err("路径不能为空".to_owned());
+    }
+    let req = Path::new(requested);
+    let candidate = if req.is_absolute() {
+        req.to_path_buf()
+    } else {
+        workspace.join(req)
+    };
+
+    let ws = workspace
+        .canonicalize()
+        .map_err(|e| format!("工作区无法解析: {e}"))?;
+
+    // 文件已存在：与 resolve_in_workspace 一致（顺带解掉符号链接）
+    let resolved = match candidate.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            let file_name = candidate
+                .file_name()
+                .ok_or_else(|| format!("路径不合法：{requested}"))?;
+            let parent = candidate
+                .parent()
+                .ok_or_else(|| format!("路径不合法：{requested}"))?;
+            let parent = parent
+                .canonicalize()
+                .map_err(|_| format!("路径不存在：{requested}"))?;
+            parent.join(file_name)
+        }
+    };
+
+    if !resolved.starts_with(&ws) {
+        return Err(format!("拒绝访问工作区外的路径：{requested}"));
+    }
+
+    let rel = resolved
+        .strip_prefix(&ws)
+        .map_err(|_| format!("路径不位于工作区内：{requested}"))?
+        .to_string_lossy()
+        .into_owned();
+    // 空相对路径 = 指向工作区根。它不是「一个文件」，
+    // 放过去会让 git 拿到仓库根、让编辑器打开整个目录。
+    if rel.is_empty() {
+        return Err(format!("路径指向目录而非文件：{requested}"));
+    }
+    Ok((resolved, rel))
+}
+
 /// 按扩展名判定图片 MIME。只认这几种，不做内容嗅探——
 /// 嗅探要读文件头，而这里的目标只是决定怎么展示。
 pub fn image_mime(path: &Path) -> Option<&'static str> {
@@ -157,6 +221,65 @@ mod tests {
         let (resolved, rel) = resolve_in_workspace(&ws, "src/app.ts").unwrap();
         assert!(resolved.starts_with(ws.canonicalize().unwrap()));
         assert_eq!(rel, "src/app.ts");
+    }
+
+    // ── allow_missing：审阅面板要看「还没写盘 / 已被删除」的文件 ──────
+
+    #[test]
+    fn allow_missing_resolves_existing_file() {
+        let (ws, _base) = workspace();
+        let (resolved, rel) = resolve_in_workspace_allow_missing(&ws, "src/app.ts").unwrap();
+        assert_eq!(rel, "src/app.ts");
+        assert!(resolved.is_file());
+    }
+
+    #[test]
+    fn allow_missing_resolves_absent_file() {
+        let (ws, _base) = workspace();
+        // 本轮变更还没落盘：文件不存在，但路径合法，必须能解析出来
+        let (resolved, rel) =
+            resolve_in_workspace_allow_missing(&ws, "src/not-yet-written.ts").unwrap();
+        assert_eq!(rel, "src/not-yet-written.ts");
+        assert!(!resolved.exists(), "不应凭空造出文件");
+        assert!(resolved.starts_with(ws.canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn allow_missing_still_rejects_escape() {
+        let (ws, base) = workspace();
+        // **关键**：放宽「文件必须存在」不能顺带放宽边界——
+        // 这些路径的目标文件都不存在，正是最容易漏掉的攻击面。
+        let outside = base.join("outside/deleted.txt");
+        for bad in [
+            outside.to_str().unwrap(),
+            ws.join("src/../../outside/deleted.txt").to_str().unwrap(),
+            "../../etc/passwd-not-here",
+            "src/../../../../etc/nothing",
+        ] {
+            let err = resolve_in_workspace_allow_missing(&ws, bad).unwrap_err();
+            assert!(
+                err.contains("工作区外") || err.contains("不存在") || err.contains("不合法"),
+                "{bad} 应被拒绝，实际：{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_missing_rejects_symlink_escape() {
+        let (ws, base) = workspace();
+        let link = ws.join("src/link-missing.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(base.join("outside/secret.txt"), &link).unwrap();
+        let err = resolve_in_workspace_allow_missing(&ws, "src/link-missing.txt").unwrap_err();
+        assert!(err.contains("工作区外"), "符号链接逃逸仍须拒绝：{err}");
+    }
+
+    #[test]
+    fn allow_missing_rejects_empty_and_root() {
+        let (ws, _base) = workspace();
+        assert!(resolve_in_workspace_allow_missing(&ws, "  ").is_err());
+        // 工作区根本身不是可撤销/可打开的文件
+        assert!(resolve_in_workspace_allow_missing(&ws, ".").is_err());
     }
 
     #[test]

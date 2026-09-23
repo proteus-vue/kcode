@@ -150,6 +150,16 @@ export interface KcodeApi {
   /** 待加入的附件；Composer 消费后调用 clearPendingInput。 */
   pendingInput: WebElementAttachment | null;
   clearPendingInput: () => void;
+  /**
+   * 把一段文本追加到输入框（行内评论走这条路）。
+   *
+   * 与 `appendComposer` 分开：那个是结构化附件（有选择器、尺寸），
+   * 这个是一段现成的文字。合在一起会让 Composer 需要判断「这个
+   * WebElementAttachment 是元素还是文本」，而那个类型判别没有意义。
+   */
+  pendingText: string | null;
+  appendComposerText: (text: string) => void;
+  clearPendingText: () => void;
   /** 右栏当前展示的内容视图；null 表示只看状态面板。 */
   rightContent: RightContent | null;
   openInRight: (c: RightContent | null) => void;
@@ -172,6 +182,8 @@ export function useKcode(): KcodeApi {
    * 全局又会让它每次按键都触发整棵树重渲染。
    */
   const [pendingInput, setPendingInput] = useState<WebElementAttachment | null>(null);
+  /** 待追加到输入框的纯文本（行内评论）。 */
+  const [pendingText, setPendingText] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [selectedEffort, setSelectedEffort] = useState<string | null>(null);
   /** 事件回调里要用最新的 refreshGit，用 ref 避免重建订阅。 */
@@ -689,6 +701,9 @@ export function useKcode(): KcodeApi {
     appendComposer: useCallback((el: WebElementAttachment) => setPendingInput(el), []),
     pendingInput,
     clearPendingInput: useCallback(() => setPendingInput(null), []),
+    appendComposerText: useCallback((text: string) => setPendingText(text), []),
+    pendingText,
+    clearPendingText: useCallback(() => setPendingText(null), []),
     subscribe: useCallback((fn: (e: AppEvent) => void) => {
       listenersRef.current.add(fn);
       return () => {

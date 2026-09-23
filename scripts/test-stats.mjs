@@ -72,6 +72,7 @@ function prettifyTarget(raw) {
 
 function rustStats(cargo) {
   const suites = [];
+  const failedTests = [];
   for (const pkg of RUST_PACKAGES) {
     console.log(`· 运行 cargo test -p ${pkg} …`);
     const r = spawnSync(cargo, ['test', '-p', pkg], {
@@ -103,13 +104,21 @@ function rustStats(cargo) {
         ignored: Number(result[4]),
       });
     });
+    // 失败的**用例名**必须留下来。本脚本原先只汇总计数，于是 CI 红的时候
+    // 只有一句「Rust 失败 1 项」，看不出是哪一个——对一个主张「数字都实际
+    // 跑通过」的脚本而言，不可行动的失败报告等于没有报告
+    // （与勘误 §3.23「报告自身的判定语义要被审计」同源）。
+    for (const line of `${r.stdout ?? ''}`.split('\n')) {
+      const m = line.match(/^test (.+?) \.\.\. FAILED/);
+      if (m) failedTests.push(`[${pkg}] ${m[1]}`);
+    }
     if (results.length === 0) {
       const tail = `${r.stdout ?? ''}\n${r.stderr ?? ''}`.split('\n').filter((l) => l.trim()).slice(-8).join('\n');
       fail(`${pkg} 未产出任何测试结果（多半是编译失败）：\n${tail}`);
     }
   }
   const sum = (k) => suites.reduce((a, s) => a + s[k], 0);
-  return { suites, passed: sum('passed'), failed: sum('failed'), ignored: sum('ignored') };
+  return { suites, failedTests, passed: sum('passed'), failed: sum('failed'), ignored: sum('ignored') };
 }
 
 // ── 前端：vitest 的 JSON 报告 ─────────────────────────────────────────────
@@ -259,6 +268,8 @@ if (rust.failed > 0 || web.failed > 0 || contracts.some((c) => c.status !== 0)) 
   if (rust.failed > 0) console.error(`  Rust 失败 ${rust.failed} 项`);
   if (web.failed > 0) console.error(`  前端失败 ${web.failed} 项`);
   for (const c of contracts) if (c.status !== 0) console.error(`  ${c.file} 退出码 ${c.status}`);
+  // 点名到用例：只有计数的话，CI 红了也无从下手
+  for (const name of rust.failedTests) console.error(`    ✗ ${name}`);
   process.exit(2);
 }
 
