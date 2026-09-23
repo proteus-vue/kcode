@@ -196,6 +196,31 @@ describe('模拟器画面必须装得进容器（防被裁掉）', () => {
   });
 });
 
+describe('「+」按钮常态零背景（幽灵按钮）', () => {
+  it('常态没有背景与边框色', () => {
+    // 用户明确要求：只有悬浮才做激活态，否则不要任何背景样式。
+    // 加底色会让它看起来像一枚常驻芯片，与旁边真正承载语义的
+    // 权限档位芯片混成一片——那些芯片的底色是「这里有个状态」的意思。
+    const block = rule('.add-ctx-btn {');
+    expect(block, '常态背景必须透明').toContain('background: transparent');
+    // 边框保留透明的占位：不占位会在悬停显形时让图标位移 1px
+    expect(block, '边框应为透明占位').toContain('border: 1px solid transparent');
+  });
+
+  it('激活态只出现在悬停', () => {
+    const hover = css.match(/^\.add-ctx-btn:hover[^{]*\{/m)?.[0] ?? '';
+    expect(hover, '应有悬停规则').not.toBe('');
+    expect(rule('.add-ctx-btn:hover:not(:disabled)')).toContain('background:');
+  });
+
+  it('菜单打开时不铺底色（底色只在悬停出现）', () => {
+    const open = rule('.add-ctx-btn.is-open {');
+    // is-open 只改颜色；若它铺了背景，就违反了「只有悬浮才有背景」
+    expect(open, 'is-open 不该设背景').not.toContain('background');
+    expect(open).toContain('color: var(--accent)');
+  });
+});
+
 describe('评论组件确实接入了 DiffViewer', () => {
   it('行工具含评论入口与（可选的）跳行入口', () => {
     expect(viewerSrc).toContain('对此行添加评论');

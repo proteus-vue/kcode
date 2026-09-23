@@ -1103,20 +1103,29 @@ body {
 /* ── 输入区的「+」添加上下文 ────────────────────────────────────────── */
 
 .add-ctx { position: relative; flex-shrink: 0; }
+/* **常态零背景、零边框**：它是一个幽灵按钮，靠图标本身表达存在。
+   加底色会让它看起来像一枚常驻的芯片，与旁边真正承载语义的
+   权限档位芯片混成一片——那些芯片的底色是"这里有个状态"的意思，
+   而这个按钮没有状态要表达。
+   边框保留 transparent 占位：悬停时边框显形，不占位会让图标位移 1px。 */
 .add-ctx-btn {
   display: grid; place-items: center;
   width: 24px; height: 24px; padding: 0;
   border-radius: var(--r-xs); cursor: pointer;
-  background: rgba(255, 255, 255, 0.045);
+  background: transparent;
   border: 1px solid transparent; color: var(--t3);
   transition: color .13s, background .13s, border-color .13s;
 }
+/* 激活态只在悬停出现——这是它唯一的视觉反馈。 */
 .add-ctx-btn:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.09);
   border-color: var(--edge-soft); color: var(--t1);
 }
 .add-ctx-btn:disabled { cursor: default; opacity: .55; }
-.add-ctx-btn.is-open { background: var(--accent-dim); color: var(--accent); border-color: transparent; }
+/* 菜单打开时**只改图标颜色**、不铺底色：底色按用户要求只在悬停时出现，
+   而"我的菜单开着"这个信息仍需可见（鼠标移进菜单后按钮就脱离悬停了）。
+   特异性低于上面的 :hover（(0,2,0) < (0,3,0)），所以悬停时依旧走 hover 的底色。 */
+.add-ctx-btn.is-open { color: var(--accent); }
 
 /* 遮罩层级低于菜单：点空白关闭，但点到菜单本身不会先被遮罩吃掉 */
 .add-ctx-backdrop { position: fixed; inset: 0; z-index: 60; }
