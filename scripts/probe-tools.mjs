@@ -37,10 +37,19 @@
 import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, isAbsolute, resolve } from 'node:path';
 import { withLoopbackNoProxy } from './no-proxy-env.mjs';
 
-const BIN = process.argv[2] ?? 'codex';
+const ARG = process.argv[2] ?? 'codex';
+// 相对路径必须解析成绝对路径：spawn 的 cwd 未指定时继承本进程 cwd，
+// 但显式传路径的场景（CI 里用 find 得到相对路径）仍需归一到绝对，
+// 避免「同一脚本在不同 cwd 下行为不同」。裸命令名（'codex'）保持原样，
+// 交给 PATH 解析。
+const BIN = ARG.includes('/') ? (isAbsolute(ARG) ? ARG : resolve(process.cwd(), ARG)) : ARG;
+if (BIN.includes('/') && !existsSync(BIN)) {
+  console.error(`✗ 二进制不存在：${BIN}`);
+  process.exit(2);
+}
 const home = mkdtempSync(join(tmpdir(), 'kcode-tools-home-'));
 
 writeFileSync(
@@ -60,6 +69,13 @@ experimental_bearer_token = "x"
 const child = spawn(BIN, ['app-server', '--stdio'], {
   env: withLoopbackNoProxy({ ...process.env, CODEX_HOME: home }),
   stdio: ['pipe', 'pipe', 'pipe'],
+});
+
+// 同 probe-exec：没有 error 监听者时 spawn 失败会抛未捕获异常，
+// 输出成栈回溯而不匹配调用方的输出过滤，表现为「探针没有任何输出」。
+child.on('error', (e) => {
+  console.log(`✗ 无法启动 app-server：${e.message}（二进制：${BIN}）`);
+  process.exit(0);
 });
 
 let buf = '';

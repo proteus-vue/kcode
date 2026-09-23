@@ -32,11 +32,21 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdtempSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, isAbsolute, resolve } from 'node:path';
 
-const BIN = process.argv[2];
-if (!BIN) {
+const ARG = process.argv[2];
+if (!ARG) {
   console.error('用法：node scripts/probe-exec.mjs <codex 二进制路径>');
+  process.exit(2);
+}
+
+// **必须解析成绝对路径**：下面 spawn 时 `cwd` 是临时目录，相对路径会以
+// 那个目录为基准解析，于是 spawn 报 ENOENT。本脚本第一次在 CI 上跑就栽在
+// 这里——而且因为没挂 error 处理器，崩溃的栈回溯不匹配调用方的输出过滤，
+// 最终表现是「探针完全没有输出」，白跑一轮（见下方 spawn 的 error 处理）。
+const BIN = isAbsolute(ARG) ? ARG : resolve(process.cwd(), ARG);
+if (!existsSync(BIN)) {
+  console.error(`✗ 二进制不存在：${BIN}`);
   process.exit(2);
 }
 
@@ -123,6 +133,19 @@ const child = spawn(BIN, ['app-server', '--stdio'], {
   cwd,
   env: { ...process.env, CODEX_HOME: home, NO_PROXY: '127.0.0.1,localhost', no_proxy: '127.0.0.1,localhost' },
   stdio: ['pipe', 'pipe', 'pipe'],
+});
+
+// **必须挂 error 处理器**：spawn 失败（二进制不存在、无执行权限、架构不符）
+// 会以 'error' 事件抛出；没有监听者时 Node 直接以未捕获异常退出，输出是
+// 一段栈回溯——它在调用方的输出过滤里不匹配任何模式，于是「探针没有任何
+// 输出」。本脚本第一次在 CI 上跑正是如此：诊断工具自己静默失败，
+// 恰好复刻了它要诊断的那类缺陷。这里把它变成一行可读结论。
+child.on('error', (e) => {
+  console.log(`❌ 无法启动 app-server：${e.message}`);
+  console.log(`   二进制：${BIN}`);
+  console.log('   含义：探针自身没跑起来，不是被测对象的问题——先修探针。');
+  mock.close();
+  process.exit(0);
 });
 
 let buf = '';
