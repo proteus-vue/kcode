@@ -108,9 +108,16 @@ jobs:
 
       - name: 集成测试（真实 app-server 进程 + 本地 mock 模型）
         run: |
-          cargo test -p kcode-bridge --test contract --test approval_semantics
-          cargo test -p kcode-domain --test integration
-          cargo test -p kcode-app --test acceptance
+          set -o pipefail
+          {
+            cargo test -p kcode-bridge --test contract --test approval_semantics --no-fail-fast
+            cargo test -p kcode-domain --test integration --no-fail-fast
+            cargo test -p kcode-app --test acceptance --no-fail-fast
+          } 2>&1 | tee /tmp/rust-integration.log
+
+      - name: 集成测试失败摘要（仅失败时执行）
+        if: failure()
+        run: bash scripts/ci-summarize-failures.sh /tmp/rust-integration.log
 
       - name: 静态检查
         run: cargo clippy --workspace --all-targets -- -D warnings
