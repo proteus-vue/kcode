@@ -85,6 +85,20 @@ jobs:
       - name: 安装锁定依赖（含 codex 平台二进制）
         run: npm ci
 
+      # **zsh 是集成测试的硬前提**：codex 用 `/bin/zsh -lc '<cmd>'` 执行
+      # 模型发出的命令（本地实测 commandExecution.item.command 的形状）。
+      # ubuntu runner 默认**不装 zsh**，于是命令在执行前就失败，而
+      # app-server 不会报错——表现为「轮次正常收尾、没有任何命令 Item」，
+      # 集成测试因此失败在「未找到命令 Item」（见 docs/协议勘误与修正.md §3.27）。
+      #
+      # 这不是「为测试放宽条件」：真实用户的开发机（macOS 自带、多数 Linux
+      # 发行版的默认交互 shell）都有 zsh，装它是让 CI 环境与真实环境一致。
+      - name: 安装 zsh（codex 执行命令所需的 shell）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zsh
+          echo "zsh: $(command -v zsh) ($(zsh --version))"
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -136,80 +150,6 @@ jobs:
       # **同时写注解**（::error:: 之外的普通行不会进注解，所以这里显式加前缀）：
       # job summary 对未登录访问者不渲染，而注解面板匿名可读——本项目的开发
       # 环境没有 admin 权限，注解是唯一稳定的读取通道。
-      - name: 沙箱前提自检（仅失败时执行）
-        if: failure()
-        run: |
-          # `set +e`：本步骤全是诊断命令，任何一条非零退出都不该终止脚本。
-          # 踩过一次：`out=$(cmd)` 在 `set -e` 下遇非零立即退出，导致后面更
-          # 重要的探针（工具面、zsh 检查）根本没跑，注解里只剩前半段。
-          # 诊断步骤的职责是**尽量多收集**，不是「全部成功」。
-          set +e
-
-          collect() {
-            echo "kernel: $(uname -r)"
-            echo "userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo '（无此文件）')"
-            echo "max_user_namespaces: $(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo '（无此文件）')"
-            echo "landlock_in_lsm: $(grep -c landlock /sys/kernel/security/lsm 2>/dev/null || echo '（读不到）')"
-            echo "bwrap: $(command -v bwrap || echo '未安装')"
-            echo "seccomp: $(grep Seccomp /proc/self/status 2>/dev/null | head -1 || echo '未知')"
-            # **zsh 是关键**：codex 用 `/bin/zsh -lc '<cmd>'` 执行命令
-            # （本地实测的 commandExecution.item.command 形如
-            #  `/bin/zsh -lc 'echo kcode-plain-probe'`）。若 runner 上没有
-            # zsh，命令无法执行，而 app-server **不报错**——表现为
-            # 「轮次正常收尾、没有任何命令 Item」，正是本 job 的症状。
-            echo "zsh: $(command -v zsh || echo '未安装')"
-            echo "zsh_bin: $([[ -x /bin/zsh ]] && echo '存在' || echo '不存在')"
-            echo "bash: $(command -v bash || echo '未安装')"
-          }
-          {
-            echo '### Linux 沙箱前提'
-            echo '```'
-            collect
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "---- 沙箱前提（逐行进注解）----"
-          collect | while IFS= read -r line; do
-            echo "::error::沙箱前提 $line"
-          done
-
-          # codex 自己的医生：它会检查本机沙箱能力与运行环境。
-          # 比我们手写的前提检查更权威——环境判断的逻辑在它那里。
-          echo "---- codex doctor（环境段）----"
-          BIN=$(find node_modules/@openai -path '*vendor*/bin/codex' -type f 2>/dev/null | head -1)
-          if [[ -n "$BIN" ]]; then
-            "$BIN" doctor 2>&1 | sed -n '1,40p' | while IFS= read -r line; do
-              [[ -n "$line" ]] && echo "::error::doctor $line"
-            done
-          else
-            echo "::error::未找到 codex 二进制，无法运行 doctor"
-          fi
-
-          # 真跑一次沙箱命令：这是**最直接的判据**——沙箱能否执行命令，
-          # 不依赖任何推断。失败时它的报错就是根因证据。
-          echo "---- 沙箱实测 ----"
-          if [[ -n "$BIN" ]]; then
-            out=$("$BIN" sandbox -- /bin/echo sandbox-ok 2>&1); rc=$?
-            echo "::error::sandbox 实测 exit=$rc out=$(echo "$out" | head -3 | tr '\n' ' ')"
-          fi
-
-          # **最贴近现场的一步**：用与集成测试相同的方式跑一次真实命令，
-          # 直接观察 app-server 是否产生 commandExecution Item。沙箱前提、
-          # doctor、工具面都只是间接证据，这一步才是与失败现象同构的复现。
-          echo "---- 真实命令执行（与集成测试同构）----"
-          if [[ -n "$BIN" ]]; then
-            node scripts/probe-exec.mjs "$BIN" 2>&1 | while IFS= read -r line; do
-              [[ -n "$line" ]] && echo "::error::probe $line"
-            done
-          fi
-
-          # 工具面探测：app-server 在本机公布的 shell 工具名是什么。
-          echo "---- 工具面探测 ----"
-          if [[ -n "$BIN" ]]; then
-            node scripts/probe-tools.mjs "$BIN" 2>&1 | while IFS= read -r line; do
-              [[ -n "$line" ]] && echo "::error::probe $line"
-            done
-          fi
-
       - name: 静态检查
         run: cargo clippy --workspace --all-targets -- -D warnings
 

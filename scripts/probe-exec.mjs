@@ -100,10 +100,15 @@ const mock = createServer((req, res) => {
 await new Promise((r) => mock.listen(0, '127.0.0.1', r));
 const port = mock.address().port;
 
+// LOGIN_SHELL 环境变量：用于对照实验（验证 codex 是否跟随登录 shell）。
+// 例如 `LOGIN_SHELL=/bin/bash node scripts/probe-exec.mjs <bin>`。
+const LOGIN_SHELL = process.env.LOGIN_SHELL;
+
 writeFileSync(
   join(home, 'config.toml'),
   `model_provider = "m"
 model = "kcode-mock-model"
+${LOGIN_SHELL ? `login_shell = "${LOGIN_SHELL}"\n` : ''}
 
 [model_providers.m]
 name = "m"
