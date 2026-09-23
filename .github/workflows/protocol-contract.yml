@@ -172,15 +172,44 @@ jobs:
       # （本项目为公开仓库、开发机无 admin），而注解面板是匿名可读的。
       # 只看到「测试失败」而看不到是哪一个，等于要再跑一轮才能定位——
       # 勘误 §3.23 的教训：不可行动的失败报告等于没有报告。
-      - name: 全部单元测试（纯逻辑，无外部依赖）
-        # **必须 set -o pipefail**：`cmd | tee log` 的退出码是 tee 的（0），
-        # 于是测试失败也报成功——本步骤一度就是这样静默放过了 Linux 上的
-        # 单元测试失败（`pick_uses_bundle_when_path_lacks_cli` 在 Linux 上
-        # 因 BUNDLE_PATHS 为空而失败，CI 却显示 OK）。
-        # 这与 §3.25 的 workflow 失效同类：**绿不代表真的跑通了**。
+      # **必须 set -o pipefail**：`cmd | tee log` 的退出码是 tee 的（0），
+      # 于是测试失败也报成功——曾因此静默放过 Linux 上的单元测试失败
+      # （`pick_uses_bundle_when_path_lacks_cli` 在 Linux 上因 BUNDLE_PATHS
+      # 为空而失败，CI 却显示 OK）。与 §3.25 的 workflow 失效同类：
+      # **绿不代表真的跑通了**。
+      #
+      # # 为什么拆成两步而不是 `--workspace`
+      #
+      # 原先一条命令跑全部 lib 测试，失败时**无法归因到哪个 crate**：
+      # kcode-desktop 要编译整棵 tauri 依赖树（tao/tauri-codegen/…），
+      # 而那正是最可能出问题（也最耗时）的一段。失败信息里只有
+      # 「全部单元测试」这一个名字，排查必须再跑一轮。拆开后步骤名即定位。
+      #
+      # # 为什么先打资源基线
+      #
+      # rust job 长期失败在一个无法读取日志的步骤上（见 §3.28）。从
+      # check-run 注解里能拿到的唯一线索是：**日志尾部停在 Compiling 行**，
+      # 且没有 error[..] 行——即 rustc 还在跑的时候步骤就结束了。
+      # 这更像资源/超时（OOM、磁盘耗尽）而不是代码错误，但这是推断不是实证。
+      # 因此每轮都打一次 CPU/内存/磁盘基线：下一轮要么证实要么否证，
+      # 而不是继续靠猜。
+      - name: 资源基线（判断失败是代码问题还是环境问题）
+        run: |
+          echo "── CPU ──"; nproc
+          echo "── 内存 ──"; free -h
+          echo "── 磁盘 ──"; df -h / /tmp 2>/dev/null || df -h /
+          echo "── 工作区可用空间 ──"; df -h . | tail -1
+
+      - name: 单元测试 · 核心三 crate（纯逻辑，无外部依赖）
         run: |
           set -o pipefail
-          cargo test --workspace --lib --no-fail-fast 2>&1 | tee /tmp/rust-tests.log
+          cargo test -p kcode-bridge -p kcode-domain -p kcode-app --lib --no-fail-fast \
+            2>&1 | tee /tmp/rust-tests.log
+
+      - name: 单元测试 · kcode-desktop（含模拟器解析与能力位）
+        run: |
+          set -o pipefail
+          cargo test -p kcode-desktop --lib --no-fail-fast 2>&1 | tee -a /tmp/rust-tests.log
 
       # 失败诊断分两路：
       # - **job summary 放全文**（无配额限制，但未登录访问者看不到）
