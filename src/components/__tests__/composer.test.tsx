@@ -13,22 +13,10 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Composer } from '../Composer';
-import type { GitStatus } from '../../types/domain';
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
 
-const git: GitStatus = {
-  isRepo: true,
-  branch: 'main',
-  root: '/work/kcode',
-  staged: 0,
-  modified: 0,
-  untracked: 0,
-  ahead: 0,
-  behind: 0,
-  conflicted: 0,
-};
 
 function mount(over: Partial<Parameters<typeof Composer>[0]> = {}) {
   const onSubmit = vi.fn();
@@ -47,8 +35,6 @@ function mount(over: Partial<Parameters<typeof Composer>[0]> = {}) {
         selectedEffort={null}
         onSelectModel={() => {}}
         onSelectEffort={() => {}}
-        projectName="kcode"
-        git={git}
         permissionMode="workspaceWrite"
         onSelectPermission={() => {}}
         configuredModel="deepseek-flash"
@@ -379,6 +365,112 @@ describe('图片附件（拖入 / 粘贴）', () => {
  * 关键是**追加而不是覆盖**：用户可能已经打了一半的话，评论是补充材料；
  * 覆盖掉等于悄悄删掉他写的内容，而这不会有任何提示。
  */
+describe('「+」添加上下文菜单', () => {
+  it('左下角是「+」按钮，不再是不可点的项目名标签', () => {
+    mount();
+    const btn = host!.querySelector('.add-ctx-btn');
+    expect(btn, '应有 + 按钮').not.toBeNull();
+    // 旧的死标签类名不该再出现
+    expect(host!.querySelector('.ctx-chip.ctx-primary'), '项目名死标签应已移除').toBeNull();
+  });
+
+  it('点击后弹出菜单，且走 portal 到 body（否则会被 ctx-chips 裁掉）', () => {
+    mount();
+    act(() => {
+      (host!.querySelector('.add-ctx-btn') as HTMLElement).click();
+    });
+    // **必须查 document 而不是 host**：portal 渲染到 body 下，
+    // 留在 host 内说明没用 portal——那会被 .ctx-chips 的 overflow:hidden 裁掉
+    const menu = document.querySelector('.add-ctx-menu');
+    expect(menu, '菜单应渲染到 body 下（portal）').not.toBeNull();
+    expect(menu!.parentElement, '菜单的父节点应是 body').toBe(document.body);
+    act(() => {
+      document.querySelector('.add-ctx-backdrop')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+  });
+
+  it('菜单项接的是真实能力：图片 / 工作区文件 都在', () => {
+    mount();
+    act(() => {
+      (host!.querySelector('.add-ctx-btn') as HTMLElement).click();
+    });
+    const labels = [...document.querySelectorAll('.add-ctx-label')].map((e) => e.textContent);
+    expect(labels).toContain('图片');
+    expect(labels).toContain('工作区文件');
+    act(() => {
+      document.querySelector('.add-ctx-backdrop')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+  });
+
+  it('没有传入 onPickWebElement 时不渲染「网页元素」项（不给空入口）', () => {
+    mount({ onPickWebElement: undefined });
+    act(() => {
+      (host!.querySelector('.add-ctx-btn') as HTMLElement).click();
+    });
+    const labels = [...document.querySelectorAll('.add-ctx-label')].map((e) => e.textContent);
+    expect(labels, '浏览器未打开时不该出现该项').not.toContain('网页元素');
+    act(() => {
+      document.querySelector('.add-ctx-backdrop')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+  });
+
+  it('传入了 onPickWebElement 时出现该项，点击会调用它', () => {
+    const onPick = vi.fn();
+    mount({ onPickWebElement: onPick });
+    act(() => {
+      (host!.querySelector('.add-ctx-btn') as HTMLElement).click();
+    });
+    const items = [...document.querySelectorAll('.add-ctx-item')];
+    const webItem = items.find((e) => e.textContent?.includes('网页元素'));
+    expect(webItem, '应有网页元素项').toBeDefined();
+    act(() => {
+      (webItem as HTMLElement).click();
+    });
+    expect(onPick).toHaveBeenCalled();
+    // 点完菜单应关闭
+    expect(document.querySelector('.add-ctx-menu'), '选完应关闭菜单').toBeNull();
+  });
+
+  it('Esc 关闭菜单', () => {
+    mount();
+    act(() => {
+      (host!.querySelector('.add-ctx-btn') as HTMLElement).click();
+    });
+    expect(document.querySelector('.add-ctx-menu')).not.toBeNull();
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    expect(document.querySelector('.add-ctx-menu')).toBeNull();
+  });
+
+  it('点遮罩关闭菜单', () => {
+    mount();
+    act(() => {
+      (host!.querySelector('.add-ctx-btn') as HTMLElement).click();
+    });
+    act(() => {
+      document.querySelector('.add-ctx-backdrop')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(document.querySelector('.add-ctx-menu')).toBeNull();
+  });
+
+  it('「工作区文件」项在光标处插入 @（复用已有的文件搜索通路）', () => {
+    mount();
+    type('改一下这个');
+    act(() => {
+      (host!.querySelector('.add-ctx-btn') as HTMLElement).click();
+    });
+    const item = [...document.querySelectorAll('.add-ctx-item')].find((e) =>
+      e.textContent?.includes('工作区文件'),
+    );
+    act(() => {
+      (item as HTMLElement).click();
+    });
+    // @ 插到文末（光标默认在末尾），不覆盖已有文本
+    expect(ta().value).toBe('改一下这个@');
+  });
+});
+
 describe('pendingText 通道', () => {
   /** 可控 harness：能在用户输入之后再推一段文本进来。 */
   function mountControlled() {
@@ -399,8 +491,6 @@ describe('pendingText 通道', () => {
           selectedEffort={null}
           onSelectModel={() => {}}
           onSelectEffort={() => {}}
-          projectName="kcode"
-          git={git}
           permissionMode="workspaceWrite"
           onSelectPermission={() => {}}
           configuredModel={null}

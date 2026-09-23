@@ -14,6 +14,7 @@
  * 哪个分支、以什么权限运行。放进设置页会让这些前提变得不可见。
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Icon } from './Icon';
 import { MenuSelect, type MenuItem } from './MenuSelect';
 import { PermissionPicker } from './PermissionPicker';
@@ -45,7 +46,6 @@ interface SavedAttachment {
 import type {
   ComposerAttachment,
   FileMatch,
-  GitStatus,
   ImageAttachment,
   ModelOption,
   PermissionMode,
@@ -70,6 +70,117 @@ export function atQueryAt(text: string, cursor: number): string | null {
   return q;
 }
 
+/**
+ * 输入区左下角的「+」：添加上下文。
+ *
+ * # 为什么是菜单而不是直接开文件选择
+ *
+ * 输入区能加的东西不止图片一种（图片、工作区文件引用、网页元素），
+ * 而它们的数据通路完全不同——图片要落盘换路径、文件引用只是插入 `@`、
+ * 网页元素要驱动右栏的浏览器进入选择模式。一个「+」按钮同时承担三种
+ * 入口时，必须让用户选，否则我们只能替他猜（猜错的表现是「点了没反应」）。
+ *
+ * # 菜单项纪律：每个都必须接真实能力
+ *
+ * 项目对右栏场景定过同一条规矩（`scenes.ts`：不存在装饰性条目）。
+ * 这里同样——**不可用的项直接不渲染**，而不是灰着放在那儿。
+ * 「选择网页元素」需要右栏浏览器已打开，没打开时就不出现。
+ */
+function ContextMenu({
+  disabled,
+  onAddImages,
+  onMentionFile,
+  onPickWebElement,
+}: {
+  disabled: boolean;
+  onAddImages: () => void;
+  onMentionFile: () => void;
+  /** 右栏没有打开浏览器时为 undefined —— 该项不渲染（不给空入口）。 */
+  onPickWebElement?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  /** 浮层坐标。**必须 portal 到 body**——见下方注释。 */
+  const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+
+  // Esc 关闭：浮层类交互的通用预期
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open]);
+
+  const toggle = () => {
+    if (!open) {
+      // 按触发按钮的位置算坐标：菜单在输入区底部，**向上弹出**，
+      // 所以用 bottom（距视口底部的距离）而不是 top。
+      const r = btnRef.current?.getBoundingClientRect();
+      if (r) setPos({ left: r.left, bottom: window.innerHeight - r.top + 8 });
+    }
+    setOpen((v) => !v);
+  };
+
+  const run = (fn: () => void) => () => {
+    setOpen(false);
+    fn();
+  };
+
+  return (
+    <div className="add-ctx">
+      <button
+        ref={btnRef}
+        className={`add-ctx-btn ${open ? 'is-open' : ''}`}
+        disabled={disabled}
+        onClick={toggle}
+        title="添加上下文"
+        aria-label="添加上下文"
+        aria-expanded={open}
+      >
+        <Icon name="plus" size={13} />
+      </button>
+
+      {/* **必须 portal 到 body**：这个按钮在 `.ctx-chips` 内部，而那里有
+          `overflow: hidden`（为「芯片不换行」而设）——菜单向上弹出会超出
+          容器被整块裁掉，表现为「点了没反应」。`PermissionPicker` 与
+          `MenuSelect` 在同一个位置踩过完全相同的坑，解决办法一致。 */}
+      {open && pos && createPortal(
+        <>
+          {/* 透明遮罩：点空白关闭。没有它用户只能再点一次按钮 */}
+          <div className="add-ctx-backdrop" onClick={() => setOpen(false)} />
+          <div
+            className="add-ctx-menu"
+            role="menu"
+            style={{ left: pos.left, bottom: pos.bottom }}
+          >
+            <p className="add-ctx-title">添加</p>
+            <button className="add-ctx-item" role="menuitem" onClick={run(onAddImages)}>
+              <Icon name="image" size={13} />
+              <span className="add-ctx-label">图片</span>
+              <span className="add-ctx-hint">选择文件，或直接粘贴 / 拖入</span>
+            </button>
+            <button className="add-ctx-item" role="menuitem" onClick={run(onMentionFile)}>
+              <Icon name="file" size={13} />
+              <span className="add-ctx-label">工作区文件</span>
+              <span className="add-ctx-hint">插入 @ 后输入文件名</span>
+            </button>
+            {onPickWebElement && (
+              <button className="add-ctx-item" role="menuitem" onClick={run(onPickWebElement)}>
+                <Icon name="compass" size={13} />
+                <span className="add-ctx-label">网页元素</span>
+                <span className="add-ctx-hint">在右栏浏览器里点选</span>
+              </button>
+            )}
+          </div>
+        </>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
 const EFFORT_LABEL: Record<string, string> = {
   minimal: '最低',
   low: '低',
@@ -89,10 +200,9 @@ export function Composer({
   selectedEffort,
   onSelectModel,
   onSelectEffort,
-  projectName,
-  git,
   permissionMode,
   onSelectPermission,
+  onPickWebElement,
   configuredModel,
   pendingInput,
   onConsumePending,
@@ -111,9 +221,13 @@ export function Composer({
   selectedEffort: string | null;
   onSelectModel: (id: string) => void;
   onSelectEffort: (e: string | null) => void;
-  /** 上下文芯片内容：项目名与 git 状态。 */
-  projectName: string;
-  git: GitStatus | null;
+  /**
+   * 「+」菜单 →「网页元素」：驱动右栏浏览器进入元素选择模式。
+   *
+   * 可选：右栏没打开浏览器时为 undefined，此时菜单里**不出现该项**
+   * （与项目对右栏场景的纪律一致：不给点开是空的入口）。
+   */
+  onPickWebElement?: () => void;
   /** 当前权限档位与切换回调。 */
   permissionMode: PermissionMode | null;
   onSelectPermission: (mode: PermissionMode) => void;
@@ -326,6 +440,86 @@ export function Composer({
     });
 
   /**
+   * 把 File 列表落盘并转成可发送的图片附件。
+   *
+   * 粘贴（剪贴板只有字节）与「+」菜单选文件（有 File 对象、但没有可用的
+   * 文件系统路径）走的都是这条通路：**必须先落盘**，因为协议
+   * `localImage` 只认路径、没有内嵌字节的形式（见 protocol-facts）。
+   *
+   * 抽成共用函数而不是各写一遍：两处的校验、后缀推断、错误处理完全一致，
+   * 复制一份迟早会漂移——而漂移的表现是「拖入能用的格式，选文件却报错」。
+   */
+  const saveFiles = async (files: File[]): Promise<ImageAttachment[]> => {
+    const out: ImageAttachment[] = [];
+    for (const f of files) {
+      try {
+        const preview = await readAsDataUrl(f);
+        const dataBase64 = preview.slice(preview.indexOf(',') + 1);
+        const saved = await invoke<SavedAttachment>('save_attachment', {
+          fileName: f.name || `pasted.${extensionOf(f.name, f.type)}`,
+          dataBase64,
+        });
+        out.push({
+          kind: 'image',
+          path: saved.path,
+          name: saved.name,
+          // 用后端回传的 data URL（与落盘字节完全一致），
+          // 而不是前端那份——两者本应相同，但以落盘内容为准更可靠。
+          preview: saved.previewDataUrl,
+          size: saved.size,
+        });
+      } catch (err) {
+        setAttachError(extractErrorMessage(err));
+      }
+    }
+    return out;
+  };
+
+  /**
+   * 「+」菜单 →「添加图片」：打开系统文件选择。
+   *
+   * 用 `<input type="file">` 而不是 Tauri dialog 插件：后者要装插件、
+   * 配 capability 权限，而这里只需要「拿到 File 对象」——那正是
+   * `<input type="file">` 的原生能力，且与粘贴走完全相同的落盘通路。
+   */
+  const pickImageFiles = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.multiple = true;
+    input.onchange = () => {
+      const files = Array.from(input.files ?? []);
+      if (files.length === 0) return;
+      // 与拖入/粘贴同一套类型白名单与体积校验（imageFilesFrom）
+      const { accepted, rejected } = imageFilesFrom(files);
+      if (rejected.length > 0) setAttachError(rejected.map((r) => r.message).join('；'));
+      if (accepted.length === 0) return;
+      void saveFiles(accepted).then(addImages);
+    };
+    input.click();
+  };
+
+  /**
+   * 「+」菜单 →「引用工作区文件」：在光标处插入 `@` 触发已有的文件搜索。
+   *
+   * 不自己实现一套文件选择树——`@` 那条通路已经连通 `fuzzyFileSearch`、
+   * 防抖、键盘导航。这里只负责把用户带到那个入口。
+   */
+  const insertMention = () => {
+    const el = taRef.current;
+    const pos = el?.selectionStart ?? text.length;
+    const next = `${text.slice(0, pos)}@${text.slice(pos)}`;
+    setText(next);
+    // 光标放在 `@` 之后：候选列表依赖它右边的查询词。
+    // 焦点与选区**同步**设置即可：`setText` 的 state 更新会在本次事件处理
+    // 结束后提交，而 DOM 的 value 已由 React 在提交时写入——两处都用的是
+    // 同一个 `next`，不存在读到旧值的窗口。（早先用 rAF 延后，反而在测试里
+    // 造成 act 之外的 setState 警告。）
+    el?.focus();
+    el?.setSelectionRange(pos + 1, pos + 1);
+  };
+
+  /**
    * 处理粘贴：从剪贴板取图片并落盘。
    *
    * 剪贴板给的是字节、没有路径，而协议只认路径（`localImage`），
@@ -348,29 +542,7 @@ export function Composer({
       return;
     }
 
-    const out: ImageAttachment[] = [];
-    for (const f of accepted) {
-      try {
-        const preview = await readAsDataUrl(f);
-        const dataBase64 = preview.slice(preview.indexOf(',') + 1);
-        const saved = await invoke<SavedAttachment>('save_attachment', {
-          fileName: f.name || `pasted.${extensionOf(f.name, f.type)}`,
-          dataBase64,
-        });
-        out.push({
-          kind: 'image',
-          path: saved.path,
-          name: saved.name,
-          // 用后端回传的 data URL（与落盘字节完全一致），
-          // 而不是前端那份——两者本应相同，但以落盘内容为准更可靠。
-          preview: saved.previewDataUrl,
-          size: saved.size,
-        });
-      } catch (err) {
-        setAttachError(extractErrorMessage(err));
-      }
-    }
-    addImages(out);
+    addImages(await saveFiles(accepted));
   };
 
   /**
@@ -754,10 +926,17 @@ export function Composer({
               划给 Toolbar），而我们的浮层（StatusDock）已有 Git 段专门管它，
               还带提交/推送入口。两处都显示同一个分支名是冗余。 */}
           <div className="ctx-chips">
-            <span className="ctx-chip ctx-primary" title={git?.root ?? projectName}>
-              <Icon name="folder" size={11} />
-              {projectName}
-            </span>
+            {/* 「+」添加上下文。
+                这里原本是一个**不可点的项目名标签**（folder 图标 + 名字），
+                纯展示、无任何交互——而输入区左下角是用户找「加附件」的
+                第一直觉位置。项目名本身在顶栏已有（head-sub），不丢信息。
+                参照客户端的同位元素正是一个「+」并弹出「添加」菜单。 */}
+            <ContextMenu
+              disabled={disabled}
+              onAddImages={pickImageFiles}
+              onMentionFile={insertMention}
+              onPickWebElement={onPickWebElement}
+            />
             <PermissionPicker
               current={permissionMode}
               disabled={disabled}

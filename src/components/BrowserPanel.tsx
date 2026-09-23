@@ -36,6 +36,7 @@ export function BrowserPanel({
   slotRef,
   slotSize,
   onViewport,
+  pickRequest,
 }: {
   /** 当前要显示的地址（null = 尚未打开任何页面）。 */
   url: string | null;
@@ -54,6 +55,13 @@ export function BrowserPanel({
   slotSize: { width: number; height: number };
   /** 把算好的模拟视口交给原生层。 */
   onViewport: (v: Viewport, slot: { width: number; height: number }) => void;
+  /**
+   * 外部请求进入「选择元素」模式。
+   *
+   * 计数器语义：每次递增即触发一次（不能用一个 boolean——那样第二次请求
+   * 因为值没变而不会触发）。来源是输入区「+」菜单的「网页元素」项。
+   */
+  pickRequest?: number;
 }) {
   const [addr, setAddr] = useState(url ?? '');
   const [zoom, setZoom] = useState(1);
@@ -196,6 +204,14 @@ export function BrowserPanel({
       .then(() => setPicking(true))
       .catch((e) => setError(extractErrorMessage(e)));
   };
+
+  // 外部请求进入选择模式（输入区「+」菜单）：pickRequest 递增即触发。
+  // 依赖里只放 pickRequest —— startPick 每次渲染都是新函数，放进去会反复触发。
+  useEffect(() => {
+    if (!pickRequest) return;
+    startPick();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickRequest]);
 
   return (
     <div className="browser-panel">

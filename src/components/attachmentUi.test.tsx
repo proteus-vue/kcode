@@ -48,8 +48,6 @@ function mount(pending: WebElementAttachment | null = el) {
         selectedEffort={null}
         onSelectModel={() => {}}
         onSelectEffort={() => {}}
-        projectName="proj"
-        git={null}
         permissionMode="workspaceWrite"
         onSelectPermission={() => {}}
         configuredModel="m"

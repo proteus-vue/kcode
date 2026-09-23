@@ -1100,6 +1100,63 @@ body {
 .revert-confirm-note { margin: 0 0 8px; font-size: 11px; line-height: 1.55; color: var(--t3); }
 .revert-confirm-actions { display: flex; gap: 6px; }
 
+/* ── 输入区的「+」添加上下文 ────────────────────────────────────────── */
+
+.add-ctx { position: relative; flex-shrink: 0; }
+.add-ctx-btn {
+  display: grid; place-items: center;
+  width: 24px; height: 24px; padding: 0;
+  border-radius: var(--r-xs); cursor: pointer;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid transparent; color: var(--t3);
+  transition: color .13s, background .13s, border-color .13s;
+}
+.add-ctx-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: var(--edge-soft); color: var(--t1);
+}
+.add-ctx-btn:disabled { cursor: default; opacity: .55; }
+.add-ctx-btn.is-open { background: var(--accent-dim); color: var(--accent); border-color: transparent; }
+
+/* 遮罩层级低于菜单：点空白关闭，但点到菜单本身不会先被遮罩吃掉 */
+.add-ctx-backdrop { position: fixed; inset: 0; z-index: 60; }
+
+/* menu 由 portal 挂在 body 下、用 fixed 定位（坐标由 JS 按按钮算）。
+   留在原地会被 `.ctx-chips` 的 overflow: hidden 裁掉——见组件里的说明。 */
+.add-ctx-menu {
+  position: fixed; z-index: 61;
+  min-width: 232px; padding: 5px;
+  border-radius: 10px;
+  background: #1c2029;
+  border: 1px solid var(--edge-strong);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.62), inset 0 1px 0 var(--edge-strong);
+}
+.add-ctx-title {
+  margin: 2px 0 4px; padding: 0 9px;
+  font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--t4);
+}
+.add-ctx-item {
+  display: grid; grid-template-columns: 16px 1fr; gap: 1px 9px;
+  width: 100%;
+  padding: 7px 9px; border-radius: var(--r-xs);
+  background: none; border: none; cursor: pointer;
+  color: var(--t1); font: inherit; text-align: left;
+  transition: background-color .12s;
+}
+.add-ctx-item:hover { background-color: rgba(255, 255, 255, 0.1); }
+/* 图标**两行居中对齐**（不是 start）：标签一行 + 说明一行，
+   图标对齐两行的视觉中心才不显得"飘在标签上"。
+   （实测截图里 start 对齐会让图标与标签顶边齐平、看着偏上。） */
+.add-ctx-item .icon {
+  color: var(--t3); grid-row: span 2; align-self: center;
+}
+.add-ctx-label { font-size: 12.5px; }
+/* 说明文字缩进到与标签同列（跳过图标列） */
+.add-ctx-hint {
+  grid-column: 2; font-size: 10.5px; line-height: 1.45; color: var(--t4);
+}
+
 /* ── 工具聚合行（连续同类动作折叠） ─────────────────────────────────── */
 
 /* 组本身不加边框与底色：它只是"若干行的容器"，加壳会让时间线多一层

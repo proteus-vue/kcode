@@ -337,6 +337,15 @@ export default function App() {
   const [comments, setComments] = useState<ReviewComment[]>([]);
 
   /**
+   * 「+」菜单 →「网页元素」的触发计数。
+   *
+   * 用计数而不是 boolean：每次递增即触发一次选择模式，第二次点击也能生效。
+   * 用 boolean 的话第二次因为值没变而不触发——而「第一次能用、第二次没反应」
+   * 是最容易被当成偶发卡顿的那类缺陷。
+   */
+  const [pickRequest, setPickRequest] = useState(0);
+
+  /**
    * 撤销确认。
    *
    * 撤销是**破坏性**的：Agent 新建的未跟踪文件会被删除，git 找不回来。
@@ -732,10 +741,19 @@ export default function App() {
           selectedEffort={api.selectedEffort}
           onSelectModel={api.setModel}
           onSelectEffort={api.setEffort}
-          projectName={projectName}
-          git={api.git}
           permissionMode={api.settings?.mode ?? null}
           onSelectPermission={(m) => void api.setPermissionMode(m)}
+          /* 只有右栏浏览器已打开时才提供「网页元素」入口——
+             没打开时选不了元素，给了就是空入口。点了会先切到浏览器场景
+             再进入选择模式，用户不用自己去切标签。 */
+          onPickWebElement={
+            api.rightContent?.kind === 'browser'
+              ? () => {
+                  activateScene('browser');
+                  setPickRequest((n) => n + 1);
+                }
+              : undefined
+          }
           configuredModel={api.settings?.model ?? null}
           pendingInput={api.pendingInput}
           onConsumePending={api.clearPendingInput}
@@ -932,6 +950,7 @@ export default function App() {
                 // 用户能看出选了什么、也能单独移除
                 api.appendComposer(el);
               }}
+              pickRequest={pickRequest}
               slotRef={slotRef}
               slotSize={slotSize}
               onViewport={(v) => {
