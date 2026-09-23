@@ -259,6 +259,45 @@ fn rerun_hint(name: &str) -> String {
     format!("本地重跑：cargo test -p kcode-app --test acceptance {name} -- --nocapture")
 }
 
+/// 列出该线程收到过的**原始协议方法名**（按 seq 顺序，去重压缩）。
+///
+/// # 为什么需要它
+///
+/// 自诊断确认了「模型发出命令调用、轮次 Completed、但没有任何 Item」之后，
+/// 剩下的问题是：**app-server 到底发过命令相关的通知没有**？
+///
+/// - 若方法序列里根本没有 `item/*commandExecution*`，说明它把这次工具调用
+///   丢弃了（工具名不被识别 / 平台差异），客户端无从修复；
+/// - 若有，则是我们这边没接住——那是本地可控的缺陷。
+///
+/// 这两条路的结论完全相反，而只有原始报文能区分。事件日志本来就保存了
+/// `raw_json`（协议变更时可重新投影，见 log.rs），这里只是把它读出来。
+fn protocol_methods(thread_id: &str, log_path: &std::path::Path) -> String {
+    let Ok(log) = kcode_domain::EventLog::open(log_path) else {
+        return "（无法打开事件日志）".to_owned();
+    };
+    let Ok(records) = log.events_for_thread(thread_id) else {
+        return "（读取线程事件失败）".to_owned();
+    };
+    let mut methods: Vec<String> = Vec::new();
+    for r in &records {
+        // raw_json 是协议报文；取其 method 字段
+        if let Ok(v) = serde_json::from_str::<Value>(&r.raw_json) {
+            if let Some(m) = v.get("method").and_then(Value::as_str) {
+                if methods.last().map(String::as_str) != Some(m) {
+                    methods.push(m.to_owned());
+                }
+            }
+        }
+    }
+    if methods.is_empty() {
+        // 没有 method 字段：退回领域事件种类，同样有诊断价值
+        let kinds: Vec<String> = records.iter().map(|r| r.kind.clone()).collect();
+        return format!("（无协议 method 字段）领域事件：{}", kinds.join(","));
+    }
+    format!("协议方法序列（去重相邻）：{}", methods.join(" → "))
+}
+
 struct Harness {
     service: AgentService,
     events: tokio::sync::broadcast::Receiver<AppEvent>,
@@ -485,10 +524,11 @@ async fn history_survives_restart() {
             panic!(
                 "未找到命令 Item。\n\
                  实际 items：{}\n\
-                 轮次状态：{turn_status:?}（若为 failed，说明命令侧出错而非重放问题）\n\
-                 这能区分「命令没跑」与「跑了但类型不符」——CI 注解只显示短行，\n\
-                 所以现场必须写在这里。\n{}",
+                 轮次状态：{turn_status:?}\n\
+                 {}\n\
+                 {}",
                 summarize_items(&items_after),
+                protocol_methods(&thread_id, &home.join("kcode-events.db")),
                 rerun_hint("history_survives_restart"),
             )
         });
@@ -669,9 +709,10 @@ async fn turn_diff_reaches_ui_with_real_content() {
         panic!(
             "未收到带内容的 TurnDiffUpdated 事件。\n\
              实际 items：{}\n\
-             （若完全不见 fileChange 项，说明 apply_patch 没被执行；\n\
-             若只见 cmd 项，说明补丁走了命令通道但未产生文件变更）\n{}",
+             {}\n\
+             {}",
             summarize_items(&items),
+            protocol_methods(&info.thread_id, &h.log_path),
             rerun_hint("turn_diff_reaches_ui_with_real_content"),
         )
     });
@@ -862,8 +903,10 @@ async fn long_output_is_delivered_intact() {
         panic!(
             "未找到命令 Item。\n\
              轮次状态：{turn_status:?}；实际 items：{}\n\
-             （命令若是被沙箱拒绝，这里会看到 cmd[...] 之外的形态或完全没有 cmd 项）\n{}",
+             {}\n\
+             {}",
             summarize_items(&items),
+            protocol_methods(&info.thread_id, &h.log_path),
             rerun_hint("long_output_is_delivered_intact"),
         )
     });
