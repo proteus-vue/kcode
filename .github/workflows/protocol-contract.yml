@@ -132,20 +132,51 @@ jobs:
       # （连 `echo hello` 都不产生 Item）。Linux 上 workspace-write 沙箱依赖
       # 内核/工具支持，所以把前提打出来，让「沙箱不可用」这个假设可被证实或排除，
       # 而不是继续猜（见 docs/协议勘误与修正.md §3.27）。
+      #
+      # **同时写注解**（::error:: 之外的普通行不会进注解，所以这里显式加前缀）：
+      # job summary 对未登录访问者不渲染，而注解面板匿名可读——本项目的开发
+      # 环境没有 admin 权限，注解是唯一稳定的读取通道。
       - name: 沙箱前提自检（仅失败时执行）
         if: failure()
         run: |
-          {
-            echo "### Linux 沙箱前提"
-            echo '```'
+          collect() {
             echo "kernel: $(uname -r)"
-            echo "user namespaces (unprivileged): $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo '（无此文件）')"
+            echo "userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo '（无此文件）')"
             echo "max_user_namespaces: $(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo '（无此文件）')"
-            echo "landlock LSM: $(grep -c landlock /sys/kernel/security/lsm 2>/dev/null || echo '（读不到）')"
+            echo "landlock_in_lsm: $(grep -c landlock /sys/kernel/security/lsm 2>/dev/null || echo '（读不到）')"
             echo "bwrap: $(command -v bwrap || echo '未安装')"
             echo "seccomp: $(grep Seccomp /proc/self/status 2>/dev/null | head -1 || echo '未知')"
+          }
+          {
+            echo '### Linux 沙箱前提'
+            echo '```'
+            collect
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "---- 沙箱前提（逐行进注解）----"
+          collect | while IFS= read -r line; do
+            echo "::error::沙箱前提 $line"
+          done
+
+          # codex 自己的医生：它会检查本机沙箱能力与运行环境。
+          # 比我们手写的前提检查更权威——环境判断的逻辑在它那里。
+          echo "---- codex doctor（环境段）----"
+          BIN=$(find node_modules/@openai -path '*vendor*/bin/codex' -type f 2>/dev/null | head -1)
+          if [[ -n "$BIN" ]]; then
+            "$BIN" doctor 2>&1 | sed -n '1,40p' | while IFS= read -r line; do
+              [[ -n "$line" ]] && echo "::error::doctor $line"
+            done
+          else
+            echo "::error::未找到 codex 二进制，无法运行 doctor"
+          fi
+
+          # 真跑一次沙箱命令：这是**最直接的判据**——沙箱能否执行命令，
+          # 不依赖任何推断。失败时它的报错就是根因证据。
+          echo "---- 沙箱实测 ----"
+          if [[ -n "$BIN" ]]; then
+            out=$("$BIN" sandbox -- /bin/echo sandbox-ok 2>&1); rc=$?
+            echo "::error::sandbox 实测 exit=$rc out=$(echo "$out" | head -3 | tr '\n' ' ')"
+          fi
 
       - name: 静态检查
         run: cargo clippy --workspace --all-targets -- -D warnings
