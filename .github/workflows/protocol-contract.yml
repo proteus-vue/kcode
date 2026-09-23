@@ -35,11 +35,19 @@ jobs:
         run: bash scripts/verify-codex-version.sh
 
       # 各平台的锁定哈希需要**在该平台上**才能算出（二进制不同、哈希必然不同）。
-      # 开发机是 macOS，无法算出 Linux 的哈希——所以在这里把它打出来，
-      # 供回填 codex.lock.json。**不猜、不编造**：上面那步在本平台未记录时
-      # 会明确提示，本步骤提供补齐它所需的那两个值。
+      # 开发机是 macOS，无法算出 Linux 的哈希——所以在这里把它打出来并写入
+      # **job summary**（匿名可读，不需要 admin 权限下载日志），供回填。
+      # **不猜、不编造**：上面那步在本平台未记录时会明确提示。
       - name: 打印本平台 codex 哈希（用于回填 codex.lock.json）
-        run: bash scripts/verify-codex-version.sh --print-hash
+        run: |
+          bash scripts/verify-codex-version.sh --print-hash | tee /tmp/hash.txt
+          {
+            echo "### 本平台 codex 二进制"
+            echo '```'
+            grep -E '^(platform|version|sha256)=' /tmp/hash.txt || echo "（未取到）"
+            echo '```'
+            echo "若上面的平台不在 \`codex.lock.json\` 的 \`platforms\` 里，请回填后提交。"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 检测协议漂移（schema + TS 绑定）
         run: bash scripts/gen-schema.sh --check
