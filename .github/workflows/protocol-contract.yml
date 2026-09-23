@@ -81,8 +81,30 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # 单元测试。用 `--no-fail-fast` 让所有 crate 都跑完（默认遇到第一个
+      # 失败就停，只能看到一个 crate 的问题）；`tee` 落盘一份日志，
+      # 供下一步在**注解面板**里点名失败用例。
+      #
+      # 为什么要点名到注解：CI 的完整日志需要仓库 admin 权限才能下载
+      # （本项目为公开仓库、开发机无 admin），而注解面板是匿名可读的。
+      # 只看到「测试失败」而看不到是哪一个，等于要再跑一轮才能定位——
+      # 勘误 §3.23 的教训：不可行动的失败报告等于没有报告。
       - name: 全部单元测试（纯逻辑，无外部依赖）
-        run: cargo test --workspace --lib
+        run: cargo test --workspace --lib --no-fail-fast 2>&1 | tee /tmp/rust-tests.log
+
+      - name: 失败用例摘要（仅失败时执行）
+        if: failure()
+        run: |
+          if grep -qE '^test .* \.\.\. FAILED' /tmp/rust-tests.log 2>/dev/null; then
+            while IFS= read -r line; do
+              echo "::error::$line"
+            done < <(grep -E '^test .* \.\.\. FAILED' /tmp/rust-tests.log)
+          else
+            # 没有 FAILED 行说明是编译失败或环境问题，把尾部错误打出来
+            tail -40 /tmp/rust-tests.log | while IFS= read -r line; do
+              [[ -n "$line" ]] && echo "::error::$line"
+            done
+          fi
 
       - name: 集成测试（真实 app-server 进程 + 本地 mock 模型）
         run: |
