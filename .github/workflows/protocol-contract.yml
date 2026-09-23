@@ -154,7 +154,14 @@ jobs:
       # 只看到「测试失败」而看不到是哪一个，等于要再跑一轮才能定位——
       # 勘误 §3.23 的教训：不可行动的失败报告等于没有报告。
       - name: 全部单元测试（纯逻辑，无外部依赖）
-        run: cargo test --workspace --lib --no-fail-fast 2>&1 | tee /tmp/rust-tests.log
+        # **必须 set -o pipefail**：`cmd | tee log` 的退出码是 tee 的（0），
+        # 于是测试失败也报成功——本步骤一度就是这样静默放过了 Linux 上的
+        # 单元测试失败（`pick_uses_bundle_when_path_lacks_cli` 在 Linux 上
+        # 因 BUNDLE_PATHS 为空而失败，CI 却显示 OK）。
+        # 这与 §3.25 的 workflow 失效同类：**绿不代表真的跑通了**。
+        run: |
+          set -o pipefail
+          cargo test --workspace --lib --no-fail-fast 2>&1 | tee /tmp/rust-tests.log
 
       - name: 失败用例摘要（仅失败时执行）
         if: failure()

@@ -1020,6 +1020,12 @@ fn show_fatal_dialog(message: &str) {
 }
 
 /// 把字符串转义为 AppleScript 字面量。
+///
+/// **必须与调用点同门控**：它只被 macOS 分支使用，若在此不加 cfg，
+/// Linux 上就是一个没有调用者的函数——`dead_code` 警告会在 CI 的
+/// `clippy -D warnings` 下变成错误。这是本项目第一次在 Linux 上真跑
+/// 静态检查时暴露的（见 docs/协议勘误与修正.md §3.29）。
+#[cfg(target_os = "macos")]
 fn applescript_quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }

@@ -323,12 +323,32 @@ mod tests {
         assert_eq!(c.style, LineStyle::GotoFlag);
     }
 
+    /// app bundle 回退**只在 macOS 存在**（`BUNDLE_PATHS` 在其它平台是空表）。
+    ///
+    /// 必须同样门控：测试最初没加 `cfg`，于是它在 Linux 上必然失败——
+    /// 因为那里根本没有 bundle 候选，`pick` 会走到「系统默认」分支。
+    /// 而这个失败被 workflow 的 `| tee` 吞掉了退出码（见 §3.29），
+    /// 直到给那一步加上 `set -o pipefail` 才暴露出来。
+    #[cfg(target_os = "macos")]
     #[test]
     fn pick_uses_bundle_when_path_lacks_cli() {
         let c = pick(None, no_path, |p| p.contains("Visual Studio Code"));
         assert_eq!(c.label, "VS Code");
         assert!(c.program.contains("Visual Studio Code.app"), "应走 app bundle 里的 CLI");
         assert_eq!(c.style, LineStyle::GotoFlag, "bundle 路径同样支持跳行");
+    }
+
+    /// 非 macOS 平台：没有 bundle 候选，PATH 又找不到编辑器时直接落到系统默认。
+    /// 这正是 Linux CI 上的真实路径，必须有断言覆盖，否则那台机器上的行为无人验证。
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn pick_skips_bundle_on_non_macos() {
+        let c = pick(None, no_path, |_| true);
+        assert_eq!(
+            c.label, "系统默认",
+            "非 macOS 平台不应有 app bundle 候选（即便 bundle_available 恒真）"
+        );
+        assert_eq!(c.program, "xdg-open", "Linux 上应回退到 xdg-open");
     }
 
     #[test]
