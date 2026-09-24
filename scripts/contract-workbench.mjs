@@ -44,8 +44,12 @@ function startServer() {
   const child = spawn(BIN, ['app-server', '--stdio'], {
     cwd, env: { ...process.env, CODEX_HOME: home }, stdio: ['pipe', 'pipe', 'pipe'],
   });
-  const state = { buf: '', id: 0, pending: new Map(), deltas: [] };
+  // stderr 必须收集：PTY 一类的失败原因常只出现在这里。此前它被完全忽略，
+  // 于是 CI 上「tty 产生 0 条增量」时手里没有任何线索（见勘误 §3.34）。
+  const state = { buf: '', id: 0, pending: new Map(), deltas: [], stderr: '' };
   child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (c) => { state.stderr += c; });
   child.stdout.on('data', (c) => {
     state.buf += c;
     let i;
@@ -129,12 +133,49 @@ try {
   // ── 终端场景：TTY ─────────────────────────────────────────────
   console.log('\n4. command/exec 开启 tty');
   s.deltas.length = 0;
+  const ttyStart = Date.now();
   const tty = await s.send('command/exec', {
     command: ['/bin/sh', '-lc', 'echo tty-ok'],
     cwd, processId: 'p-tty', tty: true, size: { rows: 24, cols: 80 },
   });
+  const ttyMs = Date.now() - ttyStart;
   ok('tty 模式产生增量', s.deltas.length > 0, `${s.deltas.length} 条`);
   ok('tty 模式正常退出', tty.result?.exitCode === 0, `exitCode=${tty.result?.exitCode}`);
+
+  // ── tty 失败时的诊断（仅失败时输出，正常路径不受影响）──────────
+  //
+  // 2026-09-24：CI（Linux）上这两条断言失败——0 条增量、exitCode undefined，
+  // 而**同一脚本的非 tty 流式（第 3 节）是通过的**。因此问题精确到「PTY」。
+  // 且 `exitCode=undefined` 加上 25s 的等待，说明请求是**挂到超时**，
+  // 不是快速失败——这本身就是一个值得上报的行为（上游不该静默挂起）。
+  //
+  // 这里加一段**对照实验**，让下一轮 CI 一轮就能区分两种原因：
+  //   · 若放开沙箱后 tty 可用 → 是**沙箱**限制了 PTY（Linux sandbox 常见：
+  //     bwrap/landlock 下的 /dev/ptmx 或 /dev/pts 不可用）；
+  //   · 若放开沙箱后仍不可用 → 与沙箱无关，是 Linux 上 PTY 路径本身的问题。
+  //
+  // 在 macOS 上默认沙箱下 tty 是正常工作的，因此这段不会触发、不产生噪音。
+  if (s.deltas.length === 0) {
+    console.log('  ── tty 失败诊断（自动触发）──');
+    console.log(`  耗时: ${ttyMs}ms${tty._t ? '（达到 25s 超时）' : ''}`);
+    console.log(`  完整响应: ${JSON.stringify(tty).slice(0, 500)}`);
+    const errTail = s.stderr.split('\n').filter((l) => l.trim()).slice(-10).join('\n');
+    console.log(`  app-server stderr 尾部: ${errTail || '（空）'}`);
+    console.log(`  环境: platform=${process.platform} arch=${process.arch}`);
+
+    s.deltas.length = 0;
+    const openStart = Date.now();
+    const ttyOpen = await s.send('command/exec', {
+      command: ['/bin/sh', '-lc', 'echo tty-open'],
+      cwd, processId: 'p-tty-open', tty: true, size: { rows: 24, cols: 80 },
+      sandboxPolicy: { type: 'dangerFullAccess' },
+    });
+    console.log(`  对照（dangerFullAccess 沙箱）: 增量 ${s.deltas.length} 条，`
+      + `exitCode=${ttyOpen.result?.exitCode}，耗时 ${Date.now() - openStart}ms`
+      + `${ttyOpen._t ? '（超时）' : ''}`);
+    console.log(`  对照 stderr: ${s.stderr.split('\n').filter((l) => l.trim()).slice(-6).join(' | ') || '（空）'}`);
+    console.log('  ── 诊断结束 ──');
+  }
 
   // ── 空 argv 必须被拒 ──────────────────────────────────────────
   console.log('\n5. 边界');
