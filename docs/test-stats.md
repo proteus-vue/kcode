@@ -14,7 +14,7 @@
 | 协议契约（真实 codex 二进制端到端） | 56 | 0 | ✅ 全部通过 |
 
 Rust 按 crate 分布：kcode-bridge 75 / kcode-domain 121 / kcode-app 50 / kcode-desktop 102。
-前端覆盖 42 个测试文件；Rust 另有 14 项被显式忽略（`#[ignore]` 或文档测试，不计入通过数）。
+前端覆盖 42 个测试文件；Rust 另有 15 项被显式忽略（`#[ignore]` 或文档测试，不计入通过数）。
 
 ## Rust 明细
 
@@ -30,7 +30,7 @@ Rust 按 crate 分布：kcode-bridge 75 / kcode-domain 121 / kcode-app 50 / kcod
 | `kcode-app` | tests/acceptance.rs | 12 | 0 | 0 |
 | `kcode-app` | tests/e2e.rs | 20 | 0 | 0 |
 | `kcode-app` | tests/wire_contract.rs | 10 | 0 | 0 |
-| `kcode-desktop` | src/lib.rs（单元测试） | 102 | 0 | 13 |
+| `kcode-desktop` | src/lib.rs（单元测试） | 102 | 0 | 14 |
 
 ## 协议契约明细
 

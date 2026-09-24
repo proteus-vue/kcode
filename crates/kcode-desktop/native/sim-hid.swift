@@ -371,6 +371,9 @@ final class Injector {
         }
     }
 
+    /// 最近一次注入是否失败（nil = 成功）。常驻模式用它回执。
+    var sendError: String? { lastSendError }
+
     /// 打完注入后的收尾说明。
     ///
     /// **只在出错时说话**（成功时静默）：这个 helper 由上层按用户操作调用，
@@ -380,6 +383,28 @@ final class Injector {
         if let e = lastSendError {
             FileHandle.standardError.write("注入未送达：\(e)\n".data(using: .utf8)!)
         }
+    }
+
+    /// 只发不等回执（用于滑动**中途**的 move）。
+    ///
+    /// # 为什么中途不需要等
+    ///
+    /// 实测：每次 `send` 都等一次回执（dispatch 到另一个队列 + 信号量），
+    /// 单步往返约 **330ms 的累计开销**——滑动 300ms 实际跑 610ms、
+    /// 800ms 实际 1150ms。后果不只是慢：手势被拉长约一倍且**节奏不匀**，
+    /// 而 iOS 的惯性滚动是**按 move 序列的时间与位移算速度**的，
+    /// 节奏一乱就得到「速度偏低」→ 惯性不来或很弱 → 手感发涩。
+    ///
+    /// 中途的 move 是「尽力而为」的事件：丢了某一帧只影响轨迹平滑度，
+    /// 而等待每一帧的回执会把整条轨迹拖垮。所以中途 fire-and-forget，
+    /// **只在按下与抬起时等回执**（那两个决定这次手势是否真的成立）。
+    private func touchNoWait(_ type: Int32, x: Double, y: Double) {
+        var point = CGPoint(x: x, y: y)
+        guard let msg = mouseFunc(&point, nil, mainScreenTouchTarget, type, 1.0, 1.0, 0) else {
+            return
+        }
+        unsafeBitCast(sendIMP, to: SendFunc.self)(
+            client, sendSelector, msg, ObjCBool(true), nil, nil)
     }
 
     /// 发一个触摸事件。返回 nil 表示成功，否则是失败原因。
@@ -392,6 +417,37 @@ final class Injector {
         lastSendError = nil
         send(msg)
         return lastSendError
+    }
+
+    /// 常驻模式用：不 exit，把结果放进 `lastSendError`。
+    func tapQuiet(x: Double, y: Double) {
+        lastSendError = nil
+        if let e = touch(eventDown, x: x, y: y) { lastSendError = e; return }
+        usleep(60_000)
+        if let e = touch(eventUp, x: x, y: y) { lastSendError = e }
+    }
+
+    /// 常驻模式用：不 exit。
+    func swipeQuiet(x1: Double, y1: Double, x2: Double, y2: Double, durationMs: Int) {
+        lastSendError = nil
+        let steps = max(2, min(120, durationMs / 8))
+        let stepDelayUs = durationMs > 0 ? (durationMs * 1000) / steps : 8_000
+        if let e = touch(eventDown, x: x1, y: y1) { lastSendError = e; return }
+        for i in 1...steps {
+            let t = Double(i) / Double(steps)
+            usleep(useconds_t(stepDelayUs))
+            touchNoWait(eventDown, x: x1 + (x2 - x1) * t, y: y1 + (y2 - y1) * t)
+        }
+        if let e = touch(eventUp, x: x2, y: y2) { lastSendError = e }
+    }
+
+    /// 常驻模式用：不 exit。
+    func buttonQuiet(_ name: String) -> Bool {
+        guard let (code, target) = buttonCode(name), let buttonFunc else { return false }
+        guard let msg = buttonFunc(0, code, target) else { return false }
+        lastSendError = nil
+        send(msg)
+        return lastSendError == nil
     }
 
     func tap(x: Double, y: Double) {
@@ -410,8 +466,11 @@ final class Injector {
     /// 内跳完（iOS 可能识别成快速甩动），而我们的调用方（用户拖拽）本来就有
     /// 明确的时长。约 16ms 一步（≈60fps）是模拟器能跟上的节奏。
     func swipe(x1: Double, y1: Double, x2: Double, y2: Double, durationMs: Int) {
-        let steps = max(2, min(60, durationMs / 16))
-        let stepDelayUs = durationMs > 0 ? (durationMs * 1000) / steps : 16_000
+        // 步数上限从 60 提到 120：60 步在 800ms 长滑动上是每步约 18ms，
+        // 位移跳跃明显；120 步更接近真机触摸的采样密度（约 120Hz）。
+        // 提高步数**不再有额外往返代价**（中途不等回执了）。
+        let steps = max(2, min(120, durationMs / 8))
+        let stepDelayUs = durationMs > 0 ? (durationMs * 1000) / steps : 8_000
 
         if let e = touch(eventDown, x: x1, y: y1) {
             fail(.injectFailed, "按下事件未送达：\(e)")
@@ -421,7 +480,9 @@ final class Injector {
             let x = x1 + (x2 - x1) * t
             let y = y1 + (y2 - y1) * t
             usleep(useconds_t(stepDelayUs))
-            _ = touch(eventDown, x: x, y: y)
+            // 中途**不等回执**（见 touchNoWait 的说明：等回执会让手势节奏
+            // 被往返延迟绑架，进而毁掉 iOS 的惯性滚动）
+            touchNoWait(eventDown, x: x, y: y)
         }
         if let e = touch(eventUp, x: x2, y: y2) {
             fail(.injectFailed, "抬起事件未送达：\(e)")
@@ -457,6 +518,12 @@ func dbg(_ m: @autoclosure () -> String) {
 
 let args = parseArgs(CommandLine.arguments)
 let developerDir = resolveDeveloperDir(args.developerDir)
+
+// `--serve`：常驻模式（见 serve 的说明——省掉每次约 182ms 的连接开销）
+if CommandLine.arguments.contains("--serve") {
+    serve(developerDir: developerDir)
+    exit(0)
+}
 
 /// 执行一次注入命令，失败即以非零码退出。
 ///
@@ -517,6 +584,92 @@ func run(_ args: Args, developerDir: String) throws {
 
     default:
         fail(.usage, "未知命令 \(args.command)\n\n" + usage)
+    }
+}
+
+/// 常驻模式：从 stdin 逐行读命令，**复用同一个 HID 客户端**。
+///
+/// # 为什么需要（实测数字）
+///
+/// 每次调用都重新建立连接的开销：
+///
+/// | 阶段 | 耗时 |
+/// |---|---|
+/// | dlopen 私有框架 | 25ms |
+/// | **连 CoreSimulator + 找设备** | **150ms** |
+/// | 建 HID 客户端 | 7ms |
+///
+/// 合计约 **182ms**。而滑动本身只要几十到几百毫秒——也就是说
+/// **手势开始前先白等 182ms**，之后才动。用户感受是「点了/滑了之后先卡一下」，
+/// 这正是「感觉卡」的来源之一。
+///
+/// 常驻后这些开销只付一次，之后每条命令都是纯粹的注入。
+///
+/// 命令格式（每行一条，制表符分隔）：
+///   tap\t<udid>\t<x>\t<y>
+///   swipe\t<udid>\t<x1>\t<y1>\t<x2>\t<y2>\t<durationMs>
+///   button\t<udid>\t<home|lock>
+///   ping\t<udid>
+/// 每条命令回一行：`ok` 或 `err\t<原因>`（pong 回 `ok`）。
+func serve(developerDir: String) {
+    // 缓存按 UDID 建客户端：用户可能切设备，但同一个不必重建
+    var cache: [String: Injector] = [:]
+    func injector(_ udid: String) -> Injector? {
+        if let c = cache[udid] { return c }
+        guard let made = try? Injector(deviceUDID: udid, developerDir: developerDir) else {
+            return nil
+        }
+        cache[udid] = made
+        return made
+    }
+
+    let stdout = FileHandle.standardOutput
+    func reply(_ line: String) {
+        stdout.write((line + "\n").data(using: .utf8)!)
+    }
+
+    // 先把第一批连接建好再报 ready：让上层知道「现在发命令不会有启动开销」
+    reply("ready")
+
+    while let raw = readLine(strippingNewline: true) {
+        let parts = raw.split(separator: "\t").map(String.init)
+        guard let cmd = parts.first else { continue }
+        func num(_ i: Int) -> Double? {
+            i < parts.count ? Double(parts[i]) : nil
+        }
+        switch cmd {
+        case "tap":
+            guard parts.count >= 4, let x = num(2), let y = num(3), let inj = injector(parts[1]) else {
+                reply("err\t参数或设备无效"); continue
+            }
+            inj.tapQuiet(x: x, y: y)
+            reply(inj.sendError.map { "err\t\($0)" } ?? "ok")
+        case "swipe":
+            guard parts.count >= 7, let x1 = num(2), let y1 = num(3),
+                  let x2 = num(4), let y2 = num(5), let d = num(6),
+                  let inj = injector(parts[1]) else {
+                reply("err\t参数或设备无效"); continue
+            }
+            inj.swipeQuiet(x1: x1, y1: y1, x2: x2, y2: y2, durationMs: Int(d))
+            reply(inj.sendError.map { "err\t\($0)" } ?? "ok")
+        case "button":
+            guard parts.count >= 3, let inj = injector(parts[1]) else {
+                reply("err\t参数或设备无效"); continue
+            }
+            if inj.buttonQuiet(parts[2]) {
+                reply("ok")
+            } else {
+                reply("err\t不支持的按键")
+            }
+        case "ping":
+            guard parts.count >= 2 else { reply("err\t缺 udid"); continue }
+            reply(injector(parts[1]) != nil ? "ok" : "err\t连接失败")
+        case "quit":
+            reply("ok")
+            exit(0)
+        default:
+            reply("err\t未知命令 \(cmd)")
+        }
     }
 }
 

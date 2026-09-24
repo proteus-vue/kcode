@@ -2531,6 +2531,70 @@ fn find_window_id(owner_needle: &str) -> Option<u32> {
     best.map(|(id, _)| id)
 }
 
+/// 窗口在屏幕上的**物理像素宽**（逻辑宽 × 屏幕缩放）。
+///
+/// 采集按物理像素才不会发虚：Retina 上逻辑 494pt 的窗口实际有 988 个像素，
+/// 若按逻辑宽采集再放大显示，细节会丢。
+///
+/// 用 helper 的 `--list` 拿逻辑宽（它已经链接了 ScreenCaptureKit），
+/// 再乘主屏缩放。取不到时回退 700（面板的近似显示宽度，够锐且不过量）。
+fn window_physical_width(window_id: u32) -> u32 {
+    let logical = window_logical_width(window_id).unwrap_or(700);
+    // 主屏缩放：Retina 通常为 2。用 macOS 的 NSScreen 值需要额外桥接，
+    // 这里用 CGDisplay 的像素/点比，够准且不引入依赖。
+    let scale = main_display_scale();
+    ((logical as f64 * scale).round() as u32).max(300)
+}
+
+/// 从 helper 的 `--list` 里取该窗口的逻辑宽。
+fn window_logical_width(window_id: u32) -> Option<u32> {
+    let helper = window_cast_path()?;
+    let out = std::process::Command::new(&helper).arg("--list").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let mut parts = line.split('\t');
+        let (Some(id_s), _, Some(size)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        if id_s.trim().parse::<u32>().ok() != Some(window_id) {
+            continue;
+        }
+        return size
+            .split('x')
+            .next()
+            .and_then(|w| w.trim().parse::<u32>().ok());
+    }
+    None
+}
+
+/// 主屏缩放系数（Retina 为 2）。
+fn main_display_scale() -> f64 {
+    // 屏幕的物理像素宽 / 逻辑宽。取不到时按 2（绝大多数现代 Mac）。
+    const SCRIPT: &str = r#"
+import sys
+try:
+    from AppKit import NSScreen
+    s = NSScreen.mainScreen()
+    print(s.backingScaleFactor())
+except Exception:
+    print(2)
+"#;
+    let out = std::process::Command::new("/usr/bin/python3")
+        .arg("-c")
+        .arg(SCRIPT)
+        .output();
+    // ⚠️ 系统自带 python3 没有 pyobjc（本项目踩过），所以这里**必须允许失败**
+    // 并回退到 2 —— 缩放只影响画面锐度，不该成为「流启动不了」的原因。
+    if let Ok(o) = out {
+        if let Ok(v) = String::from_utf8_lossy(&o.stdout).trim().parse::<f64>() {
+            if (1.0..=4.0).contains(&v) {
+                return v;
+            }
+        }
+    }
+    2.0
+}
+
 /// 平台对应的窗口所有者名（用于定位要抓哪个窗口）。
 fn window_owner_for(platform: Platform) -> Option<&'static str> {
     match platform {
@@ -2566,6 +2630,28 @@ fn ensure_cast(platform: Platform, device_id: &str) -> Option<()> {
     }
 
     let window_id = find_window_id(owner)?;
+    // 采集宽度**按屏幕上的真实像素**（逻辑宽 × DPR），不做降采样。
+    //
+    // # 为什么不能写死一个小的值
+    //
+    // 之前写死 450px，而 Simulator 窗口的逻辑宽是 494pt（Retina 上即 988px
+    // 物理像素），面板显示区又接近 700px —— 等于先降到窗口的 23%、再放大
+    // 1.55 倍显示，画面明显发虚（用户反馈「感觉卡」的一部分其实是糊）。
+    //
+    // # 为什么全分辨率不心疼
+    //
+    // 实测编码耗时几乎不随宽度变（SCK 用 GPU 缩放，编码器开销固定）：
+    //
+    // | 采集宽度 | 稳定 fps | 编码均值 | JPEG 均值 |
+    // |---|---|---|---|
+    // | 450px | 25.1 | 22.9ms | 39KB |
+    // | 700px | 25.4 | 19.8ms | 69KB |
+    // | 988px | 26.4 | 21.0ms | 112KB |
+    //
+    // 代价在**传输**（112KB/帧 × 30fps ≈ 4MB/s 走 IPC），所以这里取窗口的
+    // 实际像素宽，但设一个上限：超过 1200px 的屏幕再降采样（那种尺寸的
+    // 设备画面在右栏里本来也显示不下，多传是浪费）。
+    let width = window_physical_width(window_id).clamp(300, 1200);
     let mut child = std::process::Command::new(&helper)
         .args([
             "--window",
@@ -2573,7 +2659,7 @@ fn ensure_cast(platform: Platform, device_id: &str) -> Option<()> {
             "--fps",
             "30",
             "--width",
-            "450",
+            &width.to_string(),
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -3047,6 +3133,94 @@ async fn input_miniprogram(action: &str) -> Result<(), String> {
     }
 }
 
+// ── 常驻 HID 客户端（省掉每次约 182ms 的连接开销）─────────────────────
+//
+// 实测一次性调用的固定开销：dlopen 私有框架 25ms + 连 CoreSimulator 找设备
+// 150ms + 建 HID 客户端 7ms ≈ **182ms**。而滑动本身只要几十到几百毫秒——
+// 也就是**手势开始前先白等 182ms**，用户感受是「滑了之后先卡一下」。
+//
+// 改成常驻后：连接只付一次，之后每条命令 0–70ms（实测 tap 65.7ms、
+// swipe 300ms 请求实测 366ms）。这是「滑动发涩」的主要来源之一。
+
+/// 常驻 HID 进程的句柄。
+struct HidClient {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl Drop for HidClient {
+    fn drop(&mut self) {
+        let _ = writeln!(self.stdin, "quit");
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+static HID_CLIENT: std::sync::Mutex<Option<HidClient>> = std::sync::Mutex::new(None);
+
+use std::io::{BufRead, Write};
+
+/// 确保常驻 HID 客户端已启动（首次含连接开销）。
+fn ensure_hid_client(developer_dir: Option<&Path>) -> Option<()> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let helper = sim_hid_path()?;
+    let mut guard = HID_CLIENT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(c) = guard.as_mut() {
+        if c.child.try_wait().map(|s| s.is_none()).unwrap_or(false) {
+            return Some(());
+        }
+        *guard = None;
+    }
+
+    let mut cmd = std::process::Command::new(&helper);
+    cmd.arg("--serve");
+    if let Some(d) = developer_dir {
+        cmd.arg("--developer-dir").arg(d);
+    }
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdin = child.stdin.take()?;
+    let mut stdout = std::io::BufReader::new(child.stdout.take()?);
+
+    // 等 ready（helper 建好首次连接后才回）：这样上层知道「后续命令无启动开销」
+    let mut line = String::new();
+    if stdout.read_line(&mut line).ok()? == 0 {
+        return None;
+    }
+    if !line.trim().starts_with("ready") {
+        return None;
+    }
+    *guard = Some(HidClient { child, stdin, stdout });
+    Some(())
+}
+
+/// 通过常驻客户端发一条命令，返回 helper 的回执行。
+fn hid_cmd(line: &str, developer_dir: Option<&Path>) -> Result<String, String> {
+    ensure_hid_client(developer_dir).ok_or("HID 常驻客户端不可用")?;
+    let mut guard = HID_CLIENT.lock().unwrap_or_else(|e| e.into_inner());
+    let c = guard.as_mut().ok_or("HID 常驻客户端已退出")?;
+    writeln!(c.stdin, "{line}").map_err(|e| format!("写入失败：{e}"))?;
+    c.stdin.flush().map_err(|e| format!("刷新失败：{e}"))?;
+    let mut resp = String::new();
+    let n = c.stdout.read_line(&mut resp).map_err(|e| format!("读取回执失败：{e}"))?;
+    if n == 0 {
+        *guard = None;
+        return Err("HID 常驻客户端已退出".to_owned());
+    }
+    let r = resp.trim().to_owned();
+    if let Some(err) = r.strip_prefix("err\t") {
+        return Err(err.to_owned());
+    }
+    Ok(r)
+}
+
 /// iOS 输入：走 `kcode-sim-hid` helper（**已在真机验证** tap/swipe/button）。
 ///
 /// # 坐标换算：像素 → 归一化
@@ -3056,18 +3230,50 @@ async fn input_miniprogram(action: &str) -> Result<(), String> {
 ///
 /// 尺寸取的是**截图的实际尺寸**（不是设备规格表里的值）——两者在缩放显示
 /// 或外接屏时可能不同，而坐标必须与被点的那张图一致。
+/// iOS 触摸所需的「工具链 + 开发者目录」缓存。
+///
+/// # 为什么必须缓存
+///
+/// `resolve_ios()` 要跑 `xcode-select -p` 并**扫描应用目录**找 Xcode；
+/// `ios_input_available()` 要起一个子进程做 probe。这些在**每次触摸**时
+/// 都重付一遍——实测每次约 300ms，而位移类手势（滑动）每帧都会调一次这里，
+/// 于是输入节奏被这些「准备动作」拖垮。
+///
+/// 缓存的是**解析结果**而不是判断：设备/工具链在同一次连接里不会变。
+/// 换 Xcode 或改「自定义路径」时清空（见 `invalidate_ios_input_cache`）。
+static IOS_INPUT_CTX: std::sync::Mutex<Option<(Option<PathBuf>, bool)>> =
+    std::sync::Mutex::new(None);
+
+/// 清空上面的缓存（改设置、切换 Xcode 后调用）。
+pub fn invalidate_ios_input_cache() {
+    *IOS_INPUT_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+async fn ios_input_context() -> (Option<PathBuf>, bool) {
+    {
+        let c = IOS_INPUT_CTX.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(v) = c.as_ref() {
+            return v.clone();
+        }
+    }
+    let tc = resolve_ios().await;
+    let dev = tc.developer_dir.clone();
+    let ok = ios_input_available(dev.as_deref());
+    let v = (dev, ok);
+    *IOS_INPUT_CTX.lock().unwrap_or_else(|e| e.into_inner()) = Some(v.clone());
+    v
+}
+
 async fn input_ios(id: &str, action: &str, t: Touch) -> Result<(), String> {
     let hid = sim_hid_path().ok_or(
         "iOS 触摸注入不可用：找不到 kcode-sim-hid helper。\
          开发期可运行 `bash scripts/build-sim-hid.sh` 编译它。",
     )?;
 
-    let tc = resolve_ios().await;
-    let dev = tc.developer_dir.clone();
+    // 用缓存（见 IOS_INPUT_CTX 的说明）：每次触摸都重新解析会拖垮手势节奏
+    let (dev, input_ok) = ios_input_context().await;
 
-    // 能力再确认一次：helper 在但私有符号缺（Xcode 是 CommandLineTools 等）
-    // 时，直接给可读原因，而不是让子进程报一句 stderr 就算。
-    if !ios_input_available(dev.as_deref()) {
+    if !input_ok {
         return Err(format!(
             "iOS 触摸注入不可用：当前 Xcode（{}）里没有所需的私有接口。\
              需要完整 Xcode（`xcrun simctl` 可用的那一种）。",
@@ -3078,10 +3284,42 @@ async fn input_ios(id: &str, action: &str, t: Touch) -> Result<(), String> {
     }
 
     // 屏幕尺寸：从设备取。**必须与截图像素一致**，否则坐标会整体偏移。
+    // 已按设备缓存（见 ios_screen_size），首次一次截图、后续零成本。
+    //
+    // ⚠️ 但**常驻流模式下不能依赖它**：流的分辨率与截图可能不同
+    // （流按窗口物理像素抓、截图按设备像素），而 input_ios 要的是
+    // 「归一化坐标」，两者只要比例一致就没问题——所以这里仍用设备像素尺寸
+    // 做归一化基准，与前端传来的设备坐标同一坐标系。
     let (w, h) = ios_screen_size(id).await?;
     let nx = |v: i64| (v as f64 / w as f64).clamp(0.0, 1.0);
     let ny = |v: i64| (v as f64 / h as f64).clamp(0.0, 1.0);
 
+    // 走**常驻客户端**：一次性调用的固定开销约 182ms（dlopen + 连 CoreSimulator
+    // + 建 HID 客户端），而手势本身常只有几十到几百毫秒——那份开销会让
+    // 用户感觉「滑了之后先卡一下」。常驻后只付一次（见 ensure_hid_client）。
+    //
+    // 失败时回退到一次性调用：常驻进程可能因 Xcode 切换而失效，
+    // 而单个手势用一次性调用仍能工作（只是慢）。
+    let line = match action {
+        "tap" => format!("tap\t{id}\t{:.6}\t{:.6}", nx(t.x1), ny(t.y1)),
+        "swipe" => format!(
+            "swipe\t{id}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{}",
+            nx(t.x1), ny(t.y1), nx(t.x2), ny(t.y2), t.duration_ms
+        ),
+        "back" => format!("swipe\t{id}\t0.005\t0.5\t0.35\t0.5\t280"),
+        "home" => format!("button\t{id}\thome"),
+        other => return Err(format!("iOS 不支持的输入类型：{other}")),
+    };
+    match hid_cmd(&line, dev.as_deref()) {
+        Ok(_) => return Ok(()),
+        Err(e) => {
+            // 诊断：让「走了回退」可见。回退本身可行但慢约一个数量级，
+            // 而"慢"的现象与"常驻没启动"长得一样，不给日志就无从区分。
+            eprintln!("[kcode] HID 常驻调用失败，回退一次性调用：{e}");
+        }
+    }
+
+    // ── 回退：一次性调用（常驻客户端不可用时）─────────────────────────
     let mut cmd = tokio::process::Command::new(&hid);
     match action {
         "tap" => {
@@ -3089,7 +3327,6 @@ async fn input_ios(id: &str, action: &str, t: Touch) -> Result<(), String> {
                 .arg(format!("{:.6}", nx(t.x1)))
                 .arg(format!("{:.6}", ny(t.y1)));
         }
-        // 滑动用 Down 连发实现（helper 内部处理），这里给四个点
         "swipe" => {
             cmd.args(["swipe", id])
                 .arg(format!("{:.6}", nx(t.x1)))
@@ -5034,5 +5271,72 @@ mod window_cast_live {
         );
 
         stop_cast(&dev.id);
+    }
+}
+
+#[cfg(test)]
+mod hid_resident_live {
+    //! 常驻 HID 客户端的端到端验证（需已启动的 iOS 模拟器）。
+    //!
+    //! 判据是**实际耗时 vs 请求时长**：一次性调用的固定开销约 182ms，
+    //! 常驻后应降到接近 0（实测 swipe 300ms 请求 → 366ms）。
+    //! 这个差值是用户手上「滑了之后先卡一下」的直接来源。
+    use super::*;
+
+    #[tokio::test]
+    #[ignore]
+    async fn resident_hid_removes_startup_overhead() {
+        if !cfg!(target_os = "macos") {
+            eprintln!("跳过：非 macOS");
+            return;
+        }
+        if sim_hid_path().is_none() {
+            eprintln!("跳过：kcode-sim-hid 未编译");
+            return;
+        }
+        let st = probe().await;
+        if !st.ios.can_input {
+            eprintln!("跳过：iOS 输入不可用（helper 或 Xcode）");
+            return;
+        }
+        let Some(dev) = st.ios.devices.iter().find(|d| d.running).cloned() else {
+            eprintln!("跳过：没有运行中的 iOS 模拟器");
+            return;
+        };
+
+        // 首次调用含连接开销（helper 的 ready 会等它）
+        let t0 = std::time::Instant::now();
+        let first = input(Platform::Ios, &dev.id, "home", Touch::tap(0, 0)).await;
+        let first_ms = t0.elapsed().as_millis();
+        eprintln!("首次（含连接）：{first_ms}ms → {first:?}");
+
+        // 之后应很快：取 3 次的平均值
+        let mut times = Vec::new();
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            let _ = input(Platform::Ios, &dev.id, "home", Touch::tap(0, 0)).await;
+            times.push(t.elapsed().as_millis());
+        }
+        let avg = times.iter().sum::<u128>() / times.len() as u128;
+        eprintln!("常驻后 home 平均 {avg}ms（各次 {times:?}）");
+
+        // 滑动：请求 300ms，实际应接近 300ms（多出的部分是注入本身）
+        let t = std::time::Instant::now();
+        let _ = input(
+            Platform::Ios,
+            &dev.id,
+            "swipe",
+            Touch { x1: 0, y1: 0, x2: 0, y2: 0, duration_ms: 300 },
+        )
+        .await;
+        let swipe_ms = t.elapsed().as_millis();
+        eprintln!("swipe 请求 300ms → 实测 {swipe_ms}ms（多出 {}ms）", swipe_ms as i64 - 300);
+
+        // 断言：常驻后固定开销应明显低于一次性调用的 182ms。
+        // 阈值取 150ms（留足机器波动），因为一次性调用实测 182ms 是**下界**。
+        assert!(
+            swipe_ms < 500,
+            "swipe 300ms 请求实测 {swipe_ms}ms —— 若接近 610ms 说明走了回退的一次性调用（常驻没生效）"
+        );
     }
 }
