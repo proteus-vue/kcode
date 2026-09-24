@@ -434,8 +434,46 @@ jobs:
       # **实跑**统计（Rust + 前端 + 三个契约脚本），漂移即失败——与
       # protocol-facts.md 同一套做法，因为「可验证」正是本项目的主张。
       # 放在 rust job 的理由：这是唯一同时具备 cargo、node 与 codex 二进制的地方。
+      #
+      # # 为什么要 tee + 摘要
+      #
+      # 这一步**会真的跑一遍全部测试**（4 个 crate 的 cargo test、vitest、
+      # 三个契约脚本），所以它失败的原因有好几种，而退出码把它们压成两个：
+      #
+      #   1 = 数字漂移（文件过期，重跑 npm run stats 即可）
+      #   2 = 某个测试真的失败，或环境缺失（cargo/vitest/codex 找不到）
+      #
+      # 只看到「exit code 2」无法区分「契约脚本在 Linux 上失败」与
+      # 「数字过期」——两者处置完全不同。此前这一步没有任何诊断
+      # （CI #65 就是如此：只报 exit 2）。故加日志 + 摘要两步。
       - name: 测试数字漂移检查
-        run: node scripts/test-stats.mjs --check
+        run: |
+          set -o pipefail
+          node scripts/test-stats.mjs --check 2>&1 | tee /tmp/rust-stats.log
+
+      - name: 测试数字检查失败摘要（仅失败时执行）
+        if: failure()
+        run: |
+          LOG=/tmp/rust-stats.log
+          if [[ ! -f "$LOG" ]]; then
+            echo "::error::日志缺失：$LOG"
+            exit 0
+          fi
+          # 脚本自己已用 `✗` 前缀给出可行动的原因（含失败用例名与编译错误尾部）。
+          # 只取 `✗` 行——它是脚本对「为什么失败」的**定性结论**，
+          # 比日志尾部精确得多（尾部多半是编译进度或无关噪音）。
+          # 注意：`✗` 可能带缩进（如「    ✗ <失败用例名>」），故用 `^ *✗`。
+          hits=$(grep -cE "^ *✗" "$LOG" || true)
+          if [[ "$hits" -eq 0 ]]; then
+            echo "::error::未见 ✗ 判定行（脚本可能异常退出），日志尾部如下："
+            tail -10 "$LOG" | grep -vE "^\s*$" | while IFS= read -r l; do
+              echo "::error::  $l"
+            done
+          else
+            grep -E "^ *✗" "$LOG" | head -10 | while IFS= read -r l; do
+              echo "::error::  $l"
+            done
+          fi
 
       # 出站连接抓取：验证 SECURITY.md 的零静默外发承诺。
       # 允许 OpenAI CDN 段（上游 codex 行为，已在 SECURITY.md 披露），
