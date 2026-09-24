@@ -524,8 +524,12 @@ export function SimulatorPanel({
         const y = Math.round(gy * devH);
         return [Math.max(0, Math.min(devW - 1, x)), Math.max(0, Math.min(devH - 1, y))];
       };
-      const p1 = map(cx, cy, r.width, r.height, frame.width, frame.height);
-      const p2 = map(x2, y2, r.width, r.height, frame.width, frame.height);
+      // **必须用设备尺寸，不是帧尺寸**：走窗口流时帧是整个窗口（含标题栏），
+      // 而后端拿到坐标后会按设备尺寸归一化。若这里按帧尺寸换算，两次的尺度
+      // 不一致——实测纵向偏 23.5%（673px），表现为「点按钮完全没反应」。
+      const [devW, devH] = frame.deviceSize ?? [frame.width, frame.height];
+      const p1 = map(cx, cy, r.width, r.height, devW, devH);
+      const p2 = map(x2, y2, r.width, r.height, devW, devH);
       if (!p1) return;
       setInputBusy(true);
       try {
@@ -1058,9 +1062,18 @@ export function SimulatorPanel({
 
               {/* 落点标记：点击后立刻出现，说明「收到了」。
                   没有它，用户只能靠画面变化判断点击是否生效，
-                  而点到无响应区域时根本无法区分是自己没点到还是设备没反应。 */}
-              {marker && (
-                <span className="sim-marker" style={{ left: marker.x, top: marker.y }} aria-hidden="true" />
+                  而点到无响应区域时根本无法区分是自己没点到还是设备没反应。
+
+                  ⚠️ 坐标基准：`marker` 存的是**图片内坐标**，而这里是容器的
+                  绝对定位——容器有 padding、图片在容器里居中，两者不等。
+                  直接用 marker 当容器坐标会让标记偏离实际落点（用户实测
+                  「触达点在旁边」）。所以叠到与图片重合的子层上（imgBox）。 */}
+              {marker && imgBox && (
+                <span
+                  className="sim-marker"
+                  style={{ left: imgBox.x + marker.x, top: imgBox.y + marker.y }}
+                  aria-hidden="true"
+                />
               )}
 
               {/* 只读提示：贴在画面底部，说明**为什么**点不动。

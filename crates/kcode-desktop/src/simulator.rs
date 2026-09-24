@@ -2414,6 +2414,14 @@ pub struct Captured {
     /// 为什么用归一化而不是像素：前端的显示尺寸随右栏宽度变，
     /// 归一化值可以直接乘显示尺寸，不必关心帧的实际像素。
     pub device_rect: Option<DeviceRect>,
+    /// **设备像素尺寸**（与帧尺寸不同！）。
+    ///
+    /// 走常驻窗口流时帧是窗口截图（如 988×2108），而设备是 1320×2868。
+    /// 前端必须按**设备尺寸**算点击坐标——否则它按帧尺寸乘、后端按设备尺寸除，
+    /// 两次换算的尺度不一致，点击会偏出很远（实测纵向偏 23.5% ≈ 673px）。
+    ///
+    /// `None` 表示帧尺寸就是设备尺寸（逐帧截图路径）。
+    pub device_size: Option<(u32, u32)>,
 }
 
 /// 上一帧的 PNG 字节（按 serial）。用于跳过内容未变的帧。
@@ -2841,13 +2849,15 @@ pub async fn frame(platform: Platform, id: &str, force: bool) -> Result<Captured
     // 常驻流需要「屏幕录制」权限，用户没给授权时必须仍能看画面。
     // 设备的宽高比：窗口帧里定位设备画面要用它（见 ensure_cast 的说明）。
     // ios_screen_size 有按设备缓存，所以这里只是一次性的成本。
-    let aspect = if cfg!(target_os = "macos") && window_owner_for(platform).is_some() {
+    let (aspect, device_size) = if cfg!(target_os = "macos")
+        && window_owner_for(platform).is_some()
+    {
         match ios_screen_size(id).await {
-            Ok((w, h)) if h > 0 => Some(w as f64 / h as f64),
-            _ => None,
+            Ok((w, h)) if h > 0 => (Some(w as f64 / h as f64), Some((w, h))),
+            _ => (None, None),
         }
     } else {
-        None
+        (None, None)
     };
     let using_cast = cast_latest(platform, id, aspect).filter(|b| !b.is_empty());
     let bytes = match using_cast.clone() {
@@ -2877,6 +2887,7 @@ pub async fn frame(platform: Platform, id: &str, force: bool) -> Result<Captured
             width: w,
             height: h,
             device_rect: cast_geometry(platform, id),
+            device_size,
         });
     }
 
@@ -2891,6 +2902,7 @@ pub async fn frame(platform: Platform, id: &str, force: bool) -> Result<Captured
         height: h,
         // 只有走常驻流时才带几何（逐帧截图整帧就是设备画面）
         device_rect: if using_cast.is_some() { cast_geometry(platform, id) } else { None },
+        device_size: if using_cast.is_some() { device_size } else { None },
     })
 }
 

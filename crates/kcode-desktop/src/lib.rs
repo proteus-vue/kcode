@@ -907,6 +907,7 @@ async fn simulator_frame(
         width: cap.width,
         height: cap.height,
         device_rect: cap.device_rect,
+        device_size: cap.device_size,
     })
 }
 
@@ -925,6 +926,9 @@ struct SimulatorFrame {
     /// 只占其中一块。前端必须按这个矩形绘制与换算点击——否则点击会整体偏移
     /// （用户实测反馈「差得很远」）。
     device_rect: Option<(f64, f64, f64, f64)>,
+    /// **设备像素尺寸**。与 `width`/`height`（帧尺寸）不同：走窗口流时帧是
+    /// 整个窗口截图，设备只是其中一块。前端必须按设备尺寸算点击坐标。
+    device_size: Option<(u32, u32)>,
 }
 
 /// 向模拟器发送输入（tap / swipe / back / home），坐标为设备坐标。

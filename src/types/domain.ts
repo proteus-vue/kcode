@@ -711,4 +711,12 @@ export interface SimulatorFrame {
    * 高 0.9492（顶部 5% 是标题栏）。
    */
   deviceRect: [number, number, number, number] | null;
+  /**
+   * **设备像素尺寸** `[宽, 高]`。与 `width`/`height`（帧尺寸）不同。
+   *
+   * 走常驻窗口流时帧是**整个窗口**截图，设备只是其中一块；点击坐标必须按
+   * 设备尺寸算——否则前端按帧尺寸乘、后端按设备尺寸除，尺度不一致会让
+   * 点击偏出很远（实测纵向偏 23.5%）。`null` = 帧尺寸即设备尺寸。
+   */
+  deviceSize: [number, number] | null;
 }

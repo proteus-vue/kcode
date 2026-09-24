@@ -31,7 +31,7 @@ import type {
 const calls: { cmd: string; args: Record<string, unknown> }[] = [];
 let frameCalls = 0;
 /** 下一次 simulator_frame 的返回值。测试可改写以模拟「内容未变」。 */
-let nextFrame: SimulatorFrame = { dataUrl: 'data:image/png;base64,AAAA', width: 1000, height: 2000, deviceRect: null };
+let nextFrame: SimulatorFrame = { dataUrl: 'data:image/png;base64,AAAA', width: 1000, height: 2000, deviceRect: null, deviceSize: null };
 /** simulator_probe 的返回值（启动等待设备时用）。 */
 let probeResult: SimulatorStatus | null = null;
 let probeCalls = 0;
@@ -190,7 +190,7 @@ beforeEach(() => {
   calls.length = 0;
   frameCalls = 0;
   probeCalls = 0;
-  nextFrame = { dataUrl: 'data:image/png;base64,AAAA', width: 1000, height: 2000, deviceRect: null };
+  nextFrame = { dataUrl: 'data:image/png;base64,AAAA', width: 1000, height: 2000, deviceRect: null, deviceSize: null };
   probeResult = null;
   refreshCalls = 0;
   mpElements = [];
@@ -411,14 +411,14 @@ describe('输入后立刻补帧', () => {
 
 describe('内容未变时跳过重绘（卡顿的主要来源）', () => {
   it('dataUrl 为 null 时不替换图像（但尺寸仍更新）', async () => {
-    nextFrame = { dataUrl: 'data:image/png;base64,FIRST', width: 1080, height: 2340, deviceRect: null };
+    nextFrame = { dataUrl: 'data:image/png;base64,FIRST', width: 1080, height: 2340, deviceRect: null, deviceSize: null };
     await mount();
     stubRect(img());
     const firstSrc = img().getAttribute('src');
     expect(firstSrc).toContain('FIRST');
 
     // 下一帧：内容未变（服务端去重生效），尺寸变成新的（例如旋转）
-    nextFrame = { dataUrl: null, width: 2340, height: 1080, deviceRect: null };
+    nextFrame = { dataUrl: null, width: 2340, height: 1080, deviceRect: null, deviceSize: null };
     await act(async () => {
       await new Promise((r) => setTimeout(r, 700)); // 跨过一次轮询
     });
@@ -428,7 +428,7 @@ describe('内容未变时跳过重绘（卡顿的主要来源）', () => {
   });
 
   it('首次取帧强制（否则服务端可能判「未变」而前端没有帧）', async () => {
-    nextFrame = { dataUrl: 'data:image/png;base64,X', width: 100, height: 200, deviceRect: null };
+    nextFrame = { dataUrl: 'data:image/png;base64,X', width: 100, height: 200, deviceRect: null, deviceSize: null };
     await mount();
     const first = calls.find((c) => c.cmd === 'simulator_frame');
     expect(first!.args.force, '首次必须强制取帧').toBe(true);
@@ -1679,7 +1679,7 @@ describe('点击坐标与窗口边距', () => {
       width: 1320,
       height: 2868,
       // 实测值：窗口帧里设备画面从 y=5.08% 开始，高度占 94.92%
-      deviceRect: [0, 0.0508, 1, 0.9492],
+      deviceRect: [0, 0.0508, 1, 0.9492], deviceSize: null,
     };
   }
 
@@ -1715,7 +1715,7 @@ describe('点击坐标与窗口边距', () => {
   });
 
   it('deviceRect 为 null 时退化为整帧映射（逐帧截图路径不受影响）', async () => {
-    nextFrame = { ...castFrame(), deviceRect: null };
+    nextFrame = { ...castFrame(), deviceRect: null, deviceSize: null };
     await mount();
     stubRect(img(), 0, 0, 400, 866);
     await pointer('pointerdown', 200, 433);
@@ -1724,5 +1724,70 @@ describe('点击坐标与窗口边距', () => {
     expect(sent).toBeDefined();
     // 整帧映射：显示区正中 → 帧正中 = 设备几何中心
     expect(Math.abs((sent!.args.y1 as number) - 1434)).toBeLessThanOrEqual(3);
+  });
+});
+
+
+/**
+ * **帧尺寸 ≠ 设备尺寸**时的坐标换算（常驻窗口流路径）。
+ *
+ * # 为什么必须有这条
+ *
+ * 走窗口流时一帧是**整个窗口**（实测 988×2108），而设备是 1320×2868。
+ * 前端若按帧尺寸乘、后端按设备尺寸除，两次换算的尺度不一致——实测纵向
+ * 偏 **23.5%（约 673px）**，现象是「点 Continue 完全没反应」（实际点到了
+ * 画面中上部）。用户报的正是这个。
+ *
+ * 上一条测试只覆盖了「deviceRect 裁剪」，没覆盖「尺寸尺度」——两者是
+ * **独立的偏移源**，必须分别钉住。
+ */
+describe('帧尺寸与设备尺寸不一致', () => {
+  /** 窗口帧：988×2108，设备 1320×2868，设备画面占 rect 中间一块。 */
+  function windowFrame(): SimulatorFrame {
+    return {
+      dataUrl: 'data:image/png;base64,AAAA',
+      width: 988, // 帧是窗口尺寸
+      height: 2108,
+      deviceRect: [0.0339, 0.0508, 0.9321, 0.9492],
+      deviceSize: [1320, 2868], // 设备真实尺寸
+    };
+  }
+
+  it('按设备尺寸换算，而不是帧尺寸', async () => {
+    nextFrame = windowFrame();
+    await mount();
+    stubRect(img(), 0, 0, 400, 850);
+    // 点显示区正中
+    await pointer('pointerdown', 200, 425);
+    await pointer('pointerup', 200, 425);
+    const sent = lastInput();
+    expect(sent, '应发出一次 tap').toBeDefined();
+    const x = sent!.args.x1 as number;
+    const y = sent!.args.y1 as number;
+
+    // 正确结果：设备 1320×2868，显示区正中对应设备 x=660、y≈1357
+    // （y 不是 1434，因为帧里有标题栏——见上一条测试的说明）
+    expect(x, `x 应约 660，实际 ${x}`).toBeGreaterThan(600);
+    expect(x).toBeLessThan(720);
+    expect(y, `y 应约 1357，实际 ${y}`).toBeGreaterThan(1300);
+    expect(y).toBeLessThan(1420);
+
+    // **反例**：若误用帧尺寸（988×2108），x 会是 494 左右、y 会是 1015 左右。
+    // 断言实际值明显偏离它们，才能证明用的是设备尺寸。
+    expect(x, '若接近 494 说明用了帧宽而非设备宽').toBeGreaterThan(540);
+    expect(y, '若接近 1015 说明用了帧高而非设备高').toBeGreaterThan(1200);
+  });
+
+  it('deviceSize 为 null 时退化为帧尺寸（逐帧截图路径）', async () => {
+    nextFrame = { ...windowFrame(), deviceRect: null, deviceSize: null };
+    await mount();
+    stubRect(img(), 0, 0, 400, 850);
+    await pointer('pointerdown', 200, 425);
+    await pointer('pointerup', 200, 425);
+    const sent = lastInput();
+    expect(sent).toBeDefined();
+    // 整帧映射：帧 988×2108 的中部 → (494, 1054)
+    expect(Math.abs((sent!.args.x1 as number) - 494)).toBeLessThanOrEqual(3);
+    expect(Math.abs((sent!.args.y1 as number) - 1054)).toBeLessThanOrEqual(3);
   });
 });
