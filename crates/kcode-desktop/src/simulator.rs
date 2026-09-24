@@ -2405,6 +2405,15 @@ pub struct Captured {
     pub data_url: Option<String>,
     pub width: u32,
     pub height: u32,
+    /// **设备画面在本帧中的位置**（归一化 0..1，相对帧尺寸）。
+    ///
+    /// 走常驻窗口流时，一帧是整个窗口（含标题栏与模拟器外壳），设备屏幕
+    /// 只占其中一块——前端必须按这个矩形**只绘制那一块**，并把点击坐标
+    /// 换算回设备空间。`None` 表示整帧就是设备画面（逐帧截图路径）。
+    ///
+    /// 为什么用归一化而不是像素：前端的显示尺寸随右栏宽度变，
+    /// 归一化值可以直接乘显示尺寸，不必关心帧的实际像素。
+    pub device_rect: Option<DeviceRect>,
 }
 
 /// 上一帧的 PNG 字节（按 serial）。用于跳过内容未变的帧。
@@ -2445,6 +2454,12 @@ fn frame_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, 
 // 所以一条通道覆盖三平台。代价是坐标要从「设备像素」换算到「窗口像素」，
 // 这个换算前端本来就在做（截图尺寸 → 显示尺寸），不需要新增。
 
+/// 设备画面在窗口帧里的位置（归一化 x, y, 宽, 高）。
+///
+/// 抽成别名有两个理由：clippy 的 `type_complexity`，以及它出现在三个地方
+/// （结构体字段、启动时创建、读取函数），重复写会改漏。
+type DeviceRect = (f64, f64, f64, f64);
+
 /// 一个常驻帧源的句柄。
 struct WindowCast {
     child: std::process::Child,
@@ -2454,6 +2469,12 @@ struct WindowCast {
     window_id: u32,
     /// 最后一次收到帧的时间（用于判断流是否还活着）。
     last_frame_at: std::sync::Arc<std::sync::Mutex<std::time::Instant>>,
+    /// 设备画面在窗口帧里的位置（归一化 0..1）。
+    ///
+    /// 窗口捕获拿到的是整个窗口（含标题栏与模拟器外壳），设备屏幕只占其中
+    /// 一块。前端必须按这个矩形**只绘制那一块**，并把点击坐标换算回设备空间
+    /// ——否则点击会整体偏移（用户实测反馈「差得很远」）。
+    geometry: std::sync::Arc<std::sync::Mutex<Option<DeviceRect>>>,
 }
 
 impl Drop for WindowCast {
@@ -2662,15 +2683,44 @@ fn ensure_cast(platform: Platform, device_id: &str) -> Option<()> {
             &width.to_string(),
         ])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        // stderr 用 piped 而不是 null：helper 在那里报告设备画面在窗口中的
+        // 位置（KCDEVICE 行），而那正是点击坐标准确的前提。
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .ok()?;
 
     let stdout = child.stdout.take()?;
+    let stderr = child.stderr.take()?;
     let latest: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let last = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
-    let (l2, t2) = (latest.clone(), last.clone());
+    let geometry: std::sync::Arc<std::sync::Mutex<Option<DeviceRect>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (l2, t2, g2) = (latest.clone(), last.clone(), geometry.clone());
+
+    // stderr 线程：解析 `KCDEVICE <x> <y> <w> <h>`（设备画面在窗口帧里的位置）。
+    //
+    // 为什么必须解析它：窗口帧含标题栏与模拟器外壳，设备屏幕只占其中一块。
+    // 若前端把整帧当设备屏幕，点击坐标会**整体偏移**——而偏移量与窗口尺寸、
+    // 设备比例都相关，不是可以糊过去的常数（用户实测反馈「差得很远」）。
+    //
+    // 这一行由 helper 写在 **stderr**（stdout 是帧数据通道，混文本会破坏
+    // 帧协议解析）。
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let reader = std::io::BufReader::new(stderr);
+        for line in reader.lines().map_while(Result::ok) {
+            let Some(rest) = line.strip_prefix("KCDEVICE ") else { continue };
+            let nums: Vec<f64> = rest
+                .split_whitespace()
+                .filter_map(|v| v.parse::<f64>().ok())
+                .collect();
+            if nums.len() == 4 {
+                *g2.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((nums[0], nums[1], nums[2], nums[3]));
+            }
+        }
+    });
 
     // 读帧线程：解析帧头（KCFRAME + 长度）+ 二进制体，只保留最新一帧。
     //
@@ -2715,9 +2765,26 @@ fn ensure_cast(platform: Platform, device_id: &str) -> Option<()> {
     eprintln!("[kcode] 已启动窗口帧源：{} → 窗口 {}", device_id, window_id);
     map.insert(
         device_id.to_owned(),
-        WindowCast { child, latest, window_id, last_frame_at: last },
+        WindowCast { child, latest, window_id, last_frame_at: last, geometry },
     );
     Some(())
+}
+
+/// 常驻流的设备画面几何（归一化）。未启用流时返回 None（=整帧即设备）。
+fn cast_geometry(_platform: Platform, device_id: &str) -> Option<DeviceRect> {
+    // 取值→**立刻赋给局部变量并结束借用**→再返回。
+    //
+    // `?` 与 `match` 在这里都不行：返回类型的生命期与守卫绑在一起，
+    // 借用检查会拒绝（守卫必须在函数返回前释放，而借用还活着）。
+    // `let x = { ... }; x` 这个形状让编译器明确看到「借用先结束、值再返回」。
+    let out: Option<DeviceRect> = {
+        let guard = casts();
+        match guard.as_ref().and_then(|m| m.get(device_id)) {
+            Some(c) => *c.geometry.lock().unwrap_or_else(|e| e.into_inner()),
+            None => None,
+        }
+    };
+    out
 }
 
 /// 从常驻帧源取最新帧。返回 None 表示「流不可用或还没出帧」，调用方回退。
@@ -2765,8 +2832,9 @@ pub async fn frame(platform: Platform, id: &str, force: bool) -> Result<Captured
     // 优先走**常驻窗口流**（ScreenCaptureKit，实测 29.5fps vs 逐帧截图的 8fps）。
     // 不可用时回退到逐帧截图——两条路都要能工作：
     // 常驻流需要「屏幕录制」权限，用户没给授权时必须仍能看画面。
-    let bytes = match cast_latest(platform, id) {
-        Some(b) if !b.is_empty() => b,
+    let using_cast = cast_latest(platform, id).filter(|b| !b.is_empty());
+    let bytes = match using_cast.clone() {
+        Some(b) => b,
         _ => match platform {
             Platform::Android => shot_android(id).await?,
             Platform::Ios => shot_ios(id).await?,
@@ -2787,7 +2855,12 @@ pub async fn frame(platform: Platform, id: &str, force: bool) -> Result<Captured
     // 而**同一个 id 在不同平台一定是两台不同的设备**。
     let key = format!("{}:{}", platform.label(), id);
     if is_unchanged(&key, &bytes, force) {
-        return Ok(Captured { data_url: None, width: w, height: h });
+        return Ok(Captured {
+            data_url: None,
+            width: w,
+            height: h,
+            device_rect: cast_geometry(platform, id),
+        });
     }
 
     use base64::Engine as _;
@@ -2799,6 +2872,8 @@ pub async fn frame(platform: Platform, id: &str, force: bool) -> Result<Captured
         data_url: Some(format!("data:{mime};base64,{b64}")),
         width: w,
         height: h,
+        // 只有走常驻流时才带几何（逐帧截图整帧就是设备画面）
+        device_rect: if using_cast.is_some() { cast_geometry(platform, id) } else { None },
     })
 }
 
@@ -5240,6 +5315,34 @@ mod window_cast_live {
         }
         assert!(got, "常驻流应在 10 秒内出帧（检查屏幕录制权限）");
         eprintln!("✓ 常驻流已出帧");
+
+        // **几何必须真的解析到**：它是点击坐标准确的前提。
+        // 拿不到时前端会退化成「整帧即设备」，点击整体偏移——而那正是
+        // 用户反馈的问题。所以这里必须断言，不能只验证「有帧」。
+        let geo = cast_geometry(Platform::Ios, &dev.id);
+        eprintln!("设备画面几何: {geo:?}");
+        assert!(
+            geo.is_some(),
+            "窗口流的几何（KCDEVICE）未解析到 —— 前端会把整帧当设备屏幕，点击会偏"
+        );
+        let (gx, gy, gw, gh) = geo.unwrap();
+        assert!(
+            (0.0..=1.0).contains(&gx)
+                && (0.0..=1.0).contains(&gy)
+                && (0.3..=1.0).contains(&gw)
+                && (0.3..=1.0).contains(&gh),
+            "几何应表示「设备画面占窗口的比例」，实际 {gx},{gy},{gw},{gh}"
+        );
+        // 关键判据：设备画面**不是**整帧。只要有一边小于 1 就说明抓到了边距。
+        //
+        // ⚠️ 不能断言「宽一定小于 1」——取决于窗口与设备的比例关系：
+        //   · 窗口比设备比例更"胖" → 设备视图贴满宽、上下留白（gw=1）
+        //   · 窗口比设备比例更"瘦" → 贴满高、左右留白（gh=1）
+        // 我第一版只考虑了后者，于是这台上报 gw=1.0 时误判成失败。
+        assert!(
+            gw < 0.999 || gh < 0.999,
+            "几何等于整帧（宽高都是 1）——说明没抓到窗口边距，点击会整体偏移"
+        );
 
         // 取 30 帧，量总耗时
         let t0 = std::time::Instant::now();

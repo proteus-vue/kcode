@@ -502,10 +502,26 @@ export function SimulatorPanel({
     async (action: string, cx: number, cy: number, x2 = 0, y2 = 0, durationMs = 120) => {
       if (!platform || !runtimeId || !frame || !imgRef.current) return;
       const r = imgRef.current.getBoundingClientRect();
+      // 设备画面在显示区里的子矩形（归一化）。
+      //
+      // # 为什么必须有这一步
+      //
+      // 走常驻窗口流时，一帧是**整个模拟器窗口**（含标题栏与外壳），设备
+      // 屏幕只占其中一块。若直接按整帧比例换算，点击会整体偏移——实测这台
+      // 机器上顶部 5% 是标题栏，纵向偏移就是这个量级，且随窗口尺寸变化。
+      // 用户反馈「点击的区域和实际触达的不一致，差得很远」即由此而来。
+      //
+      // 逐帧截图路径的 deviceRect 为 null（整帧就是设备），此处退化为原行为。
+      const [dx, dy, dw, dh] = frame.deviceRect ?? [0, 0, 1, 1];
       const map = (px: number, py: number, dispW: number, dispH: number, devW: number, devH: number) => {
         if (!Number.isFinite(px) || !Number.isFinite(py) || dispW <= 0 || dispH <= 0) return null;
-        const x = Math.round((px / dispW) * devW);
-        const y = Math.round((py / dispH) * devH);
+        // 先归一到「整帧」比例，再裁掉设备之外的边距，最后映射到设备像素
+        const fx = px / dispW;
+        const fy = py / dispH;
+        const gx = (fx - dx) / dw;
+        const gy = (fy - dy) / dh;
+        const x = Math.round(gx * devW);
+        const y = Math.round(gy * devH);
         return [Math.max(0, Math.min(devW - 1, x)), Math.max(0, Math.min(devH - 1, y))];
       };
       const p1 = map(cx, cy, r.width, r.height, frame.width, frame.height);

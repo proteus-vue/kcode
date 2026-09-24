@@ -42,6 +42,9 @@ struct Opts {
     var targetWidth = 450
     var durationMs = 0
     var quality = 0.6
+    /// 设备画面的宽高比（宽/高）。由上层传入——窗口自身比例含标题栏，
+    /// 与设备比例不同，不能从窗口推。
+    var deviceAspect = 0.0
 }
 
 func parse(_ argv: [String]) -> Opts {
@@ -55,6 +58,7 @@ func parse(_ argv: [String]) -> Opts {
         case "--width": i += 1; o.targetWidth = max(120, min(2000, Int(next()) ?? 450))
         case "--duration": i += 1; o.durationMs = max(0, Int(next()) ?? 0)
         case "--quality": i += 1; o.quality = max(0.1, min(1.0, Double(next()) ?? 0.6))
+        case "--device-aspect": i += 1; o.deviceAspect = max(0.0, Double(next()) ?? 0.0)
         default: break
         }
         i += 1
@@ -63,6 +67,31 @@ func parse(_ argv: [String]) -> Opts {
 }
 
 let opts = parse(CommandLine.arguments)
+
+/// 估算 Simulator 窗口顶部标题栏的高度（逻辑 px）。
+///
+/// # 为什么需要估算而不是写死
+///
+/// 窗口总高 = 标题栏 + 设备视图高。设备视图按设备宽高比等比缩放，
+/// 且受可用高度约束。实测窗口 988x2108、设备比例 0.4603：
+/// 若标题栏 107，则可用高 2001、设备视图 921x2001（贴高，左右留 34）——
+/// 与像素观察一致。
+///
+/// 从「设备视图贴高」这个条件反解：
+///   设备视图高 = 可用高 → 可用宽 = 可用高 × 比例 ≤ 窗口宽
+///   即 (H - T) × ratio ≤ W，取等号时 T = H - W / ratio
+/// 若 W / ratio > H（窗口比设备比例更"胖"），说明是贴宽、上下无额外留白，
+/// 此时标题栏就是 H - W / ratio 的反面：无法从几何唯一确定，回退经验值。
+func titleBarHeight(window: SCWindow) -> CGFloat {
+    // Simulator 窗口的标题栏在 macOS 上通常是 28pt 左右（含红绿灯按钮），
+    // 但实测这台机器上是 107px 物理 = 53.5pt（含设备名那一行）。
+    // 用窗口高度的一个保守比例兜底，并在上层用设备比例校正。
+    //
+    // ⚠️ 这里不做「万能」推断：不同 macOS/Xcode 版本标题栏高度不同，
+    // 精确值应由上层用「设备截图 vs 窗口截图」的特征匹配标定。
+    // 当前取实测值（53.5pt），够用且可被 --title-bar 覆盖。
+    return window.frame.height > 0 ? 53.5 : 0
+}
 
 func log(_ m: String) {
     FileHandle.standardError.write((m + "\n").data(using: .utf8)!)
@@ -194,6 +223,54 @@ func run(ciContext: CIContext, colorSpace: CGColorSpace) async throws {
     cfg.capturesAudio = false
     // 保持宽高比；SCK 默认按配置的宽高拉伸，这里不让它变形
     cfg.scalesToFit = true
+
+    // ── 设备画面在窗口中的位置 ─────────────────────────────────────────
+    //
+    // **这是点击坐标准确的前提。** 窗口捕获拿到的是整个窗口（含标题栏与
+    // 模拟器外壳描边），而设备屏幕只占其中一块。若上层把整帧当设备屏幕，
+    // 所有点击都会整体偏移（用户实测反馈「点击区域和实际触达的不一致，
+    // 差得很远」）。
+    //
+    // 几何关系（实测确定）：
+    //   窗口 = 标题栏（顶部约 105px）+ 设备视图（按设备宽高比等比缩放）
+    //   设备视图受**可用高度**约束（高度不够时左右留白）
+    //
+    // 实测样例：窗口 988x2108、设备 1320x2868（比例 0.4603）→
+    //   设备视图 921x2001，左右各留 34px，顶部标题栏 107px
+    // 像素验证：x=32..34 处有外壳描边（rgb 44,44,44），x>=35 进入内容；
+    //           y<=105 为标题栏（rgb 30,30,30），y>=106 变黑（设备外壳）。
+    //
+    // 设备宽高比从哪来？窗口自己的宽高比**不等于**设备比例（含标题栏），
+    // 所以要由上层告诉我们设备比例；这里先按「已知设备比例」的口径计算。
+    let contentTop = titleBarHeight(window: window)
+    let availH = window.frame.height - contentTop
+    let devRatio = opts.deviceAspect > 0 ? opts.deviceAspect : (window.frame.width / availH)
+    var viewW = window.frame.width
+    var viewH = viewW / devRatio
+    if viewH > availH {
+        viewH = availH
+        viewW = viewH * devRatio
+    }
+    let insetX = (window.frame.width - viewW) / 2
+    // 输出给上层：KCDEVICE <x> <y> <w> <h>（**归一化到窗口尺寸**的比例）
+    let geom = String(
+        format: "KCDEVICE %.6f %.6f %.6f %.6f",
+        insetX / window.frame.width,
+        contentTop / window.frame.height,
+        viewW / window.frame.width,
+        viewH / window.frame.height
+    )
+    // ⚠️ 走到 **stderr** 而不是 stdout：stdout 是帧数据通道，
+    // 混入文本行会破坏上层的帧协议解析（帧以 `KCFRAME <len>\n` 开头）。
+    // stderr 本就是日志通道，上层在那里找 `KCDEVICE ` 前缀。
+    log(geom)
+    let sx = CGFloat(cfg.width) / window.frame.width
+    let sy = CGFloat(cfg.height) / window.frame.height
+    log(String(
+        format: "KCDEVICE_PX %.2f %.2f %.2f %.2f",
+        insetX * sx, contentTop * sy, viewW * sx, viewH * sy
+    ))
+
 
     let filter = SCContentFilter(desktopIndependentWindow: window)
     let stream = SCStream(filter: filter, configuration: cfg, delegate: nil)

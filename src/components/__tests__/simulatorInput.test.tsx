@@ -31,7 +31,7 @@ import type {
 const calls: { cmd: string; args: Record<string, unknown> }[] = [];
 let frameCalls = 0;
 /** 下一次 simulator_frame 的返回值。测试可改写以模拟「内容未变」。 */
-let nextFrame: SimulatorFrame = { dataUrl: 'data:image/png;base64,AAAA', width: 1000, height: 2000 };
+let nextFrame: SimulatorFrame = { dataUrl: 'data:image/png;base64,AAAA', width: 1000, height: 2000, deviceRect: null };
 /** simulator_probe 的返回值（启动等待设备时用）。 */
 let probeResult: SimulatorStatus | null = null;
 let probeCalls = 0;
@@ -190,7 +190,7 @@ beforeEach(() => {
   calls.length = 0;
   frameCalls = 0;
   probeCalls = 0;
-  nextFrame = { dataUrl: 'data:image/png;base64,AAAA', width: 1000, height: 2000 };
+  nextFrame = { dataUrl: 'data:image/png;base64,AAAA', width: 1000, height: 2000, deviceRect: null };
   probeResult = null;
   refreshCalls = 0;
   mpElements = [];
@@ -411,14 +411,14 @@ describe('输入后立刻补帧', () => {
 
 describe('内容未变时跳过重绘（卡顿的主要来源）', () => {
   it('dataUrl 为 null 时不替换图像（但尺寸仍更新）', async () => {
-    nextFrame = { dataUrl: 'data:image/png;base64,FIRST', width: 1080, height: 2340 };
+    nextFrame = { dataUrl: 'data:image/png;base64,FIRST', width: 1080, height: 2340, deviceRect: null };
     await mount();
     stubRect(img());
     const firstSrc = img().getAttribute('src');
     expect(firstSrc).toContain('FIRST');
 
     // 下一帧：内容未变（服务端去重生效），尺寸变成新的（例如旋转）
-    nextFrame = { dataUrl: null, width: 2340, height: 1080 };
+    nextFrame = { dataUrl: null, width: 2340, height: 1080, deviceRect: null };
     await act(async () => {
       await new Promise((r) => setTimeout(r, 700)); // 跨过一次轮询
     });
@@ -428,7 +428,7 @@ describe('内容未变时跳过重绘（卡顿的主要来源）', () => {
   });
 
   it('首次取帧强制（否则服务端可能判「未变」而前端没有帧）', async () => {
-    nextFrame = { dataUrl: 'data:image/png;base64,X', width: 100, height: 200 };
+    nextFrame = { dataUrl: 'data:image/png;base64,X', width: 100, height: 200, deviceRect: null };
     await mount();
     const first = calls.find((c) => c.cmd === 'simulator_frame');
     expect(first!.args.force, '首次必须强制取帧').toBe(true);
@@ -1657,3 +1657,72 @@ describe('面板纵向顺序', () => {
 });
 
 
+
+
+/**
+ * **点击坐标必须裁掉窗口边距**（常驻窗口流路径）。
+ *
+ * # 为什么需要这条
+ *
+ * 走常驻窗口流时，一帧是**整个模拟器窗口**（含标题栏与外壳），设备屏幕
+ * 只占其中一块（实测：顶部 5% 是标题栏，归一化 rect ≈ [0, 0.0508, 1, 0.9492]）。
+ * 若按整帧比例换算，点击会整体偏移——**纵向偏 5%**，在 2868 高的设备上
+ * 就是 145px，用户看到的是「差得很远」。
+ *
+ * 这条测试直接验证「同样点画面正中，转换出的设备坐标是否落在设备中心」。
+ */
+describe('点击坐标与窗口边距', () => {
+  /** 造一个带 deviceRect 的帧（模拟常驻窗口流）。 */
+  function castFrame(): SimulatorFrame {
+    return {
+      dataUrl: 'data:image/png;base64,AAAA',
+      width: 1320,
+      height: 2868,
+      // 实测值：窗口帧里设备画面从 y=5.08% 开始，高度占 94.92%
+      deviceRect: [0, 0.0508, 1, 0.9492],
+    };
+  }
+
+  /**
+   * 点显示区正中时的期望设备坐标。
+   *
+   * **不是设备的几何中心**：帧里设备画面从 y=5.08% 开始（上面是标题栏），
+   * 所以「显示区的中部」落在设备的 47.3% 处，即 y≈1357。
+   *
+   * 我第一版把期望写成设备中心 1434、测试失败，而**代码是对的**——差的那
+   * 77px 正是标题栏的份额。教训：期望值要沿坐标链算出来，不能凭
+   * 「点中间就该到中间」的直觉。
+   */
+  const EXPECTED_Y = Math.round(((0.5 - 0.0508) / 0.9492) * 2868); // ≈1357
+  const EXPECTED_X = 660;
+
+  it('点显示区正中 → 映射到设备对应位置（证明裁剪生效）', async () => {
+    nextFrame = castFrame();
+    await mount();
+    stubRect(img(), 0, 0, 400, 866); // 显示区 400×866，左上角在原点
+    await pointer('pointerdown', 200, 433);
+    await pointer('pointerup', 200, 433);
+    const sent = lastInput();
+    expect(sent, '应发出一次 tap').toBeDefined();
+    expect(Math.abs((sent!.args.x1 as number) - EXPECTED_X)).toBeLessThanOrEqual(3);
+    expect(
+      Math.abs((sent!.args.y1 as number) - EXPECTED_Y),
+      `y 应为 ${EXPECTED_Y}，实际 ${sent!.args.y1}`,
+    ).toBeLessThanOrEqual(3);
+    // **反例**：若没裁 deviceRect，y 会是 1434。断言它明显小于那个值，
+    // 才能证明裁剪真的生效（而不是碰巧对）。
+    expect(sent!.args.y1 as number, '若接近 1434 说明没裁掉标题栏').toBeLessThan(1414);
+  });
+
+  it('deviceRect 为 null 时退化为整帧映射（逐帧截图路径不受影响）', async () => {
+    nextFrame = { ...castFrame(), deviceRect: null };
+    await mount();
+    stubRect(img(), 0, 0, 400, 866);
+    await pointer('pointerdown', 200, 433);
+    await pointer('pointerup', 200, 433);
+    const sent = lastInput();
+    expect(sent).toBeDefined();
+    // 整帧映射：显示区正中 → 帧正中 = 设备几何中心
+    expect(Math.abs((sent!.args.y1 as number) - 1434)).toBeLessThanOrEqual(3);
+  });
+});

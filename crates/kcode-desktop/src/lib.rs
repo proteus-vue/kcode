@@ -902,7 +902,12 @@ async fn simulator_frame(
     let cap = simulator::frame(p, &id, force.unwrap_or(false))
         .await
         .map_err(CommandError::from)?;
-    Ok(SimulatorFrame { data_url: cap.data_url, width: cap.width, height: cap.height })
+    Ok(SimulatorFrame {
+        data_url: cap.data_url,
+        width: cap.width,
+        height: cap.height,
+        device_rect: cap.device_rect,
+    })
 }
 
 /// 一帧画面及其设备尺寸（前端据此换算点击坐标）。
@@ -914,6 +919,12 @@ struct SimulatorFrame {
     data_url: Option<String>,
     width: u32,
     height: u32,
+    /// **设备画面在帧里的位置**（归一化 0..1）。null = 整帧就是设备画面。
+    ///
+    /// 走常驻窗口流时，帧是整个窗口（含标题栏与模拟器外壳），而设备屏幕
+    /// 只占其中一块。前端必须按这个矩形绘制与换算点击——否则点击会整体偏移
+    /// （用户实测反馈「差得很远」）。
+    device_rect: Option<(f64, f64, f64, f64)>,
 }
 
 /// 向模拟器发送输入（tap / swipe / back / home），坐标为设备坐标。

@@ -700,4 +700,15 @@ export interface SimulatorFrame {
   dataUrl: string | null;
   width: number;
   height: number;
+  /**
+   * **设备画面在帧里的位置**（归一化 0..1：x, y, 宽, 高）。
+   *
+   * `null` = 整帧就是设备画面（逐帧截图路径）。
+   * 非 null 时帧是**整个窗口**（含标题栏与模拟器外壳），设备屏幕只占其中
+   * 一块——绘制与点击换算都必须先裁到这块，否则点击会整体偏移。
+   *
+   * 实测样例：窗口帧 988×2108 里，设备画面是 x 0、y 0.0508、宽 1.0、
+   * 高 0.9492（顶部 5% 是标题栏）。
+   */
+  deviceRect: [number, number, number, number] | null;
 }
