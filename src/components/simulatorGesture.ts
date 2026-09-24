@@ -86,3 +86,73 @@ export function clampDuration(ms: number): number {
   if (Number.isNaN(ms) || ms <= 0) return MIN_SWIPE_MS;
   return Math.max(MIN_SWIPE_MS, Math.min(MAX_SWIPE_MS, Math.round(ms)));
 }
+
+/**
+ * 系统边缘手势的标记（对应 iOS 注入层的 `IndigoHIDEdge`）。
+ *
+ * # 为什么需要它（实测根因）
+ *
+ * 真机上「这个触摸算不算系统手势」由触摸驱动按**落点**判定，判定后交给
+ * SpringBoard 或导航栈。我们绕过驱动直接往数字转换器灌事件，**这个判定
+ * 没人做**——于是事件送达了、坐标也对，iOS 只当普通触摸：
+ * 底部上滑被当前 App 吃掉，左边缘右滑也不会返回。
+ *
+ * 实测（iPhone 16 Pro Max / Xcode 26.5）：带标记则生效，不带则毫无反应。
+ */
+export type EdgeGesture = 'none' | 'left' | 'bottom';
+
+/**
+ * 判定为「底部边缘」的起点比例：屏幕底部 3%。
+ *
+ * 真机的上滑回主屏要求触摸从 home 指示条所在的底部区域开始，
+ * 在 852pt 高的机器上约 20pt ≈ 2.3%。取 3% 略宽一点（手指落点有抖动），
+ * 但仍远小于画面——不会把正常内容区的上滑误判成回主屏。
+ *
+ * ⚠️ 不能放宽：边缘标记会**覆盖落点判定**（实测从 y=0.90 起滑也能回主屏），
+ * 所以标记本身就是一次下注。标错方向的代价是「列表滑不动」——
+ * 用户会觉得是卡了，而不会有任何报错。宁窄勿宽。
+ */
+export const EDGE_BOTTOM_MAX_Y = 0.97;
+
+/**
+ * 判定为「左边缘」的起点比例：屏幕左侧 4%。
+ *
+ * 真机的返回手势要求从屏幕左边缘开始，约 20pt / 393pt ≈ 5%。
+ * 同理宁窄勿宽：标错会让左侧那一条的拖动全部失效。
+ */
+export const EDGE_LEFT_MAX_X = 0.04;
+
+/**
+ * 从一次滑动的归一化坐标判断它是不是系统边缘手势。
+ *
+ * 方向也要判：只有「从底部向上滑」才算回主屏、「从左边缘向右滑」才算返回。
+ * 只判落点会把「在底部边缘横向滚动」也标成回主屏——那种误判是纯损失。
+ *
+ * 坐标是**设备归一化坐标**（0..1，左上原点）。
+ */
+export function inferEdgeGesture(x1: number, y1: number, x2: number, y2: number): EdgeGesture {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+
+  // 底部边缘 + 主要向上（向上是 y 变小）：回主屏
+  if (y1 >= EDGE_BOTTOM_MAX_Y && dy < 0 && Math.abs(dy) > Math.abs(dx)) {
+    return 'bottom';
+  }
+  // 左边缘 + 主要向右：返回上一页
+  if (x1 <= EDGE_LEFT_MAX_X && dx > 0 && Math.abs(dx) > Math.abs(dy)) {
+    return 'left';
+  }
+  return 'none';
+}
+
+/** 边缘标记的注入层取值（与 helper 的 IndigoHIDEdge 常量一致）。 */
+export function edgeFlag(edge: EdgeGesture): number {
+  switch (edge) {
+    case 'left':
+      return 1;
+    case 'bottom':
+      return 3;
+    default:
+      return 0;
+  }
+}

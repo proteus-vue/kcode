@@ -69,12 +69,19 @@ let usage = """
 kcode-sim-hid —— 向 iOS 模拟器注入触摸/按键（走 Apple 私有接口，见源码注释）
 
 用法：
-  kcode-sim-hid probe  [--developer-dir DIR]
-  kcode-sim-hid tap    <udid> <x> <y> [--developer-dir DIR]
-  kcode-sim-hid swipe  <udid> <x1> <y1> <x2> <y2> [--duration MS] [--developer-dir DIR]
-  kcode-sim-hid button <udid> <home|lock> [--developer-dir DIR]
+  kcode-sim-hid probe       [--developer-dir DIR]
+  kcode-sim-hid tap         <udid> <x> <y> [--developer-dir DIR]
+  kcode-sim-hid swipe       <udid> <x1> <y1> <x2> <y2> [--duration MS] [--edge N] [--developer-dir DIR]
+  kcode-sim-hid button      <udid> <home|lock> [--developer-dir DIR]
+  kcode-sim-hid home-swipe  <udid> [--developer-dir DIR]
+  kcode-sim-hid springboard <udid> [--developer-dir DIR]
+  kcode-sim-hid type        <udid> <STROKES> [--developer-dir DIR]
 
 坐标是**归一化 0..1**（相对模拟器屏幕），不是像素。
+`--edge`（0=无 1=左 2=上 3=下 4=右）声明这是系统边缘手势，见源码说明。
+STROKES 是逗号分隔的 HID 用量码（十六进制），`s` 前缀表示这一击带 Shift，
+例如大写 Hello 写作 `s0b,08,0c,0c,0f`。ASCII→用量码的映射在 Rust 端做
+（那里有测试设施，而这张表错一个键就是一整类字符打不出来）。
 """
 
 // MARK: - 参数解析
@@ -87,6 +94,7 @@ struct Args {
     var positionals: [String] = []
     var developerDir: String?
     var durationMs = 300
+    var edge: UInt32 = edgeNone
 }
 
 func parseArgs(_ argv: [String]) -> Args {
@@ -101,6 +109,7 @@ func parseArgs(_ argv: [String]) -> Args {
 
     var pendingDeveloperDir = false
     var pendingDuration = false
+    var pendingEdge = false
     for arg in rest {
         if pendingDeveloperDir {
             a.developerDir = arg
@@ -115,11 +124,21 @@ func parseArgs(_ argv: [String]) -> Args {
             pendingDuration = false
             continue
         }
+        if pendingEdge {
+            guard let v = UInt32(arg), v <= 4 else {
+                fail(.usage, "--edge 需要 0..4，收到 \(arg)")
+            }
+            a.edge = v
+            pendingEdge = false
+            continue
+        }
         switch arg {
         case "--developer-dir":
             pendingDeveloperDir = true
         case "--duration":
             pendingDuration = true
+        case "--edge":
+            pendingEdge = true
         case "-h", "--help":
             print(usage)
             exit(ExitCode.ok.rawValue)
@@ -132,6 +151,7 @@ func parseArgs(_ argv: [String]) -> Args {
     }
     if pendingDeveloperDir { fail(.usage, "--developer-dir 缺少值") }
     if pendingDuration { fail(.usage, "--duration 缺少值") }
+    if pendingEdge { fail(.usage, "--edge 缺少值") }
     return a
 }
 
@@ -215,6 +235,15 @@ typealias IndigoMouseFunc = @convention(c) (
 ) -> UnsafeMutableRawPointer?
 
 typealias IndigoButtonFunc = @convention(c) (Int32, Int32, Int32) -> UnsafeMutableRawPointer?
+/// `IndigoHIDMessageForKeyboardArbitrary(uint32 usage, uint32 direction)`。
+///
+/// - `usage`：USB HID 键盘用量码（Usage Page 0x07），例如 0x04 = 'A'、
+///   0x28 = Enter、0x2A = Backspace、0xE1 = 左 Shift。
+/// - `direction`：1 = 按下、2 = 抬起。
+///
+/// 参数里**没有 target**：键盘事件走自己那条通道（与触摸的 0x32 无关）。
+/// 这一点与按键不同——按键要把 target 传 0x33，漏了就静默无效。
+typealias IndigoKeyboardFunc = @convention(c) (UInt32, UInt32) -> UnsafeMutableRawPointer?
 typealias HIDInitFunc = @convention(c) (AnyObject, Selector, AnyObject, AutoreleasingUnsafeMutablePointer<NSError?>) -> AnyObject?
 typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer?, ObjCBool, AnyObject?, AnyObject?) -> Void
 
@@ -231,16 +260,83 @@ let mainScreenTouchTarget: UInt32 = 0x32
 let eventDown: Int32 = 1
 let eventUp: Int32 = 2
 
-/// 按键：home / lock。
+/// IndigoHIDEdge：第 7 个参数，声明「这个触摸算不算系统边缘手势」。
 ///
-/// `IndigoHIDMessageForButton(eventSource, direction, target)`。
-/// 取值来自 SimulatorKit 的 IndigoHIDButton 枚举（与参考实现一致）。
-func buttonCode(_ name: String) -> (Int32, Int32)? {
+/// # 这是「底部上滑 / 边缘返回没反应」的根因（实测）
+///
+/// 真机上这个判定由触摸驱动按**落点**做：落在底部边缘的触摸会被标成
+/// 系统手势，交给 SpringBoard 处理（上滑回主屏 / 切 App），落在左右边缘
+/// 的则交给导航栈（返回上一页）。我们绕过驱动直接往数字转换器里灌事件，
+/// 于是**这个判定没人做**——事件送达了、坐标也对，但 iOS 只把它当普通
+/// 触摸：底部上滑被当前 App 吃掉（多半什么都不做），边缘右滑也不会返回。
+///
+/// 实测（iPhone 16 Pro Max / Xcode 26.5）：edge=0 时底部上滑与边缘右滑
+/// 都是「helper 回 ok、画面无变化」；补上 edge 后两者都生效。
+/// 取值来自参考实现（serve-sim）反汇编 `IndigoHIDMessageForMouseNSEvent`
+/// 后逐一试出的结果，与本机实测一致。
+let edgeNone: UInt32 = 0    // 普通触摸
+let edgeLeft: UInt32 = 1    // 左边缘（返回手势的关键）
+let edgeTop: UInt32 = 2     // 上边缘（通知中心）
+let edgeBottom: UInt32 = 3  // 下边缘（上滑回主屏的关键）
+let edgeRight: UInt32 = 4   // 右边缘
+
+/// 硬件按键：home / lock。
+///
+/// `IndigoHIDMessageForButton(eventSource, direction, target)`：
+/// - `eventSource`：哪个按键（home=0x0、lock=0x1，idb 的常量）
+/// - `direction`：**按下(1) / 抬起(2)**，不是按键码
+/// - `target`：**0x33（硬件按键目标）**，不是触摸用的 0x32
+///
+/// 这里曾经错成 `(0x0, direction=0x0, target=0x32)`：方向 0 既不是按下
+/// 也不是抬起，目标又是数字转换器——两个错叠在一起，结果就是「调用成功
+/// 但什么都不发生」。按键必须成对发（先按下后抬起）才算一次完整按压。
+let buttonDirectionDown: Int32 = 1
+let buttonDirectionUp: Int32 = 2
+let hardwareButtonTarget: Int32 = 0x33
+
+/// 键盘事件的方向（与按键的 1/2 含义相同，但类型是 UInt32）。
+let keyDown: UInt32 = 1
+let keyUp: UInt32 = 2
+
+/// 左 Shift 的 HID 用量码。
+///
+/// 大写字母与 `!@#$%^&*()_+{}|:"<>?~` 这些符号在 USB HID 里没有独立编码，
+/// 而是「Shift + 另一个键」的组合。所以打这些字符必须**真的按住 Shift**
+/// （先发 Shift 按下，再发字符键，最后抬 Shift）——只发字符键会打出小写。
+let hidLeftShift: UInt32 = 0xE1
+
+func buttonSource(_ name: String) -> Int32? {
     switch name {
-    case "home": return (0x0, 0x32)      // IndigoHIDButtonHome, target 主屏
-    case "lock": return (0x1, 0x32)      // IndigoHIDButtonLock
+    case "home": return 0x0
+    case "lock": return 0x1
     default: return nil
     }
+}
+
+/// 解析一条「敲击序列」规格：逗号分隔，每项是 `HEX` 或 `sHEX`。
+///
+/// - `HEX`：该键的 HID 用量码（如 `0b` 是 'h'）
+/// - `s` 前缀：表示这一击要**带 Shift**（如 `s0b` 是大写 'H'）
+///
+/// 例子：`Hello` → `s0b,08,0c,0c,0f`。
+///
+/// # 为什么把映射放在 Rust 端
+///
+/// ASCII → HID 用量码是一张大表（字母、数字、符号、Shift 组合），
+/// 而**表里错一个键就是一整类字符打不出来**，属于必须被测试钉住的东西。
+/// Rust 那边有完整的单元测试设施（`cargo test`），Swift 这边没有；
+/// 所以映射在 Rust 做，helper 只负责「把给定的用量码发出去」这一件事。
+func parseStrokes(_ spec: String) -> [(usage: UInt32, shift: Bool)]? {
+    var out: [(UInt32, Bool)] = []
+    for raw in spec.split(separator: ",") {
+        let item = raw.trimmingCharacters(in: .whitespaces)
+        guard !item.isEmpty else { continue }
+        let shifted = item.hasPrefix("s")
+        let hex = shifted ? String(item.dropFirst()) : item
+        guard let usage = UInt32(hex, radix: 16), usage > 0, usage <= 0xFFFF else { return nil }
+        out.append((usage, shifted))
+    }
+    return out.isEmpty ? nil : out
 }
 
 // MARK: - 注入器
@@ -251,6 +347,7 @@ final class Injector {
     private let sendIMP: IMP
     private let mouseFunc: IndigoMouseFunc
     private let buttonFunc: IndigoButtonFunc?
+    private let keyboardFunc: IndigoKeyboardFunc?
 
     init(deviceUDID: String, developerDir: String) throws {
         let simKit = loadPrivateFrameworks(developerDir: developerDir)
@@ -263,6 +360,13 @@ final class Injector {
         mouseFunc = unsafeBitCast(mousePtr, to: IndigoMouseFunc.self)
         buttonFunc = findSymbol(simKit, "IndigoHIDMessageForButton")
             .map { unsafeBitCast($0, to: IndigoButtonFunc.self) }
+        // 键盘是可选的：符号缺失时其余功能照常工作（只把键盘这条路关掉），
+        // 而不是让整个注入能力失效。
+        keyboardFunc = findSymbol(simKit, "IndigoHIDMessageForKeyboardArbitrary")
+            .map { unsafeBitCast($0, to: IndigoKeyboardFunc.self) }
+        if keyboardFunc == nil {
+            dbg("SimulatorKit 里没有 IndigoHIDMessageForKeyboardArbitrary（键盘不可用）")
+        }
 
         guard let device = Self.findDevice(udid: deviceUDID, developerDir: developerDir) else {
             throw NSError(domain: "kcode-sim-hid", code: Int(ExitCode.deviceNotFound.rawValue),
@@ -398,9 +502,9 @@ final class Injector {
     /// 中途的 move 是「尽力而为」的事件：丢了某一帧只影响轨迹平滑度，
     /// 而等待每一帧的回执会把整条轨迹拖垮。所以中途 fire-and-forget，
     /// **只在按下与抬起时等回执**（那两个决定这次手势是否真的成立）。
-    private func touchNoWait(_ type: Int32, x: Double, y: Double) {
+    private func touchNoWait(_ type: Int32, x: Double, y: Double, edge: UInt32) {
         var point = CGPoint(x: x, y: y)
-        guard let msg = mouseFunc(&point, nil, mainScreenTouchTarget, type, 1.0, 1.0, 0) else {
+        guard let msg = mouseFunc(&point, nil, mainScreenTouchTarget, type, 1.0, 1.0, edge) else {
             return
         }
         unsafeBitCast(sendIMP, to: SendFunc.self)(
@@ -408,12 +512,12 @@ final class Injector {
     }
 
     /// 发一个触摸事件。返回 nil 表示成功，否则是失败原因。
-    private func touch(_ type: Int32, x: Double, y: Double) -> String? {
+    private func touch(_ type: Int32, x: Double, y: Double, edge: UInt32) -> String? {
         var point = CGPoint(x: x, y: y)
-        guard let msg = mouseFunc(&point, nil, mainScreenTouchTarget, type, 1.0, 1.0, 0) else {
+        guard let msg = mouseFunc(&point, nil, mainScreenTouchTarget, type, 1.0, 1.0, edge) else {
             return "构建 HID 消息返回 nil（坐标或 target 被拒）"
         }
-        dbg("type=\(type) point=(\(x),\(y)) msg=\(msg)")
+        dbg("type=\(type) point=(\(x),\(y)) edge=\(edge) msg=\(msg)")
         lastSendError = nil
         send(msg)
         return lastSendError
@@ -422,40 +526,121 @@ final class Injector {
     /// 常驻模式用：不 exit，把结果放进 `lastSendError`。
     func tapQuiet(x: Double, y: Double) {
         lastSendError = nil
-        if let e = touch(eventDown, x: x, y: y) { lastSendError = e; return }
+        if let e = touch(eventDown, x: x, y: y, edge: edgeNone) { lastSendError = e; return }
         usleep(60_000)
-        if let e = touch(eventUp, x: x, y: y) { lastSendError = e }
+        if let e = touch(eventUp, x: x, y: y, edge: edgeNone) { lastSendError = e }
     }
 
     /// 常驻模式用：不 exit。
-    func swipeQuiet(x1: Double, y1: Double, x2: Double, y2: Double, durationMs: Int) {
+    ///
+    /// `edge` 贯穿整条轨迹（按下/移动/抬起都用同一个值）：系统手势的判定
+    /// 依据是**按下那一刻**的落点，中途换标记没有意义；而三条消息用同一个
+    /// 值也避免了「按下算系统手势、抬起不算」这种自相矛盾的序列。
+    func swipeQuiet(x1: Double, y1: Double, x2: Double, y2: Double, durationMs: Int, edge: UInt32) {
         lastSendError = nil
         let steps = max(2, min(120, durationMs / 8))
         let stepDelayUs = durationMs > 0 ? (durationMs * 1000) / steps : 8_000
-        if let e = touch(eventDown, x: x1, y: y1) { lastSendError = e; return }
+        if let e = touch(eventDown, x: x1, y: y1, edge: edge) { lastSendError = e; return }
         for i in 1...steps {
             let t = Double(i) / Double(steps)
             usleep(useconds_t(stepDelayUs))
-            touchNoWait(eventDown, x: x1 + (x2 - x1) * t, y: y1 + (y2 - y1) * t)
+            touchNoWait(eventDown, x: x1 + (x2 - x1) * t, y: y1 + (y2 - y1) * t, edge: edge)
         }
-        if let e = touch(eventUp, x: x2, y: y2) { lastSendError = e }
+        if let e = touch(eventUp, x: x2, y: y2, edge: edge) { lastSendError = e }
     }
 
     /// 常驻模式用：不 exit。
+    ///
+    /// 按下与抬起**必须成对**发送：单发一条只算「按住不放」，系统不会把
+    /// 它当成一次按键动作（这正是之前 home 无效的原因之一）。
     func buttonQuiet(_ name: String) -> Bool {
-        guard let (code, target) = buttonCode(name), let buttonFunc else { return false }
-        guard let msg = buttonFunc(0, code, target) else { return false }
+        guard let source = buttonSource(name), let buttonFunc else { return false }
         lastSendError = nil
+        for direction in [buttonDirectionDown, buttonDirectionUp] {
+            guard let msg = buttonFunc(source, direction, hardwareButtonTarget) else {
+                lastSendError = "构建按键消息失败（source=\(source) direction=\(direction)）"
+                return false
+            }
+            send(msg)
+            if let e = lastSendError { lastSendError = e; return false }
+            usleep(50_000)  // 按下与抬起之间留 50ms，否则被识别成极短的抖动
+        }
+        return true
+    }
+
+    /// 敲一段字符：按给定的用量码序列逐键发送。
+    ///
+    /// # 为什么 shift 要「真的按住」
+    ///
+    /// USB HID 里大写字母与符号没有独立编码，而是 Shift + 键的组合。
+    /// 只发字符键会得到小写（`s0b` 这种带 shift 的项就是为此）。
+    /// Shift 与键的顺序也必须对：**先按下 Shift，再敲字符，最后抬 Shift**——
+    /// 反了的话字符已经在 Shift 松开后发出，同样是小写。
+    func typeQuiet(_ spec: String) -> Bool {
+        guard let keyboardFunc else {
+            lastSendError = "SimulatorKit 里没有 IndigoHIDMessageForKeyboardArbitrary"
+            return false
+        }
+        guard let strokes = parseStrokes(spec) else {
+            lastSendError = "敲击序列无法解析：\(spec)"
+            return false
+        }
+        lastSendError = nil
+        for stroke in strokes {
+            if stroke.shift {
+                if !sendKey(keyboardFunc, hidLeftShift, keyDown) { return false }
+            }
+            if !sendKey(keyboardFunc, stroke.usage, keyDown) { return false }
+            // 按键之间留一点间隔：整段连续灌进去时，iOS 侧可能把过快的
+            // down/up 合并掉（表现是「有些字符丢字」）。12ms 接近人手速。
+            usleep(12_000)
+            if !sendKey(keyboardFunc, stroke.usage, keyUp) { return false }
+            if stroke.shift {
+                if !sendKey(keyboardFunc, hidLeftShift, keyUp) { return false }
+            }
+        }
+        return true
+    }
+
+    /// 发一个键盘 HID 事件（按下或抬起）。失败时把原因写进 `lastSendError`。
+    private func sendKey(_ fn: IndigoKeyboardFunc, _ usage: UInt32, _ direction: UInt32) -> Bool {
+        guard let msg = fn(usage, direction) else {
+            lastSendError = "构建键盘消息失败（usage=0x\(String(usage, radix: 16))）"
+            return false
+        }
         send(msg)
-        return lastSendError == nil
+        if let e = lastSendError {
+            lastSendError = "键盘事件未送达（usage=0x\(String(usage, radix: 16))）：\(e)"
+            return false
+        }
+        return true
+    }
+
+    /// 底部上滑回主屏：**必须带 edgeBottom 标记**。
+    ///
+    /// 参数取自参考实现与本机实测：起点 0.95（底部边缘区域内）、终点 0.35、
+    /// 10 步 × 16ms。速度要够快——慢速上滑 iOS 会理解成「打开 App 切换器」
+    /// 或干脆不动。
+    func homeSwipeQuiet() -> Bool {
+        lastSendError = nil
+        let x = 0.5, yStart = 0.95, yEnd = 0.35
+        let steps = 10
+        if let e = touch(eventDown, x: x, y: yStart, edge: edgeBottom) { lastSendError = e; return false }
+        for i in 1...steps {
+            let t = Double(i) / Double(steps)
+            usleep(16_000)
+            touchNoWait(eventDown, x: x, y: yStart + (yEnd - yStart) * t, edge: edgeBottom)
+        }
+        if let e = touch(eventUp, x: x, y: yEnd, edge: edgeBottom) { lastSendError = e; return false }
+        return true
     }
 
     func tap(x: Double, y: Double) {
-        if let e = touch(eventDown, x: x, y: y) {
+        if let e = touch(eventDown, x: x, y: y, edge: edgeNone) {
             fail(.injectFailed, "按下事件未送达：\(e)")
         }
         usleep(60_000)  // 60ms：足够被识别为点击而不是长按（长按阈值约 500ms）
-        if let e = touch(eventUp, x: x, y: y) {
+        if let e = touch(eventUp, x: x, y: y, edge: edgeNone) {
             fail(.injectFailed, "抬起事件未送达：\(e)")
         }
     }
@@ -465,14 +650,14 @@ final class Injector {
     /// 步数按**时长**分配而不是固定条数：固定条数会让长距离滑动在极短时间
     /// 内跳完（iOS 可能识别成快速甩动），而我们的调用方（用户拖拽）本来就有
     /// 明确的时长。约 16ms 一步（≈60fps）是模拟器能跟上的节奏。
-    func swipe(x1: Double, y1: Double, x2: Double, y2: Double, durationMs: Int) {
+    func swipe(x1: Double, y1: Double, x2: Double, y2: Double, durationMs: Int, edge: UInt32) {
         // 步数上限从 60 提到 120：60 步在 800ms 长滑动上是每步约 18ms，
         // 位移跳跃明显；120 步更接近真机触摸的采样密度（约 120Hz）。
         // 提高步数**不再有额外往返代价**（中途不等回执了）。
         let steps = max(2, min(120, durationMs / 8))
         let stepDelayUs = durationMs > 0 ? (durationMs * 1000) / steps : 8_000
 
-        if let e = touch(eventDown, x: x1, y: y1) {
+        if let e = touch(eventDown, x: x1, y: y1, edge: edge) {
             fail(.injectFailed, "按下事件未送达：\(e)")
         }
         for i in 1...steps {
@@ -482,27 +667,30 @@ final class Injector {
             usleep(useconds_t(stepDelayUs))
             // 中途**不等回执**（见 touchNoWait 的说明：等回执会让手势节奏
             // 被往返延迟绑架，进而毁掉 iOS 的惯性滚动）
-            touchNoWait(eventDown, x: x, y: y)
+            touchNoWait(eventDown, x: x, y: y, edge: edge)
         }
-        if let e = touch(eventUp, x: x2, y: y2) {
+        if let e = touch(eventUp, x: x2, y: y2, edge: edge) {
             fail(.injectFailed, "抬起事件未送达：\(e)")
         }
     }
 
     func button(_ name: String) {
-        guard let (code, target) = buttonCode(name) else {
+        guard let source = buttonSource(name) else {
             fail(.usage, "未知按键 \(name)（支持：home / lock）")
         }
         guard let buttonFunc else {
             fail(.unsupported, "SimulatorKit 里没有 IndigoHIDMessageForButton")
         }
-        guard let msg = buttonFunc(0, code, target) else {
-            fail(.injectFailed, "构建按键消息失败")
-        }
-        lastSendError = nil
-        send(msg)
-        if let e = lastSendError {
-            fail(.injectFailed, "按键事件未送达：\(e)")
+        for direction in [buttonDirectionDown, buttonDirectionUp] {
+            guard let msg = buttonFunc(source, direction, hardwareButtonTarget) else {
+                fail(.injectFailed, "构建按键消息失败（direction=\(direction)）")
+            }
+            lastSendError = nil
+            send(msg)
+            if let e = lastSendError {
+                fail(.injectFailed, "按键事件未送达：\(e)")
+            }
+            usleep(50_000)
         }
     }
 }
@@ -573,7 +761,7 @@ func run(_ args: Args, developerDir: String) throws {
         let injector = try Injector(deviceUDID: args.positionals[0], developerDir: developerDir)
         injector.swipe(x1: doubleArg(1, "x1", args), y1: doubleArg(2, "y1", args),
                        x2: doubleArg(3, "x2", args), y2: doubleArg(4, "y2", args),
-                       durationMs: args.durationMs)
+                       durationMs: args.durationMs, edge: args.edge)
         injector.diagnose()
 
     case "button":
@@ -582,9 +770,76 @@ func run(_ args: Args, developerDir: String) throws {
         injector.button(args.positionals[1])
         injector.diagnose()
 
+    case "home-swipe":
+        guard args.positionals.count >= 1 else { fail(.usage, "home-swipe 需要 <udid>") }
+        let injector = try Injector(deviceUDID: args.positionals[0], developerDir: developerDir)
+        if !injector.homeSwipeQuiet(), let e = injector.sendError {
+            fail(.injectFailed, "上滑回主屏未送达：\(e)")
+        }
+
+    case "springboard":
+        guard args.positionals.count >= 1 else { fail(.usage, "springboard 需要 <udid>") }
+        if let e = launchSpringBoard(udid: args.positionals[0], developerDir: developerDir) {
+            fail(.injectFailed, "启动 SpringBoard 失败：\(e)")
+        }
+
+    case "type":
+        guard args.positionals.count >= 2 else { fail(.usage, "type 需要 <udid> <STROKES>") }
+        let inj = try Injector(deviceUDID: args.positionals[0], developerDir: developerDir)
+        if !inj.typeQuiet(args.positionals[1]), let e = inj.sendError {
+            fail(.injectFailed, "键盘输入未送达：\(e)")
+        }
+
     default:
         fail(.usage, "未知命令 \(args.command)\n\n" + usage)
     }
+}
+
+/// 让 SpringBoard 前台化（等价于一次 home 键）。
+///
+/// # 为什么需要这条兜底（实测，Xcode 26.5）
+///
+/// 修好 `IndigoHIDMessageForButton` 的方向(1/2)与 target(0x33) 之后，
+/// home 键在本机仍然「送达但无变化」——与参考实现的注释一致：
+/// **Xcode 26+ 会静默丢弃 Indigo 的 home 按键**（按键消息发给硬件按键目标，
+/// 但那一层在 26 上不再转发给 SpringBoard）。
+///
+/// `simctl launch com.apple.springboard` 则是把已经在跑的 SpringBoard
+/// 重新前台化，功能上等价于按一次 home（都会回到主屏、把当前 App 退到后台）。
+/// 这是参考实现对 home 的**唯一**实现路径（它已不再尝试 HID 按键）。
+///
+/// 代价：约 200–400ms（要起一个 simctl 进程），比注入慢，但它是可靠的。
+func launchSpringBoard(udid: String, developerDir: String) -> String? {
+    var env = ProcessInfo.processInfo.environment
+    if !developerDir.isEmpty { env["DEVELOPER_DIR"] = developerDir }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+    p.arguments = ["simctl", "launch", udid, "com.apple.springboard"]
+    p.environment = env
+    let errPipe = Pipe()
+    p.standardOutput = Pipe()
+    p.standardError = errPipe
+    do {
+        try p.run()
+    } catch {
+        return error.localizedDescription
+    }
+    // 给个上限：正常 <1s，卡住就不必无限等（上层还有自己的超时）
+    let deadline = Date().addingTimeInterval(5)
+    while p.isRunning, Date() < deadline {
+        usleep(20_000)
+    }
+    if p.isRunning {
+        p.terminate()
+        return "simctl 无响应（超过 5s）"
+    }
+    if p.terminationStatus != 0 {
+        let data = errPipe.fileHandleForReading.readDataToEndOfFile()
+        let msg = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return msg.isEmpty ? "simctl 退出码 \(p.terminationStatus)" : msg
+    }
+    return nil
 }
 
 /// 常驻模式：从 stdin 逐行读命令，**复用同一个 HID 客户端**。
@@ -607,10 +862,14 @@ func run(_ args: Args, developerDir: String) throws {
 ///
 /// 命令格式（每行一条，制表符分隔）：
 ///   tap\t<udid>\t<x>\t<y>
-///   swipe\t<udid>\t<x1>\t<y1>\t<x2>\t<y2>\t<durationMs>
+///   swipe\t<udid>\t<x1>\t<y1>\t<x2>\t<y2>\t<durationMs>\t[edge]
 ///   button\t<udid>\t<home|lock>
+///   home-swipe\t<udid>
+///   springboard\t<udid>
+///   type\t<udid>\t<STROKES>
 ///   ping\t<udid>
 /// 每条命令回一行：`ok` 或 `err\t<原因>`（pong 回 `ok`）。
+/// `edge` 省略时为 0（普通触摸）；1/2/3/4 = 左/上/下/右边缘手势。
 func serve(developerDir: String) {
     // 缓存按 UDID 建客户端：用户可能切设备，但同一个不必重建
     var cache: [String: Injector] = [:]
@@ -650,7 +909,8 @@ func serve(developerDir: String) {
                   let inj = injector(parts[1]) else {
                 reply("err\t参数或设备无效"); continue
             }
-            inj.swipeQuiet(x1: x1, y1: y1, x2: x2, y2: y2, durationMs: Int(d))
+            let edge = parts.count >= 8 ? UInt32(parts[7]) ?? 0 : 0
+            inj.swipeQuiet(x1: x1, y1: y1, x2: x2, y2: y2, durationMs: Int(d), edge: edge)
             reply(inj.sendError.map { "err\t\($0)" } ?? "ok")
         case "button":
             guard parts.count >= 3, let inj = injector(parts[1]) else {
@@ -659,7 +919,32 @@ func serve(developerDir: String) {
             if inj.buttonQuiet(parts[2]) {
                 reply("ok")
             } else {
-                reply("err\t不支持的按键")
+                reply(inj.sendError.map { "err\t\($0)" } ?? "err\t不支持的按键")
+            }
+        case "home-swipe":
+            guard parts.count >= 2, let inj = injector(parts[1]) else {
+                reply("err\t参数或设备无效"); continue
+            }
+            if inj.homeSwipeQuiet() {
+                reply("ok")
+            } else {
+                reply(inj.sendError.map { "err\t\($0)" } ?? "err\t上滑未送达")
+            }
+        case "springboard":
+            guard parts.count >= 2 else { reply("err\t缺 udid"); continue }
+            if let e = launchSpringBoard(udid: parts[1], developerDir: developerDir) {
+                reply("err\t\(e)")
+            } else {
+                reply("ok")
+            }
+        case "type":
+            guard parts.count >= 3, let inj = injector(parts[1]) else {
+                reply("err\t参数或设备无效"); continue
+            }
+            if inj.typeQuiet(parts[2]) {
+                reply("ok")
+            } else {
+                reply(inj.sendError.map { "err\t\($0)" } ?? "err\t键盘输入失败")
             }
         case "ping":
             guard parts.count >= 2 else { reply("err\t缺 udid"); continue }

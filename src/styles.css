@@ -4060,6 +4060,25 @@ body {
   touch-action: none;
   /* 截图是位图：放大时保持像素锐利，避免糊成一片无法辨认控件 */
   image-rendering: -webkit-optimize-contrast;
+  /* 防原生图片拖拽（JSX 已有 draggable={false}，这里再兜一层：
+     原生拖拽同样会画出一块半透明的「拖影」）。 */
+  -webkit-user-drag: none;
+}
+/* 画面上的图层**不可选中**。
+   # 为什么必须禁（实测根因）
+   拖动画面时，浏览器的「选词/选中」默认行为与指针手势**并行发生**，
+   而 WebKit 会给被选中的图片整体铺一层高亮——在活动窗口、系统强调色为蓝时
+   是**整片蓝**（实测把图片区均值从 (142,128,169) 变成 (134,164,220)，
+   色偏 B-R 从 27 涨到 86；用户截图那块遮罩的色偏是 81，同一现象）。
+   那层蓝**不会自己消失**（选区仍在），看起来像界面坏了。
+   `setPointerCapture` 拦不住它——选词不属于指针事件链。
+
+   # 为什么是 :not(.sim-elements)
+   小程序的元素清单**嵌在 .sim-screen 内**，而它是文字清单，用户需要能选中
+   复制（元素名/tag）。所以只禁画面图层与图片本身，清单保持可选。
+   用 `:not()` 而不是逐个列类名：以后新增叠层会自动受保护。 */
+.sim-screen > *:not(.sim-elements) {
+  user-select: none; -webkit-user-select: none;
 }
 /* 只读画面（iOS / 未验证的平台）：把「不可交互」表达清楚。
    降低不透明度会让人以为画面有问题，所以只改光标与一道细边框。 */
@@ -4236,6 +4255,28 @@ body {
   flex-shrink: 0;
 }
 .sim-bar-hint { font-size: 10.5px; color: var(--t4); }
+/* 键盘接入状态。
+   未接入时保持低调（它只是提示「可以这么做」），接入后用强调色**明确亮起**：
+   用户打不出字时要一眼看出是「没聚焦」还是「注入坏了」——两者要采取的动作
+   完全不同（点一下画面 vs 报 bug）。 */
+.sim-kb {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10.5px; color: var(--t4);
+  padding: 2px 6px; border-radius: var(--r-xs);
+  border: 1px solid transparent;
+  transition: color .12s ease, border-color .12s ease, background .12s ease;
+}
+.sim-kb.is-on {
+  color: var(--accent);
+  border-color: rgba(106,165,255,0.34);
+  background: rgba(106,165,255,0.10);
+}
+/* 画面区获得焦点时给一道极细的强调边：键盘接上去了，但焦点在谁身上
+   没有视觉反馈的话，用户会反复点击画面来「确认」。 */
+.sim-screen.is-keyboard img { border-color: rgba(106,165,255,0.42); }
+/* 可聚焦但不该有焦点圈（点击会给它焦点，而浏览器默认的轮廓在图片上很突兀）。 */
+.sim-screen:focus { outline: none; }
+.sim-screen:focus-visible { outline: 1px solid rgba(106,165,255,0.5); outline-offset: -1px; }
 .sim-icon-btn {
   appearance: none; background: transparent; border: 1px solid transparent;
   border-radius: var(--r-xs); color: var(--t3);

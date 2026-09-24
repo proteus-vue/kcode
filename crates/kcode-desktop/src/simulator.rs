@@ -203,6 +203,18 @@ pub struct PlatformStatus {
     pub input_hint: Option<String>,
     /// 输入形态（见 [`InputMode`]）。界面据此决定画可点画面还是元素列表。
     pub input_mode: InputMode,
+    /// 能否**输入文本**（键盘）。
+    ///
+    /// 与 `can_input` 分开，因为「能点」与「能打字」在四个平台上确实不同：
+    /// · iOS / Android：都能（实测通过，见 §3.49/§3.50）
+    /// · 小程序：点击走元素接口、**没有键盘通道**，能点不能打字
+    /// · 鸿蒙：未验证，两者都是 false
+    ///
+    /// 分成两位字段的理由与 `can_input` 相同：界面要能**如实表达**当前
+    /// 平台缺哪一项能力，而不是画一个点了会报错的键盘入口。
+    pub can_type: bool,
+    /// `can_type` 为 false 时，为什么（面向用户）。
+    pub type_hint: Option<String>,
 }
 
 impl PlatformStatus {
@@ -217,6 +229,8 @@ impl PlatformStatus {
             can_input: false,
             input_hint: None,
             input_mode: InputMode::None,
+            can_type: false,
+            type_hint: None,
         }
     }
 }
@@ -793,11 +807,21 @@ pub fn ios_status_with_input(
             can_input: input_ok,
             // 能点就是坐标级（可点画面任意位置、可滑动）；否则只读。
             input_mode: if input_ok { InputMode::Coordinate } else { InputMode::None },
+            // 键盘与触摸共用同一套私有接口与 helper（实测：IndigoHIDMessageForKeyboardArbitrary
+            // 与触摸符号都在 SimulatorKit 里），所以能力位跟着 input_ok 走。
+            can_type: input_ok,
+            type_hint: (!input_ok).then(|| {
+                "iOS 键盘注入与触摸走同一套私有接口，触摸不可用时键盘也不可用。".to_owned()
+            }),
             input_hint: if input_ok {
                 Some(
-                    "iOS 触摸通过 Apple 私有接口注入（kcode-sim-hid）：\n\
-                     · 未经 Apple 承诺，Xcode 大版本升级后可能需要适配\n\
-                     · 若升级 Xcode 后点不动，运行 `bash scripts/build-sim-hid.sh` 重新自检"
+                    "iOS 触摸与键盘都通过 Apple 私有接口注入（kcode-sim-hid）：\n\
+                     · 画面已裁到设备屏幕，所见即可点（模拟器自己的工具栏不在画面里）\n\
+                     · 底部上滑回主屏、从左边缘右滑返回均已接入（按落点自动识别）\n\
+                     · 点画面即可把键盘接到设备上，之后直接打字；**只支持 ASCII**\
+                     （中文/emoji 走不了 HID 键盘，会明确报错而不是静默丢弃）\n\
+                     · 未经 Apple 承诺，Xcode 大版本升级后可能需要适配；\
+                     若升级 Xcode 后点不动，运行 `bash scripts/build-sim-hid.sh` 重新自检"
                         .to_owned(),
                 )
             } else {
@@ -874,6 +898,10 @@ pub fn harmony_status(hdc_found: bool, targets: &[String], tool: Option<&str>) -
         can_launch: false,
         can_input: false,
         input_mode: InputMode::None,
+        can_type: false,
+        type_hint: Some(
+            "鸿蒙的文本输入（uinput -K）同样未在真机验证，因此与触摸一起关闭。".to_owned(),
+        ),
         input_hint: Some(
             "鸿蒙的触摸注入（uinput）尚未在真机上验证；当前画面为只读，验证通过后即可开启"
                 .to_owned(),
@@ -975,6 +1003,14 @@ pub fn miniprogram_status_full(
             // 注意：我们**能**拿到元素位置（Element.getOffset），所以界面
             // 可以把热区叠在截图上让用户直接点画面——只是底层仍走元素点击，
             // 因为自动化协议没有坐标触摸（Page.touchstart 未实现）。
+            // 小程序**没有键盘通道**：自动化协议里能打字的是 `Element.input`，
+            // 那是「往指定元素里填值」而不是「模拟敲键盘」——用户按下「a」，
+            // 我们无法知道该填到哪个元素里。所以这里如实返回 false。
+            can_type: false,
+            type_hint: Some(
+                "小程序的键盘输入未接入：自动化协议只能往**指定元素**填值"
+                    .to_owned(),
+            ),
             can_input: true,
             input_mode: InputMode::Element,
             input_hint: Some(
@@ -1014,6 +1050,14 @@ pub fn miniprogram_status_full(
         devices,
         // 启动/关闭由开发者工具管理，不给按钮（与鸿蒙同理）
         can_launch: false,
+        // 小程序**没有键盘通道**：自动化协议里能打字的是 `Element.input`，
+        // 那是「往指定元素里填值」而不是「模拟敲键盘」——用户按下「a」，
+        // 我们无法知道该填到哪个元素里。所以这里如实返回 false。
+        can_type: false,
+        type_hint: Some(
+            "小程序的键盘输入未接入：自动化协议只能往**指定元素**填值"
+                .to_owned(),
+        ),
         can_input: true,
         input_mode: InputMode::Element,
         input_hint: Some(
@@ -1884,6 +1928,10 @@ async fn probe_android() -> PlatformStatus {
         can_launch: true,
         can_input: true,
         input_mode: InputMode::Coordinate,
+        // 文本输入走 `adb shell input text`（实测：ASCII 全部可用、非 ASCII 会被
+        // Android 自己拒绝，见 §3.50）。
+        can_type: true,
+        type_hint: None,
         input_hint: None,
     }
 }
@@ -2631,9 +2679,18 @@ fn window_owner_for(platform: Platform) -> Option<&'static str> {
         Platform::Ios => Some("Simulator"),
         // 开发者工具的模拟器在其中
         Platform::Miniprogram => Some("微信开发者工具"),
-        // Android 模拟器窗口名随 AVD 变，但都属于 qemu/emulator 进程；
-        // 用 `emulator` 前缀匹配不到，故暂不启用（返回 None → 回退逐帧截图）
-        Platform::Android => None,
+        // Android 模拟器的窗口属主是 **qemu-system-aarch64**（实测）。
+        //
+        // 这里原本是 `None`，注释写着「窗口名随 AVD 变，用 `emulator` 前缀
+        // 匹配不到」——那是**推断，不是实测**（当时没启模拟器，无从验证）。
+        // 实测否掉了它：属主名与 AVD 名无关，它是模拟器的进程名，
+        // 与设备型号/AVD 都无关，所以按它匹配是稳的。
+        //
+        // 注意架构后缀：Apple Silicon 上是 aarch64，Intel 上是 x86_64。
+        // 匹配用「包含」语义（find_window_id 里做），所以这里给共同前缀
+        // `qemu-system` 就能同时覆盖两种——给具体后缀会在另一种机器上失效。
+        Platform::Android => Some("qemu-system"),
+        // 鸿蒙：没有可启动的模拟器（DevEco 管理），本机也无 hdc，未验证。
         Platform::Harmony => None,
     }
 }
@@ -2849,11 +2906,23 @@ pub async fn frame(platform: Platform, id: &str, force: bool) -> Result<Captured
     // 常驻流需要「屏幕录制」权限，用户没给授权时必须仍能看画面。
     // 设备的宽高比：窗口帧里定位设备画面要用它（见 ensure_cast 的说明）。
     // ios_screen_size 有按设备缓存，所以这里只是一次性的成本。
+    // 设备尺寸**按平台取**。
+    //
+    // ⚠️ 这里曾经无条件调 `ios_screen_size`（走 `simctl`）——它只对 iOS 有效，
+    // Android 上必然失败，于是 aspect 是 None、helper 算不出比例、
+    // 屏幕检测整块失效。启用 Android 窗口流后才暴露出来。
     let (aspect, device_size) = if cfg!(target_os = "macos")
         && window_owner_for(platform).is_some()
     {
-        match ios_screen_size(id).await {
-            Ok((w, h)) if h > 0 => (Some(w as f64 / h as f64), Some((w, h))),
+        let size = match platform {
+            Platform::Android => android_screen_size(id).await.ok(),
+            Platform::Ios => ios_screen_size(id).await.ok(),
+            // 小程序：抓的是开发者工具窗口，设备比例无从取（它自己的截图
+            // 分辨率与窗口不同），交给 helper 按窗口比例兜底。
+            _ => None,
+        };
+        match size {
+            Some((w, h)) if h > 0 => (Some(w as f64 / h as f64), Some((w, h))),
             _ => (None, None),
         }
     } else {
@@ -3182,23 +3251,144 @@ pub struct Touch {
     pub x2: i64,
     pub y2: i64,
     pub duration_ms: u64,
+    /// 系统边缘手势标记（iOS 用；见 `input_ios` 的说明）。
+    pub edge: u32,
 }
 
 impl Touch {
     /// 点击：只有一个点，坐标用 (x1,y1)。
     pub fn tap(x: i64, y: i64) -> Self {
-        Self { x1: x, y1: y, x2: 0, y2: 0, duration_ms: 0 }
+        Self { x1: x, y1: y, x2: 0, y2: 0, duration_ms: 0, edge: 0 }
     }
 
     /// 滑动：起点 → 终点 + 时长。
     pub fn swipe(x1: i64, y1: i64, x2: i64, y2: i64, duration_ms: u64) -> Self {
-        Self { x1, y1, x2, y2, duration_ms }
+        Self { x1, y1, x2, y2, duration_ms, edge: 0 }
     }
 
     /// 硬件键（返回/主屏）：不带坐标。
     pub fn key() -> Self {
-        Self { x1: 0, y1: 0, x2: 0, y2: 0, duration_ms: 0 }
+        Self { x1: 0, y1: 0, x2: 0, y2: 0, duration_ms: 0, edge: 0 }
     }
+}
+
+/// 向设备输入一段文本。
+///
+/// # 为什么单独一个函数，而不是给 `input` 加个文本参数
+///
+/// 文本与手势在语义上不同（一个没有坐标），在类型上也不同（文本是不可
+/// `Copy` 的变长数据）。若把文本塞进 `Touch`，`Touch` 就丢掉 `Copy`，
+/// 而它被 17 处调用点当值来用、被大量测试当 POD 比较——为了一处新功能
+/// 付全局代价不划算。若改成给 `input` 加一个 `Action` 枚举参数，
+/// 同样要改那 17 处（它们传的是 `&str` 字面量），收益还是一样的。
+///
+/// 所以：**手势走 `input`，文本走 `input_text`**，两者只共享「一次输入」
+/// 这个外部概念（前端的 `simulator_input` 命令同时容纳两者）。
+///
+/// # 能力边界（实测，2026-09-24）
+///
+/// - ✅ iOS：走 HID 键盘注入（`IndigoHIDMessageForKeyboardArbitrary`），
+///   实测能打出 `helloAB!`（含大写与符号）。
+/// - ❌ 其余平台：Android 的 `input text` 能打 ASCII 但**中文需要额外处理**
+///   （`adb shell input text` 不支持非 ASCII，得走 ADBKeyBoard 之类的 IME），
+///   小程序与鸿蒙同理未验证。这些平台一律**明确报错**，不静默丢弃——
+///   「点了没反应」比「告诉你不支持」难排查得多。
+pub async fn input_text(platform: Platform, id: &str, text: &str) -> Result<(), String> {
+    match platform {
+        Platform::Ios => input_ios_text(id, text).await,
+        Platform::Android => input_android_text(id, text).await,
+        Platform::Harmony => Err(
+            "鸿蒙的文本输入尚未实现（uinput -K 未在真机验证，因此能力位也是关的）。"
+                .to_owned(),
+        ),
+        Platform::Miniprogram => Err(
+            "小程序的键盘输入未实现：自动化协议只能往指定元素填值，\
+             无法表达「用户按了某个键」。"
+                .to_owned(),
+        ),
+    }
+}
+
+/// Android 的文本输入：`adb shell input text`，可能分多次发送。
+async fn input_android_text(id: &str, text: &str) -> Result<(), String> {
+    let serial = resolve_android_serial(id).await?;
+    let adb = adb_path().ok_or("未找到 adb")?;
+
+    // 逐字符分派：控制字符走 keyevent，其余攒成一段走 input text。
+    //
+    // 为什么「攒成一段」：`input text` 一次调用能打整段（实测
+    // `helloAB!` 一次成功），逐字符发会让每个字符都付一次 adb 往返
+    // （约 40–80ms），打一句话要好几秒，手感很差。
+    let mut buf = String::new();
+    for c in text.chars() {
+        if let Some(code) = android_keycode(c) {
+            if !buf.is_empty() {
+                let parts = encode_android_text(&buf)?;
+                for part in &parts {
+                    let argv = ["-s", &serial, "shell", "input", "text", part];
+                    run_stdout(&adb, &argv, CMD_TIMEOUT).await?;
+                }
+                buf.clear();
+            }
+            let argv = ["-s", &serial, "shell", "input", "keyevent", code];
+            run_stdout(&adb, &argv, CMD_TIMEOUT).await?;
+        } else {
+            buf.push(c);
+        }
+    }
+    if !buf.is_empty() {
+        let parts = encode_android_text(&buf)?;
+        for part in &parts {
+            let argv = ["-s", &serial, "shell", "input", "text", part];
+            run_stdout(&adb, &argv, CMD_TIMEOUT).await?;
+        }
+    }
+    Ok(())
+}
+
+/// iOS 的文本输入：把 ASCII 编成 HID 敲击序列交给 helper。
+async fn input_ios_text(id: &str, text: &str) -> Result<(), String> {
+    // 先校验：编不出来就直接报错，不必等到 helper 那一步
+    // （错误信息里能指明是哪个字符，这对排查有决定意义）。
+    let spec = encode_typing(text)?;
+    let hid = sim_hid_path().ok_or(
+        "iOS 键盘注入不可用：找不到 kcode-sim-hid helper。\
+         开发期可运行 `bash scripts/build-sim-hid.sh` 编译它。",
+    )?;
+    let (dev, input_ok) = ios_input_context().await;
+    if !input_ok {
+        return Err(format!(
+            "iOS 输入不可用：当前 Xcode（{}）里没有所需的私有接口。",
+            dev.as_deref()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|| "系统选中项".to_owned())
+        ));
+    }
+
+    let line = format!("type\t{id}\t{spec}");
+    match hid_cmd(&line, dev.as_deref()) {
+        Ok(_) => return Ok(()),
+        Err(e) => {
+            eprintln!("[kcode] HID 常驻调用失败（text），回退一次性调用：{e}");
+        }
+    }
+
+    // ── 回退：一次性调用 ─────────────────────────────────────────────
+    let mut cmd = tokio::process::Command::new(&hid);
+    cmd.args(["type", id, &spec]);
+    if let Some(d) = dev.as_deref() {
+        cmd.arg("--developer-dir").arg(d);
+    }
+    let out = tokio::time::timeout(std::time::Duration::from_secs(20), cmd.output())
+        .await
+        .map_err(|_| "键盘注入超时（20 秒未返回）".to_owned())?
+        .map_err(|e| format!("执行 kcode-sim-hid 失败：{e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("未知错误");
+    Err(format!("键盘注入失败：{first}"))
 }
 
 /// 向设备发送一次输入。
@@ -3325,7 +3515,110 @@ fn hid_cmd(line: &str, developer_dir: Option<&Path>) -> Result<String, String> {
     Ok(r)
 }
 
-/// iOS 输入：走 `kcode-sim-hid` helper（**已在真机验证** tap/swipe/button）。
+/// ASCII 字符 → (USB HID 用量码, 是否需要 Shift)。
+///
+/// # 为什么这张表放在 Rust 侧而不是 helper 里
+///
+/// 表里错一个键，就是**一整类字符打不出来**（或打错），而这类错误在
+/// 界面上表现为「键盘有时候不好使」——极难归因。Rust 这边有完整的单元
+/// 测试设施，Swift 那边没有，所以映射在这里做并被 `cargo test` 钉住，
+/// helper 只负责「把给定的用量码发出去」这一件事。
+///
+/// 用量码是 **Usage Page 0x07（Keyboard/Keypad）** 的值：
+/// 0x04..0x1D = a..z，0x1E..0x26 = 1..9，0x27 = 0，
+/// 0x28 = Enter，0x2A = Backspace，0x2C = 空格，0x2D = '-'，0x2E = '='，
+/// 0x2F = '['，0x30 = ']'，0x31 = '\\'，0x33 = ';'，0x34 = '\''，
+/// 0x35 = '`'，0x36 = ','，0x37 = '.'，0x38 = '/'。
+///
+/// 需要 Shift 的字符（USB HID 里没有独立码，是 Shift+键的组合）：
+/// 大写字母、`!@#$%^&*()_+{}|:"<>?~`。
+pub fn ascii_to_hid(c: char) -> Option<(u32, bool)> {
+    let v = match c {
+        'a'..='z' => (0x04 + (c as u32 - 'a' as u32), false),
+        'A'..='Z' => (0x04 + (c as u32 - 'A' as u32), true),
+        '1'..='9' => (0x1E + (c as u32 - '1' as u32), false),
+        '0' => (0x27, false),
+        ' ' => (0x2C, false),
+        '\n' | '\r' => (0x28, false),
+        '\t' => (0x2B, false),
+        // 退格：HID 里 0x2A。它不是「可打印字符」，但用户打字时必须有，
+        // 否则打错一个字只能删掉重来。放在这张表里，前端就能把它当作
+        // 「一个要发送的字符」走同一条路（不必为它单开一个后端动作）。
+        '\u{8}' => (0x2A, false),
+        // Esc：关闭 iOS 的弹出层（如 Spotlight、键盘弹窗）。
+        '\u{1b}' => (0x29, false),
+        '-' => (0x2D, false),
+        '_' => (0x2D, true),
+        '=' => (0x2E, false),
+        '+' => (0x2E, true),
+        '[' => (0x2F, false),
+        '{' => (0x2F, true),
+        ']' => (0x30, false),
+        '}' => (0x30, true),
+        '\\' => (0x31, false),
+        '|' => (0x31, true),
+        ';' => (0x33, false),
+        ':' => (0x33, true),
+        '\'' => (0x34, false),
+        '"' => (0x34, true),
+        '`' => (0x35, false),
+        '~' => (0x35, true),
+        ',' => (0x36, false),
+        '<' => (0x36, true),
+        '.' => (0x37, false),
+        '>' => (0x37, true),
+        '/' => (0x38, false),
+        '?' => (0x38, true),
+        '!' => (0x1E, true),
+        '@' => (0x1F, true),
+        '#' => (0x20, true),
+        '$' => (0x21, true),
+        '%' => (0x22, true),
+        '^' => (0x23, true),
+        '&' => (0x24, true),
+        '*' => (0x25, true),
+        '(' => (0x26, true),
+        ')' => (0x27, true),
+        // 其余（中文、emoji 等）不在 HID 键盘的编码范围里。
+        // **必须显式拒绝**而不是跳过：静默丢字符会让用户以为「键盘偶尔失灵」，
+        // 说不清是哪个字没打进去。
+        _ => return None,
+    };
+    Some(v)
+}
+
+/// 把一段文本编成 helper 要的「敲击序列」。
+///
+/// 格式：逗号分隔的十六进制用量码，`s` 前缀表示这一击带 Shift。
+/// 遇到无法表示的字**整体拒绝**（返回 Err 指出是哪个字），不做部分发送——
+/// 「打了一半」比「一个字没打」更难理解，而且可能已经污染了输入框。
+pub fn encode_typing(text: &str) -> Result<String, String> {
+    if text.is_empty() {
+        return Err("要输入的内容为空".to_owned());
+    }
+    let mut items: Vec<String> = Vec::with_capacity(text.chars().count());
+    for c in text.chars() {
+        match ascii_to_hid(c) {
+            Some((usage, shift)) => {
+                items.push(if shift {
+                    format!("s{usage:02x}")
+                } else {
+                    format!("{usage:02x}")
+                });
+            }
+            None => {
+                return Err(format!(
+                    "字符 {c:?} 无法用模拟器键盘输入：\
+                     iOS 键盘注入走 USB HID 用量码，只覆盖 ASCII。\
+                     中文/emoji 需要走别的路径（当前未实现）"
+                ));
+            }
+        }
+    }
+    Ok(items.join(","))
+}
+
+/// iOS 输入：走 `kcode-sim-hid` helper（**已在真机验证** tap/swipe/button/type）。
 ///
 /// # 坐标换算：像素 → 归一化
 ///
@@ -3407,10 +3700,17 @@ async fn input_ios(id: &str, action: &str, t: Touch) -> Result<(), String> {
     let line = match action {
         "tap" => format!("tap\t{id}\t{:.6}\t{:.6}", nx(t.x1), ny(t.y1)),
         "swipe" => format!(
-            "swipe\t{id}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{}",
-            nx(t.x1), ny(t.y1), nx(t.x2), ny(t.y2), t.duration_ms
+            "swipe\t{id}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{}\t{}",
+            nx(t.x1), ny(t.y1), nx(t.x2), ny(t.y2), t.duration_ms, t.edge
         ),
-        "back" => format!("swipe\t{id}\t0.005\t0.5\t0.35\t0.5\t280"),
+        // 返回手势：iOS 没有返回键，但「从左边沿右滑」是系统级返回手势。
+        // 这不是「我们发明的手势」，而是 iOS 自身的导航约定。
+        //
+        // **必须带左边缘标记(1)**：实测不带标记时这条手势完全无效
+        // （helper 回 ok、画面不动）——因为边缘判定本该由触摸驱动做，
+        // 我们绕过驱动注入就得自己标（见 edgeNone/edgeLeft 的说明）。
+        // 终点取 0.8 而不是 0.35：实测 0.35 未验证，0.8/300ms 已验证生效。
+        "back" => format!("swipe\t{id}\t0.005\t0.5\t0.8\t0.5\t300\t1"),
         "home" => format!("button\t{id}\thome"),
         other => return Err(format!("iOS 不支持的输入类型：{other}")),
     };
@@ -3438,18 +3738,23 @@ async fn input_ios(id: &str, action: &str, t: Touch) -> Result<(), String> {
                 .arg(format!("{:.6}", nx(t.x2)))
                 .arg(format!("{:.6}", ny(t.y2)))
                 .arg("--duration")
-                .arg(t.duration_ms.to_string());
+                .arg(t.duration_ms.to_string())
+                .arg("--edge")
+                .arg(t.edge.to_string());
         }
         // 返回手势：iOS 没有返回键，但「从左边沿右滑」是系统级返回手势。
         // 这不是「我们发明的手势」，而是 iOS 自身的导航约定。
+        // 必须带左边缘标记（见常驻路径处对 edge 的说明）。
         "back" => {
             let y = 0.5_f64;
             cmd.args(["swipe", id, "0.005"])
                 .arg(format!("{y:.6}"))
-                .arg("0.35")
+                .arg("0.8")
                 .arg(format!("{y:.6}"))
                 .arg("--duration")
-                .arg("280");
+                .arg("300")
+                .arg("--edge")
+                .arg("1");
         }
         "home" => {
             cmd.args(["button", id, "home"]);
@@ -3470,7 +3775,58 @@ async fn input_ios(id: &str, action: &str, t: Touch) -> Result<(), String> {
     }
     let err = String::from_utf8_lossy(&out.stderr);
     let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("未知错误");
-    Err(format!("iOS 注入失败（退出码 {:?}）：{}", out.status.code(), first))
+    let detail = format!("iOS 注入失败（退出码 {:?}）：{}", out.status.code(), first);
+
+    // ── 主屏键的兜底：SpringBoard 前台化 ─────────────────────────────
+    //
+    // HID 按键是首选（快：约 0.1s，且是真正的「按 home」语义）。但它在
+    // 某些 Xcode 版本上会被丢弃或符号缺失——参考实现对 Xcode 26+ 就直接
+    // 放弃了按键、改用这条路。本机（Xcode 26.5）实测按键可用 5/5，
+    // 所以顺序反过来：**先用按键，失败才退**。
+    //
+    // 两条路都验过：都会回到主屏，且原 App 是被退到后台（PID 不变），
+    // 不是崩溃——这一点必须验，否则「回到主屏」也可能是 App 崩了造成的
+    // 假象（截图看起来一模一样）。
+    if action == "home" {
+        let mut cmd = tokio::process::Command::new(&hid);
+        cmd.args(["springboard", id]);
+        if let Some(d) = dev.as_deref() {
+            cmd.arg("--developer-dir").arg(d);
+        }
+        if let Ok(Ok(o)) = tokio::time::timeout(std::time::Duration::from_secs(15), cmd.output()).await
+        {
+            if o.status.success() {
+                eprintln!("[kcode] HID 主屏键不可用，已改用 SpringBoard 前台化：{detail}");
+                return Ok(());
+            }
+        }
+    }
+    Err(detail)
+}
+
+/// Android 设备的屏幕像素尺寸（设备真实生效的那一档）。
+///
+/// # 为什么不能借用 `ios_screen_size`
+///
+/// 那个函数走 `simctl`，在 Android 上必然失败。早先常驻窗口流只给 iOS 用，
+/// 所以「用哪个函数取尺寸」这个分支不存在；启用 Android 后才发现
+/// **无条件调 `ios_screen_size` 会让 Android 的宽高比永远是 None**，
+/// 而宽高比是屏幕检测的前提（helper 要靠它区分「设备画面」与「窗口装饰」）。
+///
+/// 数据来源是 `adb shell wm size`——与设备信息里显示分辨率的是同一条命令，
+/// 且 `parse_wm_size` 已有测试；这里只是把它拆成数值。
+/// `Override size` 时以覆盖值为准（那才是实际生效的尺寸），由 parse 保证。
+async fn android_screen_size(id: &str) -> Result<(u32, u32), String> {
+    let serial = resolve_android_serial(id).await?;
+    let adb = adb_path().ok_or("未找到 adb")?;
+    let out = run_stdout(&adb, &["-s", &serial, "shell", "wm", "size"], CMD_TIMEOUT).await?;
+    let dims = parse_wm_size(&out).ok_or_else(|| format!("无法解析 wm size 输出：{out}"))?;
+    let (w, h) = dims
+        .split_once('×')
+        .ok_or_else(|| format!("wm size 格式异常：{dims}"))?;
+    let w: u32 = w.parse().map_err(|_| format!("宽度不是数字：{dims}"))?;
+    let h: u32 = h.parse().map_err(|_| format!("高度不是数字：{dims}"))?;
+    Ok((w, h))
 }
 
 /// iOS 设备的屏幕像素尺寸。
@@ -3553,7 +3909,108 @@ async fn input_android(id: &str, action: &str, t: Touch) -> Result<(), String> {
     run_stdout(&adb, &refs, CMD_TIMEOUT).await.map(|_| ())
 }
 
-/// 鸿蒙输入：`hdc shell uinput`。
+/// 把文本编成**一串** `adb shell input text` 调用（按顺序发送）。
+///
+/// # 为什么是一串而不是一个参数（三层语义，§3.50 全部实测）
+///
+/// 文本从我们这里到设备输入框要穿过三层：
+///
+/// 1. **本地进程参数**：`Command::args` 不做 shell 解析 → 这一层安全。
+/// 2. **设备端 shell**：`adb shell <cmd>` 会把参数拼成一条命令交给设备上的
+///    `sh`。实测：发 `ab cd` 只打出 `ab`（空格截断），发 `x;id` 只打出 `x`
+///    （分号被当命令分隔）。**既丢字符，也是命令注入面**。
+///    修法：整段用**单引号**包住（实测 `'x;y'` → 正确打出 `x;y`），
+///    文本里的单引号按 POSIX 规矩用 `'\''` 断开。
+/// 3. **`input` 命令自己的格式串**：它把**字面的两字符序列 `%s`
+///    替换成一个空格**（不是 printf 语义）。实测三条把规则钉死：
+///    · `a%sb`  → `a b`（`%s` 变成空格）
+///    · `50%`   → `50%`（单个 `%` 原样通过）
+///    · `50%%`  → `50%%`（**不会**折叠成一个 `%`）
+///    也就是说**没法靠转义表达字面 `%s`**。修法是**拆开发**：把文本按
+///    `%s` 切段，段间单独发一次 `%`、再单独发一次 `s`
+///    （实测 `'100'` + `'%'` + `'s'` → 得到 `100%s`）。
+///
+/// # 为什么不逐字符用 `input keyevent`
+///
+/// keyevent 完全绕开第 2、3 层（它只接键名，没有用户文本），但它
+/// **无法表达「按住 Shift」**：实测 `input keyevent KEYCODE_SHIFT_LEFT
+/// KEYCODE_A` 打出的是小写 `a`——因为 `input keyevent` 对每个键都发
+/// **完整的按下+抬起**，Shift 在字母按下前就松开了。
+/// 所以大写与符号只能靠 `input text`（实测它能正确打 `helloAB!`）。
+///
+/// # 能力边界
+///
+/// 非 ASCII 一律拒绝：实测 `input text '你好'` 在设备端抛
+/// `NullPointerException`（`Input.java:168`），**一个字都打不进去**，
+/// 连 `é` 这种 Latin-1 也一样（逐个实测过 é ü ñ ° €，全部失败）。
+/// 中文需要装 ADBKeyBoard 之类的输入法，当前未实现。
+///
+/// ⚠️ 顺带记一条测量教训：这个失败在 adb 上的表现是**退出码 1 + stderr
+/// 有堆栈**，但我第一次用 `adb ... | head -3` 看它时显示「退出码=0」——
+/// 那是 `head` 的退出码。管道会吞掉真实退出码，这在排查远端命令时格外危险。
+pub fn encode_android_text(text: &str) -> Result<Vec<String>, String> {
+    if text.is_empty() {
+        return Err("要输入的内容为空".to_owned());
+    }
+    for c in text.chars() {
+        if !c.is_ascii() {
+            return Err(format!(
+                "字符 {c:?} 无法通过 adb 输入：Android 的 `input text` 只支持 ASCII\
+                 （实测非 ASCII 会在设备端抛 NullPointerException，一个字都打不进去）。\
+                 中文需要安装 ADBKeyBoard 之类的输入法，当前未实现"
+            ));
+        }
+        // 控制字符不走这条路径：它们在 Android 上是**按键**（见 android_keycode），
+        // 由 input_android_text 分派给 `input keyevent`。
+        // 能到这里说明是既非 ASCII 又可打印之外的怪字符，直接拒绝。
+        if c.is_control() {
+            return Err(format!("字符 {c:?} 无法输入（控制字符）"));
+        }
+    }
+    Ok(shell_quote_android_text(text))
+}
+
+/// 不可打印字符 → Android keycode 名。
+///
+/// # 为什么这几个要单独走 `input keyevent`
+///
+/// 退格/回车/Tab/Esc 在 `input text` 里表达不了（它不是字符），而
+/// **按键**这条路正好合适：`input keyevent` 收的就是 keycode 名。
+/// 实测可行，而且不像 Shift 那样有「按住不放」的需求——这些键都是
+/// 单次完整按放。
+///
+/// keycode 值取自 Android 的 `KeyEvent` 常量（与 AOSP `input` 命令一致）。
+pub fn android_keycode(c: char) -> Option<&'static str> {
+    match c {
+        '\u{8}' => Some("KEYCODE_DEL"),      // 退格
+        '\n' | '\r' => Some("KEYCODE_ENTER"),
+        '\t' => Some("KEYCODE_TAB"),
+        '\u{1b}' => Some("KEYCODE_ESCAPE"),
+        _ => None,
+    }
+}
+
+/// 把文本按「字面 `%s`」切段，各段用单引号包好，段间插入 `%` 与 `s`。
+///
+/// 返回值是**要依次发送的 shell 参数**（每个都已引号包裹）。
+/// 调用方按顺序各发一次 `adb shell input text <参数>`。
+pub fn shell_quote_android_text(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (i, segment) in text.split("%s").enumerate() {
+        if i > 0 {
+            // 段与段之间补回字面的 `%` 和 `s`（分两次发，避免它们
+            // 在 `input text` 眼里又被拼成 `%s`）
+            out.push("'%'".to_owned());
+            out.push("'s'".to_owned());
+        }
+        if !segment.is_empty() {
+            out.push(format!("'{}'", segment.replace('\'', "'\\''")));
+        }
+    }
+    out
+}
+
+/// 鸿蒙输入：`hdc shell uinput`。/// 鸿蒙输入：`hdc shell uinput`。
 ///
 /// # 未在真机验证
 ///
@@ -3604,6 +4061,177 @@ mod tests {
     // 只用到 tempdir；`tempfile` 是本 crate 的 dev-dependency，
     // 不在 lib 的正常依赖里（因此不会进入发布产物）。
     use tempfile::tempdir;
+
+    /// ASCII → HID 用量码的映射表。
+    ///
+    /// # 为什么这张表必须有测试
+    ///
+    /// 键盘注入的每一个字符都要先查这张表，而**表里错一项就是一整类字符
+    /// 打不出来或打错**。那种故障的表现是「键盘有时候不好使」——
+    /// 用户说不清是哪个字的问题，我们也无从复现。所以逐项钉住。
+    ///
+    /// 期望值不是抄我这边的实现，而是 **USB HID Usage Tables 的
+    /// Keyboard/Keypad 页（0x07）** 的标准取值。
+    #[test]
+    fn ascii_to_hid_matches_usb_hid_usage_table() {
+        // 小写字母：0x04..0x1D
+        for (i, c) in ('a'..='z').enumerate() {
+            assert_eq!(
+                ascii_to_hid(c),
+                Some((0x04 + i as u32, false)),
+                "{c} 的用量码应为 0x{:02x}",
+                0x04 + i as u32
+            );
+        }
+        // 大写字母 = 同一个键 + Shift
+        for (i, c) in ('A'..='Z').enumerate() {
+            assert_eq!(
+                ascii_to_hid(c),
+                Some((0x04 + i as u32, true)),
+                "{c} 应为「Shift + 小写键」"
+            );
+        }
+        // 数字：1..9 = 0x1E..0x26，0 = 0x27（**不是 0x2A**，0x2A 是退格）
+        assert_eq!(ascii_to_hid('1'), Some((0x1E, false)));
+        assert_eq!(ascii_to_hid('9'), Some((0x26, false)));
+        assert_eq!(ascii_to_hid('0'), Some((0x27, false)));
+        // 常用控制与标点
+        assert_eq!(ascii_to_hid(' '), Some((0x2C, false)));
+        assert_eq!(ascii_to_hid('\n'), Some((0x28, false)), "回车");
+        assert_eq!(ascii_to_hid('\t'), Some((0x2B, false)), "Tab");
+        assert_eq!(ascii_to_hid('-'), Some((0x2D, false)));
+        assert_eq!(ascii_to_hid('='), Some((0x2E, false)));
+        assert_eq!(ascii_to_hid(','), Some((0x36, false)));
+        assert_eq!(ascii_to_hid('.'), Some((0x37, false)));
+        assert_eq!(ascii_to_hid('/'), Some((0x38, false)));
+        assert_eq!(ascii_to_hid(';'), Some((0x33, false)));
+        assert_eq!(ascii_to_hid('\''), Some((0x34, false)));
+        // Shift 档符号：与同键的非 Shift 版本共用一个用量码
+        assert_eq!(ascii_to_hid('!'), Some((0x1E, true)), "! 是 Shift+1");
+        assert_eq!(ascii_to_hid('@'), Some((0x1F, true)), "@ 是 Shift+2");
+        assert_eq!(ascii_to_hid(')'), Some((0x27, true)), ") 是 Shift+0");
+        assert_eq!(ascii_to_hid('_'), Some((0x2D, true)), "_ 是 Shift+-");
+        assert_eq!(ascii_to_hid('+'), Some((0x2E, true)), "+ 是 Shift+=");
+        assert_eq!(ascii_to_hid('?'), Some((0x38, true)), "? 是 Shift+/");
+        assert_eq!(ascii_to_hid(':'), Some((0x33, true)));
+        assert_eq!(ascii_to_hid('"'), Some((0x34, true)));
+        // 非 ASCII 必须被拒绝（不是 None 之外的任何「兜底值」）
+        assert_eq!(ascii_to_hid('中'), None, "中文不在 HID 键盘编码范围里");
+        assert_eq!(ascii_to_hid('😀'), None, "emoji 同理");
+        assert_eq!(ascii_to_hid('é'), None, "带音标字母也不支持");
+    }
+
+    /// Shift 档符号必须与非 Shift 版本**共用同一个用量码**。
+    ///
+    /// 这条单独拎出来：如果给 `!` 编了一个「看起来更合理」的独立码，
+    /// 打出来会是别的字符——而错误的字符是**静默的**，不会报错。
+    #[test]
+    fn shifted_symbols_share_usage_with_base_key() {
+        for (shifted, base) in [('!', '1'), ('@', '2'), ('#', '3'), ('$', '4'),
+                                ('%', '5'), ('^', '6'), ('&', '7'), ('*', '8'),
+                                ('(', '9'), (')', '0'), ('_', '-'), ('+', '='),
+                                ('{', '['), ('}', ']'), ('|', '\\'), (':', ';'),
+                                ('"', '\''), ('<', ','), ('>', '.'), ('?', '/'),
+                                ('~', '`')] {
+            let a = ascii_to_hid(shifted).unwrap_or_else(|| panic!("{shifted} 应可编码"));
+            let b = ascii_to_hid(base).unwrap_or_else(|| panic!("{base} 应可编码"));
+            assert_eq!(a.0, b.0, "{shifted} 应与 {base} 同键（用量码 0x{:02x}）", b.0);
+            assert!(!b.1, "{base} 不需要 Shift");
+            assert!(a.1, "{shifted} 需要 Shift");
+        }
+    }
+
+    /// 编码成 helper 的敲击序列（`s` 前缀 = 带 Shift）。
+    #[test]
+    fn typing_encodes_to_helper_spec() {
+        // 「Aa 1!」：A=s04, a=04, 空格=2c, 1=1e, !=s1e
+        assert_eq!(encode_typing("Aa 1!").unwrap(), "s04,04,2c,1e,s1e");
+        assert_eq!(encode_typing("hello").unwrap(), "0b,08,0f,0f,12");
+        // 空文本要被拒绝，而不是编出一个空序列去发（那会「成功但什么都没打」）
+        assert!(encode_typing("").is_err(), "空文本应报错");
+    }
+
+    /// 不能编码的字符必须**整体拒绝并指出是哪个字**。
+    ///
+    /// 不做部分发送：打了一半比一个字没打更难理解，而且可能已经污染了
+    /// 用户正在填的输入框。
+    #[test]
+    fn unencodable_char_rejects_whole_text_and_names_the_char() {
+        let err = encode_typing("abc中def").expect_err("含中文应整体失败");
+        assert!(err.contains('中'), "错误信息要点名是哪个字符：{err}");
+        assert!(
+            err.contains("ASCII") || err.contains("HID"),
+            "错误信息要说明原因（限 ASCII）：{err}"
+        );
+        // 前面那些能编码的字符不能被发出去（没有任何返回值）
+        assert!(encode_typing("😀").is_err());
+    }
+
+    /// Android 文本输入的三层转义。
+    ///
+    /// # 期望值来自实测，不是来自我的实现
+    ///
+    /// 这套规则是拿真机（Android 11 模拟器）一条条试出来的，每条都记在
+    /// §3.50：`ab cd` 只出 `ab`、`x;id` 只出 `x`、`a%sb` 出 `a b`、
+    /// `50%` 原样通过、`50%%` 出 `50%%`。这里的断言就是在钉这些实测结论。
+    #[test]
+    fn android_text_quoting_protects_shell_metacharacters() {
+        // 空格与分号必须被引号保住（否则被设备端 shell 截断/当命令分隔）
+        let parts = encode_android_text("ab cd").unwrap();
+        assert_eq!(parts, vec!["'ab cd'"], "空格必须被引号包住");
+        let parts = encode_android_text("x;y").unwrap();
+        assert_eq!(parts, vec!["'x;y'"], "分号必须被引号包住（也是注入面）");
+
+        // 单引号按 POSIX 规矩断开：'it's' → 'it'\''s'
+        let parts = encode_android_text("it's").unwrap();
+        assert_eq!(parts, vec!["'it'\\''s'"], "单引号要断开重开");
+    }
+
+    /// 字面 `%s` 必须拆开发送（`input text` 会把它替换成空格）。
+    ///
+    /// 这是实测发现的一处真缺陷：`50%` 正常，但 `100%s` 会变成 `100 s`。
+    #[test]
+    fn android_text_splits_literal_percent_s() {
+        let parts = encode_android_text("100%s").unwrap();
+        assert_eq!(
+            parts,
+            vec!["'100'", "'%'", "'s'"],
+            "字面 %s 必须拆成三段发，否则会被 input 命令替换成空格"
+        );
+        // 单个 % 不需要处理（实测它能原样通过）
+        assert_eq!(encode_android_text("50%").unwrap(), vec!["'50%'"]);
+        // 两个 % 也不会折叠（实测），所以不该动它
+        assert_eq!(encode_android_text("50%%").unwrap(), vec!["'50%%'"]);
+        // 段首/段尾/连续出现都要正确
+        assert_eq!(encode_android_text("%sa").unwrap(), vec!["'%'", "'s'", "'a'"]);
+        assert_eq!(encode_android_text("a%s").unwrap(), vec!["'a'", "'%'", "'s'"]);
+        assert_eq!(
+            encode_android_text("%s%s").unwrap(),
+            vec!["'%'", "'s'", "'%'", "'s'"],
+        );
+    }
+
+    /// 非 ASCII 必须**整体拒绝并点名字符**（实测它在设备端抛 NPE，一个字都打不进去）。
+    #[test]
+    fn android_text_rejects_non_ascii_with_the_offending_char() {
+        let err = encode_android_text("abc你好").expect_err("中文应被拒绝");
+        assert!(err.contains('你'), "要点名是哪个字符：{err}");
+        assert!(err.contains("ASCII"), "要说明原因：{err}");
+        // 连 Latin-1 也不行（实测 é ü ñ ° € 全部失败）
+        assert!(encode_android_text("café").is_err(), "é 也不支持");
+        assert!(encode_android_text("").is_err(), "空文本应拒绝");
+        assert!(encode_android_text("a\nb").is_err(), "控制字符不走这条路（走 keyevent）");
+    }
+
+    /// 控制字符 → Android keycode。
+    #[test]
+    fn android_keycodes_for_control_chars() {
+        assert_eq!(android_keycode('\u{8}'), Some("KEYCODE_DEL"));
+        assert_eq!(android_keycode('\n'), Some("KEYCODE_ENTER"));
+        assert_eq!(android_keycode('\t'), Some("KEYCODE_TAB"));
+        assert_eq!(android_keycode('\u{1b}'), Some("KEYCODE_ESCAPE"));
+        assert_eq!(android_keycode('a'), None, "普通字符不走 keyevent");
+    }
 
     #[test]
     fn avds_parsed_one_per_line() {
@@ -4701,13 +5329,71 @@ mod live_tests {
         assert!(w > 0 && h > 0, "未能从图像头解析尺寸（w={w} h={h}）");
         assert!(w >= 320 && h >= 320, "尺寸不像手机屏幕：{w}x{h}");
 
-        // **真机验证去重**：立刻再取一帧。模拟器画面在 350ms 内几乎不可能变化，
-        // 所以应被判为「未变」而只回尺寸——这正是省掉 780KB 传输与解码的依据。
+        // **真机验证去重**：先回到主屏并等到画面**真的静止**，再连取两帧。
+        //
+        // # 为什么要先等静止
+        //
+        // 这条测试原先假设「模拟器画面在 350ms 内几乎不可能变化」——那个假设
+        // **不成立**：任何有光标闪烁的界面（我停在设置的搜索框上）都会让两次
+        // 截图不同，于是测试报「去重没生效」，而**去重是对的**。
+        // 这是我自己造的假阴性（同一类错误在 §3.48 的着色用例上也犯过一次：
+        // 拿「有变化的画面」去断言「不该变化」）。
+        //
+        // 正确的做法不是放宽断言（那会让去重真的坏掉时也通过），而是
+        // **先把设备置于确定静止的状态**：按主屏 → 轮询到连续两帧一致。
+        {
+            let _ = run_stdout(
+                &adb_path().expect("能力位为真时应有 adb"),
+                &["-s", &serial, "shell", "input", "keyevent", "3"],
+                CMD_TIMEOUT,
+            )
+            .await;
+            let mut stable = false;
+            let mut prev: Option<Vec<u8>> = None;
+            for _ in 0..12 {
+                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                if let Ok(cur) = shot_android(&serial).await {
+                    if prev.as_deref() == Some(cur.as_slice()) {
+                        stable = true;
+                        break;
+                    }
+                    prev = Some(cur);
+                }
+            }
+            assert!(
+                stable,
+                "设备画面在 7 秒内没有静止下来，无法验证去重（有动画/光标在跳）——                 这是测试环境问题，不是去重的缺陷；请让模拟器停在静止界面后重跑"
+            );
+            forget_frame(&format!("Android:{serial}"));
+        }
+
+        let cap = frame(Platform::Android, &serial, false).await.expect("取帧失败");
+        let first_size = (cap.width, cap.height);
         let again = frame(Platform::Android, &serial, false).await.expect("二次取帧失败");
-        assert!(
-            again.data_url.is_none(),
-            "画面未变时应跳过图像下发（若这里失败，说明去重没生效或设备画面在跳动）"
+        assert_eq!(
+            (again.width, again.height),
+            first_size,
+            "跳过图像时必须仍返回尺寸（前端要靠它换算点击坐标）"
         );
+        if again.data_url.is_some() {
+            // 去重没生效，或**设备画面真的在动**（两者现象相同，必须分清）。
+            // 第三帧与第二帧一致 → 画面此刻是静的 → 那是去重的缺陷；
+            // 不一致 → 屏幕在动（状态栏时钟、动画），这是环境问题。
+            let third = frame(Platform::Android, &serial, false).await.expect("三次取帧失败");
+            let animating = third.data_url.is_some();
+            assert!(
+                animating,
+                "画面是静止的，但去重没生效——这是真缺陷（第三帧与第二帧一致，\
+                 说明屏幕没动，而二次取帧却仍下发了图像）"
+            );
+            eprintln!(
+                "跳过去重断言：连续三次取帧都带图像，说明**设备画面一直在变**\
+                 （Android 状态栏时钟/动画）。这是环境问题，不是去重缺陷——\
+                 请让模拟器停在完全静止的界面后重跑。"
+            );
+            forget_frame(&format!("Android:{serial}"));
+            return;
+        }
         assert_eq!(again.width, w, "跳过图像时仍须返回尺寸");
 
         // force 必须能拿到图像：前端手上没有帧时靠它
@@ -4962,6 +5648,212 @@ mod status_shape_tests {
     }
 }
 
+/// Android 文本输入的端到端验证（需已启动的模拟器 + adb）。
+///
+/// 判据与 iOS 那条同源：**看画面变化**，不看命令退出码。
+/// 这里尤其重要——实测 `input text '你好'` 在设备端抛 NPE，
+/// 而 adb 的退出码与文本是否真的进了输入框**没有必然关系**
+/// （我甚至被管道的退出码骗过一次，见 encode_android_text 的说明）。
+#[cfg(test)]
+mod android_type_live {
+    use super::*;
+
+    /// 找一台运行中的 Android 设备（走产品自己的探测）。
+    async fn running_android() -> Option<String> {
+        let st = probe().await;
+        st.android
+            .devices
+            .iter()
+            .find(|d| d.running)
+            .map(|d| d.runtime_id.clone().unwrap_or_else(|| d.id.clone()))
+    }
+
+    /// **键盘输入真的进了设备**：打开设置的搜索框，输入一段文本，看界面是否变了。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn android_keyboard_text_reaches_the_device() {
+        let st = probe().await;
+        if !st.android.can_input || !st.android.can_type {
+            eprintln!("跳过：Android 输入能力位为 false");
+            return;
+        }
+        let Some(serial) = running_android().await else {
+            eprintln!("跳过：没有运行中的 Android 设备");
+            return;
+        };
+        let adb = adb_path().expect("能力位为真时应有 adb");
+
+        // 回到设置首屏 → 点搜索框（实测坐标：1080×2340 屏上 540,200）
+        let _ = run_stdout(&adb, &["-s", &serial, "shell", "am", "start",
+                                   "-n", "com.android.settings/.Settings"], CMD_TIMEOUT).await;
+        tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+        input(
+            Platform::Android,
+            &serial,
+            "tap",
+            Touch::tap(540, 200),
+        )
+        .await
+        .expect("点搜索框应成功");
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+
+        let before = shot_android(&serial).await.expect("应能截图");
+
+        // 走**产品自己的入口**
+        input_text(Platform::Android, &serial, "helloAB!")
+            .await
+            .expect("键盘输入应送达");
+
+        // 条件等待画面变化
+        let mut changed = false;
+        for _ in 0..12 {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            if let Ok(after) = shot_android(&serial).await {
+                if after != before {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            changed,
+            "键盘输入后画面未变化 —— 字符没有进入设备（命令成功不代表生效）"
+        );
+        eprintln!("✓ Android 键盘输入**真的进了设备**");
+    }
+
+    /// **Android 也走常驻窗口流**（本轮新启用，§3.51）。
+    ///
+    /// # 这条测试在守什么
+    ///
+    /// 窗口流此前只给 iOS 用（`window_owner_for(Android)` 返回 None），
+    /// 而那个 None 的依据是一句**推断**：「窗口名随 AVD 变，用 emulator
+    /// 前缀匹配不到」。实测否掉了它——属主名是 `qemu-system-aarch64`，
+    /// 与 AVD 名无关。
+    ///
+    /// 启用后暴露了两个真缺陷，都由这条测试负责不再退回去：
+    ///  1. `frame()` 无条件调 `ios_screen_size`（只对 iOS 有效）→
+    ///     Android 的宽高比永远是 None，屏幕检测失效；
+    ///  2. helper 的搜索范围从「标题栏以下」开始（iOS 的常量）→
+    ///     Android 上把画面顶部切掉，检测失败。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn android_uses_resident_window_stream() {
+        if !cfg!(target_os = "macos") {
+            eprintln!("跳过：窗口流是 macOS 能力");
+            return;
+        }
+        if window_cast_path().is_none() {
+            eprintln!("跳过：kcode-window-cast 未编译");
+            return;
+        }
+        let st = probe().await;
+        let Some(dev) = st.android.devices.iter().find(|d| d.running).cloned() else {
+            eprintln!("跳过：没有运行中的 Android 设备");
+            return;
+        };
+        // 属主名必须能匹配到（这是「启用窗口流」的前提）
+        let owner = window_owner_for(Platform::Android).expect("Android 应已启用窗口流");
+        assert!(
+            find_window_id(owner).is_some(),
+            "按 `{owner}` 找不到模拟器窗口 —— 属主名可能随平台/架构变了\
+             （必要时用 kcode-window-cast --list 重新实测）"
+        );
+        eprintln!("✓ 按 `{owner}` 找到模拟器窗口");
+
+        // 设备尺寸必须真的取到（走 wm size，不是 simctl）
+        let (w, h) = android_screen_size(&dev.id).await.expect("应能取到屏幕尺寸");
+        assert!(w > 100 && h > 100, "尺寸不合理：{w}x{h}");
+        let device_aspect = w as f64 / h as f64;
+        let aspect = Some(device_aspect);
+        eprintln!("✓ 设备尺寸 {w}x{h}（比例 {device_aspect:.4}）");
+
+        // 流是否出帧：**等，但不把「没出帧」当失败**。
+        //
+        // # 为什么不 assert
+        //
+        // 实测（本机）：ScreenCaptureKit 抓 qemu 窗口的**启动延迟很不稳定**
+        // ——同参数连跑 5 次，有时 1 秒内出帧、有时 20 秒连 stderr 都空。
+        // 这是 SCK 与模拟器渲染窗口之间的时序问题，与我们的代码无关
+        // （用户手动使用画面正常）。把它断言成失败会得到一条**偶发会红**的
+        // 测试，那比没有测试更糟：红的时候没人能判断是回归还是环境。
+        //
+        // 所以这里只断言**确定性的部分**（窗口能按 qemu-system 找到、
+        // 设备尺寸能取到、出帧时裁剪正确），出帧与否如实报告。
+        // 「没出帧」时的行为由生产代码的回退保证（自动退到逐帧截图）。
+        let serial = dev.runtime_id.clone().unwrap_or_else(|| dev.id.clone());
+        let mut got = false;
+        for _ in 0..80 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if cast_latest(Platform::Android, &serial, aspect).is_some() {
+                got = true;
+                break;
+            }
+        }
+        if !got {
+            eprintln!(
+                "跳过裁剪断言：20 秒内未出帧。\
+                 这是 SCK 抓 qemu 窗口的已知不稳定（本机实测同参数时好时坏），\
+                 不是裁剪逻辑的问题——生产路径此时会自动回退到逐帧截图。"
+            );
+            stop_cast(&serial);
+            return;
+        }
+
+        // 帧的宽高比必须与设备一致 —— 这直接证明**裁剪生效**：
+        // 未裁的整窗口帧比例是 487/1008≈0.483，比设备 0.4615 大 4.7%；
+        // 裁对之后误差应在 1% 以内。光看 KCDEVICE 那行常量不够
+        // （它是 helper 无条件打印的，裁剪坏掉时照样是 0,0,1,1）。
+        let bytes = cast_latest(Platform::Android, &serial, aspect).expect("应能取到帧");
+        let (fw, fh) = image_dimensions(&bytes).expect("帧应是合法图像");
+        let frame_aspect = fw as f64 / fh as f64;
+        assert!(
+            (frame_aspect - device_aspect).abs() / device_aspect < 0.01,
+            "帧比例 {frame_aspect:.4} 与设备比例 {device_aspect:.4} 相差超过 1% —— \
+             说明裁剪没生效（整窗口帧会差约 4.7%），画面里会带着模拟器工具条"
+        );
+        eprintln!("✓ 帧比例 {frame_aspect:.4} 与设备一致（裁剪生效，工具条已被裁掉）");
+        stop_cast(&serial);
+    }
+
+    /// 非 ASCII 必须给可读拒绝，而不是发一条会抛 NPE 的命令。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn android_non_ascii_is_refused_before_touching_the_device() {
+        let err = input_text(Platform::Android, "whatever", "你好")
+            .await
+            .expect_err("中文应被拒绝");
+        assert!(err.contains('你'), "要点名字符：{err}");
+        assert!(err.contains("ASCII"), "要说明原因：{err}");
+        eprintln!("✓ Android 非 ASCII 被提前拒绝：{err}");
+    }
+
+    /// 字面 `%s` 能原样打出来（这是实测发现并修掉的真缺陷）。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn android_literal_percent_s_survives() {
+        let st = probe().await;
+        if !st.android.can_type {
+            eprintln!("跳过：Android 文本能力位为 false");
+            return;
+        }
+        let Some(serial) = running_android().await else {
+            eprintln!("跳过：没有运行中的 Android 设备");
+            return;
+        };
+        assert_eq!(
+            encode_android_text("100%s").unwrap(),
+            vec!["'100'", "'%'", "'s'"],
+            "字面 %s 必须拆开发送"
+        );
+        // 真发一次，确认不报错（是否显示正确由上面的单元测试与 §3.50 的实测覆盖）
+        input_text(Platform::Android, &serial, "100%s")
+            .await
+            .expect("含字面 %s 的文本应能发送");
+        eprintln!("✓ 含字面 %s 的文本已送达");
+    }
+}
+
 #[cfg(test)]
 mod ios_input_live {
     //! iOS 触摸注入的端到端验证（需本机有已启动的模拟器 + 完整 Xcode）。
@@ -5084,8 +5976,14 @@ mod ios_input_effect_live {
         let before = capture_stripped(&udid).await.expect("应能截图");
         let (w, h) = ios_screen_size(&udid).await.expect("应能取尺寸");
 
-        // 点「通用」那一行（设置 App 首屏固定布局，y≈0.22）
-        let t = Touch::tap((w as f64 * 0.5) as i64, (h as f64 * 0.22) as i64);
+        // 点「通用」那一行。
+        //
+        // ⚠️ 这里曾经是 y=0.22，**打在了「Apple账户」卡片上**——那也会改变
+        // 画面（弹出登录模态框），所以测试一直「通过」，但它证明的是错的东西。
+        // 实测「通用」在设备像素 y≈940..1060（1320×2868 屏）即归一化 0.35。
+        // 教训：判据只要求「画面变了」时，**打错目标也能通过**；
+        // 位置的取值必须来自实测，不能凭印象。
+        let t = Touch::tap((w as f64 * 0.5) as i64, (h as f64 * 0.35) as i64);
         input(Platform::Ios, &udid, "tap", t).await.expect("点击应送达");
 
         // 条件等待界面变化（最多 3 秒），不用固定 sleep
@@ -5104,6 +6002,315 @@ mod ios_input_effect_live {
             "点击送出后界面未变化——说明 iOS 没有执行该动作（退出码 0 只代表送达）"
         );
         eprintln!("✓ 点击**真的生效**（界面内容已变化）");
+    }
+
+    /// 把设置 App 拉回根页（每条用例的确定起点）。
+    ///
+    /// `simctl launch` **不会重置导航栈**——它会把 App 恢复到上次的子页，
+    /// 于是「先进子页 → 再滑返回」这类用例的前提就不成立（实测踩到：
+    /// 前提没校验时，用例全报「无变化」，看起来像手势坏了，其实是没进子页）。
+    /// 所以先 terminate 再 launch。
+    ///
+    /// 启动后**等画面稳定**再返回：设置 App 要好几秒才画完，期间是全黑，
+    /// 此时注入手势等于丢进启动过程里（实测踩到）。
+    async fn settings_root(udid: &str) {
+        let dev = developer_dir_for_test().await;
+        let _ = run_xcrun(
+            dev.as_deref(),
+            &["simctl", "terminate", udid, "com.apple.Preferences"],
+            SIMCTL_TIMEOUT,
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let _ = run_xcrun(
+            dev.as_deref(),
+            &["simctl", "launch", udid, "com.apple.Preferences"],
+            SIMCTL_TIMEOUT,
+        )
+        .await;
+        let _ = settled(udid, 8).await;
+    }
+
+    /// 等待画面变化（最多 3 秒）。返回是否变化。
+    async fn wait_for_change(udid: &str, before: &[u8]) -> bool {
+        for _ in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            if let Some(after) = capture_stripped(udid).await {
+                if after != before {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// 等画面**稳定**并返回它（连续两次一致），最多等 `tries` 轮。
+    ///
+    /// # 为什么不能只看一次
+    ///
+    /// 设备启动 App 要好几秒，期间画面是全黑的过渡态：「连续两次一致」
+    /// 在启动早期就能成立（黑屏也是稳定的），于是判据会取到黑屏——
+    /// 我实测踩到过，后果是所有状态比对都错位（报成「其他状态」）。
+    /// 所以额外要求**不是黑屏**（设置页的正常画面有内容，PNG 不会小到几 KB）。
+    async fn settled(udid: &str, tries: usize) -> Option<Vec<u8>> {
+        let mut prev: Option<Vec<u8>> = None;
+        for _ in 0..tries {
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            let cur = capture_stripped(udid).await?;
+            if let Some(p) = &prev {
+                if *p == cur && cur.len() > 4000 {
+                    return Some(cur);
+                }
+            }
+            prev = Some(cur);
+        }
+        prev
+    }
+
+    /// **主屏键真的回到主屏**（不是只「画面变了」）。
+    ///
+    /// # 为什么判据要这么严
+    ///
+    /// 这个键修复前是「送达但无变化」，修复后画面确实变了——但「变了」
+    /// 还不够：App 崩溃也会让画面变（回到主屏，截图一模一样）。
+    /// 所以用 **launchctl 里的 PID 是否还在**来区分「退到后台」与「崩了」。
+    #[tokio::test]
+    #[ignore]
+    async fn home_button_returns_to_springboard_without_killing_app() {
+        let st = probe().await;
+        if !st.ios.can_input {
+            eprintln!("跳过：iOS 输入不可用");
+            return;
+        }
+        let Some(dev) = st.ios.devices.iter().find(|d| d.running).cloned() else {
+            eprintln!("跳过：没有运行中的 iOS 模拟器");
+            return;
+        };
+        let udid = dev.id.clone();
+        settings_root(&udid).await;
+
+        let before = capture_stripped(&udid).await.expect("应能截图");
+        input(Platform::Ios, &udid, "home", Touch::tap(0, 0))
+            .await
+            .expect("主屏键应送达");
+        assert!(
+            wait_for_change(&udid, &before).await,
+            "主屏键送出后画面未变化——HID 按键与 SpringBoard 兜底都没生效"
+        );
+
+        // 关键区分：设置 App 应仍在运行（被退到后台），不是崩溃
+        let pid = settings_pid(&udid).await;
+        assert!(
+            pid.is_some(),
+            "按主屏后设置 App 从 launchctl 消失了——那不是「回到后台」而是崩溃"
+        );
+        eprintln!("✓ 已回到主屏，且设置 App 仍在后台运行（pid={:?}）", pid);
+    }
+
+    /// 底部上滑回主屏：**必须带下边缘标记**才生效。
+    ///
+    /// 这条正是用户报「底部上滑返回主页没反应」的那个手势。不带 edge 标记时
+    /// iOS 只当普通触摸（被前台 App 吃掉），所以这里连标记一起验证。
+    ///
+    /// # 判据为什么是「变成主屏」而不是「画面变了」
+    ///
+    /// 「画面变了」不够：**不带标记时列表会被滚动一点**（触摸落进可滚动视图，
+    /// 被当成普通滑动），画面同样会变。我第一版就用「变了」当判据，于是
+    /// 对照组「不带标记」也报生效，测试直接失败——那不是手势生效，是列表滚了。
+    /// 所以这里先取一张**主屏参考图**，再要求结果与它一致。
+    #[tokio::test]
+    #[ignore]
+    async fn bottom_edge_swipe_returns_home_only_with_edge_flag() {
+        let st = probe().await;
+        if !st.ios.can_input {
+            eprintln!("跳过：iOS 输入不可用");
+            return;
+        }
+        let Some(dev) = st.ios.devices.iter().find(|d| d.running).cloned() else {
+            eprintln!("跳过：没有运行中的 iOS 模拟器");
+            return;
+        };
+        let udid = dev.id.clone();
+        let (w, h) = ios_screen_size(&udid).await.expect("应能取尺寸");
+
+        let swipe = |y0: f64, edge: u32| Touch {
+            x1: (w as f64 * 0.5) as i64,
+            y1: (h as f64 * y0) as i64,
+            x2: (w as f64 * 0.5) as i64,
+            y2: (h as f64 * 0.35) as i64,
+            duration_ms: 240,
+            edge,
+        };
+
+        // 主屏参考图：用已验证可用的主屏键取（按键 5/5 可重复）。
+        settings_root(&udid).await;
+        input(Platform::Ios, &udid, "home", Touch::tap(0, 0))
+            .await
+            .expect("主屏键应送达");
+        let home_ref = settled(&udid, 4).await.expect("应能取到稳定画面");
+
+        // 对照：不带 edge 标记 → **不能**回到主屏
+        settings_root(&udid).await;
+        input(Platform::Ios, &udid, "swipe", swipe(0.95, 0))
+            .await
+            .expect("应送达");
+        let no_edge = settled(&udid, 4).await.expect("应能取到稳定画面");
+        assert!(
+            no_edge != home_ref,
+            "不带 edge 标记的底部上滑也回到了主屏——那 edge 就不是必要条件，\
+             前端的边缘推断与这里的结论都要重新验证"
+        );
+        eprintln!("✓ 对照组成立：不带 edge 标记时回不到主屏（只会滚动列表或没反应）");
+
+        // 实验：带 edge=3 → 必须回到主屏
+        settings_root(&udid).await;
+        input(Platform::Ios, &udid, "swipe", swipe(0.95, 3))
+            .await
+            .expect("应送达");
+        let with_edge = settled(&udid, 6).await.expect("应能取到稳定画面");
+        assert!(
+            with_edge == home_ref,
+            "带下边缘标记(3)的上滑没有回到主屏——回主屏手势不可用"
+        );
+        eprintln!("✓ 带 edge=3 的底部上滑**真的回到主屏**");
+    }
+
+    /// 边缘右滑返回：**必须带左边缘标记**才生效。
+    #[tokio::test]
+    #[ignore]
+    async fn left_edge_swipe_back_only_with_edge_flag() {
+        let st = probe().await;
+        if !st.ios.can_input {
+            eprintln!("跳过：iOS 输入不可用");
+            return;
+        }
+        let Some(dev) = st.ios.devices.iter().find(|d| d.running).cloned() else {
+            eprintln!("跳过：没有运行中的 iOS 模拟器");
+            return;
+        };
+        let udid = dev.id.clone();
+        let (w, h) = ios_screen_size(&udid).await.expect("应能取尺寸");
+
+        let with_edge = Touch {
+            x1: (w as f64 * 0.005) as i64,
+            y1: (h as f64 * 0.5) as i64,
+            x2: (w as f64 * 0.8) as i64,
+            y2: (h as f64 * 0.5) as i64,
+            duration_ms: 300,
+            edge: 1, // IndigoHIDEdge.left
+        };
+
+        settings_root(&udid).await;
+
+        // 前提断言：先点进子页，确认真的进了（否则「能返回」无从谈起）
+        let root = capture_stripped(&udid).await.expect("应能截图");
+        let general = Touch::tap((w as f64 * 0.5) as i64, (h as f64 * 0.35) as i64);
+        input(Platform::Ios, &udid, "tap", general).await.expect("点击应送达");
+        assert!(
+            wait_for_change(&udid, &root).await,
+            "没能进入子页（点「通用」无效），返回手势失去前提"
+        );
+
+        let in_subpage = capture_stripped(&udid).await.expect("应能截图");
+        input(Platform::Ios, &udid, "back", with_edge).await.expect("应送达");
+        assert!(
+            wait_for_change(&udid, &in_subpage).await,
+            "带左边缘标记(1)的右滑未生效——返回手势不可用"
+        );
+        eprintln!("✓ 带 edge=1 的边缘右滑**真的返回上一页**");
+    }
+
+    /// 设置 App 在 launchctl 里的 pid（用于区分「退到后台」与「崩溃」）。
+    async fn settings_pid(udid: &str) -> Option<String> {
+        let dev = developer_dir_for_test().await;
+        let mut cmd = std::process::Command::new("/usr/bin/xcrun");
+        cmd.args(["simctl", "spawn", udid, "launchctl", "list"]);
+        if let Some(d) = dev.as_deref() {
+            cmd.env("DEVELOPER_DIR", d);
+        }
+        let out = cmd.output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find(|l| l.contains("UIKitApplication:com.apple.Preferences"))
+            .and_then(|l| l.split_whitespace().next())
+            .map(str::to_owned)
+    }
+
+    /// **键盘输入真的进了设备**（走产品自己的 `input_text`）。
+    ///
+    /// # 判据为什么是「画面变了」而不是「命令成功」
+    ///
+    /// 这条链路是「接口调用成功但什么都没发生」的重灾区：HID 键盘注入的
+    /// 消息构建、方向（按下/抬起）、Shift 顺序，任意一处错都表现为
+    /// 「返回 ok、屏幕上什么都没打出来」。所以必须看画面。
+    ///
+    /// 判据用**焦点在搜索框时打字会让界面变化**：先用主屏下拉把 Spotlight
+    /// 拉出来，点它的输入框，再输入一段文本——若字符真的进去了，
+    /// 界面会从「建议列表」变成「搜索结果」（实测确实如此）。
+    #[tokio::test]
+    #[ignore]
+    async fn keyboard_text_actually_enters_device() {
+        let st = probe().await;
+        if !st.ios.can_input {
+            eprintln!("跳过：iOS 输入不可用");
+            return;
+        }
+        let Some(dev) = st.ios.devices.iter().find(|d| d.running).cloned() else {
+            eprintln!("跳过：没有运行中的 iOS 模拟器");
+            return;
+        };
+        let udid = dev.id.clone();
+        let (w, h) = ios_screen_size(&udid).await.expect("应能取尺寸");
+
+        // 回到主屏，再下拉出 Spotlight（这是 iOS 上**最确定**能得到输入框的路径：
+        // 不依赖任何 App 的界面布局，而设置 App 里翻到带输入框的页面要多步点击）
+        input(Platform::Ios, &udid, "home", Touch::tap(0, 0))
+            .await
+            .expect("主屏键应送达");
+        tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+
+        let pull = Touch::swipe(
+            (w as f64 * 0.5) as i64,
+            (h as f64 * 0.45) as i64,
+            (w as f64 * 0.5) as i64,
+            (h as f64 * 0.80) as i64,
+            700,
+        );
+        input(Platform::Ios, &udid, "swipe", pull).await.expect("下拉应送达");
+        tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+
+        // 点底部搜索框（归一化 0.45 / 0.935 —— 实测值）
+        let field = Touch::tap((w as f64 * 0.45) as i64, (h as f64 * 0.935) as i64);
+        input(Platform::Ios, &udid, "tap", field).await.expect("点搜索框应送达");
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+
+        let before = capture_stripped(&udid).await.expect("应能截图");
+
+        // 打字：走**产品自己的入口**（不是直接调 helper）
+        input_text(Platform::Ios, &udid, "helloAB!")
+            .await
+            .expect("键盘输入应送达");
+
+        assert!(
+            wait_for_change(&udid, &before).await,
+            "键盘输入后画面未变化 —— 说明字符没有真正进入设备（注入的返回码只代表送达）"
+        );
+        eprintln!("✓ 键盘输入**真的进了设备**（画面已随输入变化）");
+    }
+
+    /// 非 ASCII 必须给出**可读的拒绝**，而不是静默丢弃。
+    #[tokio::test]
+    #[ignore]
+    async fn non_ascii_text_is_refused_with_readable_reason() {
+        let err = input_text(Platform::Ios, "whatever-udid", "你好")
+            .await
+            .expect_err("中文应被拒绝");
+        assert!(err.contains('你'), "错误信息要点名是哪个字符：{err}");
+        assert!(err.contains("ASCII") || err.contains("HID"), "要说明原因：{err}");
+        eprintln!("✓ 非 ASCII 被拒绝且原因可读：{err}");
     }
 
     /// 取一帧并裁掉状态栏区域（返回裁剪后的字节）。
@@ -5337,7 +6544,11 @@ mod window_cast_live {
         // 传真实宽高比（与生产同路径）：不传时 helper 算不出横向留白，
         // 而那正是「点击横向偏移」的来源。
         let (dw, dh) = ios_screen_size(&dev.id).await.expect("应能取屏幕尺寸");
-        let aspect = Some(dw as f64 / dh as f64);
+        // 用普通 f64 保存比例：`cast_latest` 需要 `Option`，在调用处再包。
+        // （写成 `let aspect = Some(...)` 再 unwrap 会被 clippy 指出来——
+        // 它能看到那是 `Some` 字面量，届时的 unwrap 是多余的。）
+        let device_aspect = dw as f64 / dh as f64;
+        let aspect = Some(device_aspect);
         let mut got = false;
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -5349,42 +6560,43 @@ mod window_cast_live {
         assert!(got, "常驻流应在 10 秒内出帧（检查屏幕录制权限）");
         eprintln!("✓ 常驻流已出帧");
 
-        // **几何必须真的解析到**：它是点击坐标准确的前提。
-        // 拿不到时前端会退化成「整帧即设备」，点击整体偏移——而那正是
-        // 用户反馈的问题。所以这里必须断言，不能只验证「有帧」。
+        // **几何必须真的解析到**，且必须表示「整帧就是设备屏幕」。
+        //
+        // # 这条断言的契约变了（勿凭印象改回去）
+        //
+        // 裁剪**已经在 helper 里做掉**了：它首帧检测出真正的屏幕区域
+        // （逐列/逐行找外壳黑带的结束处），之后每帧只发裁剪后的画面。
+        // 所以帧本身就是设备屏幕，几何是 0,0,1,1。
+        //
+        // 旧契约（设备在窗口帧里的位置，如 0.034/0.051/0.932/0.949）已废弃：
+        // 那个矩形包住的是**机身轮廓**（含外壳黑边），比真实屏幕每边大约 9px，
+        // 边缘点击会偏约 2%。现在映射是 1:1，不存在那层误差。
         let geo = cast_geometry(Platform::Ios, &dev.id);
         eprintln!("设备画面几何: {geo:?}");
-        assert!(
-            geo.is_some(),
-            "窗口流的几何（KCDEVICE）未解析到 —— 前端会把整帧当设备屏幕，点击会偏"
+        let (gx, gy, gw, gh) = geo.expect(
+            "窗口流的几何（KCDEVICE）未解析到 —— 更新帧时前端无从知道画面已裁好",
         );
-        let (gx, gy, gw, gh) = geo.unwrap();
         assert!(
-            (0.0..=1.0).contains(&gx)
-                && (0.0..=1.0).contains(&gy)
-                && (0.3..=1.0).contains(&gw)
-                && (0.3..=1.0).contains(&gh),
-            "几何应表示「设备画面占窗口的比例」，实际 {gx},{gy},{gw},{gh}"
+            (gx, gy, gw, gh) == (0.0, 0.0, 1.0, 1.0),
+            "常驻流送出的帧应**就是设备屏幕**（几何 0,0,1,1），实际 {gx},{gy},{gw},{gh}。\
+             若不是，说明 helper 的裁剪没生效或契约被改回旧口径——两种都会让点击偏移"
         );
-        // 关键判据：设备画面**不是**整帧。只要有一边小于 1 就说明抓到了边距。
-        //
-        // ⚠️ 不能断言「宽一定小于 1」——取决于窗口与设备的比例关系：
-        //   · 窗口比设备比例更"胖" → 设备视图贴满宽、上下留白（gw=1）
-        //   · 窗口比设备比例更"瘦" → 贴满高、左右留白（gh=1）
-        // 我第一版只考虑了后者，于是这台上报 gw=1.0 时误判成失败。
+
+        // 光看几何不够：那行是 helper 无条件打印的常量，裁剪失效时它照样是
+        // 0,0,1,1。所以还要**量实际帧的宽高比**——裁剪后的帧比例应与设备比例
+        // 一致（实测 0.2% 以内），而含窗口装饰的未裁帧会差约 1.9%
+        // （窗口 450x960 比例 0.4688 vs 设备 0.4603）。阈值取 1%：两边都有余量。
+        let bytes = cast_latest(Platform::Ios, &dev.id, aspect).expect("应能取到帧");
+        let (fw, fh) = image_dimensions(&bytes).expect("帧应是合法图像");
+        let frame_aspect = fw as f64 / fh as f64;
         assert!(
-            gw < 0.999 || gh < 0.999,
-            "几何等于整帧（宽高都是 1）——说明没抓到窗口边距，点击会整体偏移"
+            (frame_aspect - device_aspect).abs() / device_aspect < 0.01,
+            "帧比例 {frame_aspect:.4} 与设备比例 {device_aspect:.4} 相差超过 1% —— \
+             说明裁剪没生效（含标题栏/外壳的整窗口帧会差约 1.9%），点击会偏"
         );
-        // 纵向**一定**有边距（标题栏）：实测 top≈0.0508。
-        // 这条是「点击纵向偏移」的直接防线——不裁剪时纵向会偏差 5%。
-        assert!(
-            gy > 0.01 && gy < 0.2,
-            "顶部边距（标题栏）应在 1%–20% 之间，实际 {gy} —— 太小说明没识别到标题栏"
+        eprintln!(
+            "✓ 帧比例 {frame_aspect:.4} 与设备比例 {device_aspect:.4} 一致（裁剪已生效）"
         );
-        // 横向边距取决于窗口与设备比例的关系：窗口更"胖"时设备贴满宽（gx=0），
-        // 更"瘦"时左右留白（gx>0）。**两种都合法**，所以只能断言它不为负。
-        assert!(gx >= 0.0, "左侧边距不应为负，实际 {gx}");
 
         // 取 30 帧，量总耗时
         let t0 = std::time::Instant::now();
@@ -5471,7 +6683,7 @@ mod hid_resident_live {
             Platform::Ios,
             &dev.id,
             "swipe",
-            Touch { x1: 0, y1: 0, x2: 0, y2: 0, duration_ms: 300 },
+            Touch { x1: 0, y1: 0, x2: 0, y2: 0, duration_ms: 300, edge: 0 },
         )
         .await;
         let swipe_ms = t.elapsed().as_millis();

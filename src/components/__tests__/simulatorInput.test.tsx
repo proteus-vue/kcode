@@ -120,6 +120,8 @@ function off(reason: string): PlatformStatus {
     canInput: false,
     inputHint: null,
     inputMode: 'none',
+    canType: false,
+    typeHint: null,
   };
 }
 
@@ -134,6 +136,9 @@ function onAndroid(devices: DeviceEntry[] = [androidDevice()]): PlatformStatus {
     canInput: true,
     inputHint: null,
     inputMode: 'coordinate',
+    // 坐标级平台（iOS/Android）都能输入文本
+    canType: true,
+    typeHint: null,
   };
 }
 
@@ -163,6 +168,9 @@ const iosAvailable: PlatformStatus = {
   canInput: true,
   inputHint: 'iOS 触摸通过 Apple 私有接口注入（kcode-sim-hid）：未经 Apple 承诺，Xcode 升级后可能需适配',
   inputMode: 'coordinate',
+  // 坐标级平台（iOS/Android）都能输入文本
+  canType: true,
+  typeHint: null,
 };
 
 /**
@@ -176,7 +184,7 @@ const iosAvailable: PlatformStatus = {
 /** 默认探测结果（每个测试开始时恢复到这个）。 */
 const defaultStatus = (): SimulatorStatus => ({
   android: onAndroid(),
-  ios: { available: false, reason: '未安装完整 Xcode', tool: null, devices: [], canLaunch: false, canInput: false, inputHint: null, inputMode: 'none' },
+  ios: { available: false, reason: '未安装完整 Xcode', tool: null, devices: [], canLaunch: false, canInput: false, inputHint: null, inputMode: 'none', canType: false, typeHint: null },
   harmony: off('未找到 hdc（鸿蒙设备连接器）'),
   miniprogram: off('未找到微信开发者工具'),
 });
@@ -583,6 +591,8 @@ describe('多平台：设备清单区分型号与系统', () => {
         canInput: false,
         inputHint: '鸿蒙的触摸注入尚未在真机上验证',
         inputMode: 'none',
+        canType: false,
+        typeHint: null,
       },
       miniprogram: off('缺开发者工具'),
     };
@@ -683,6 +693,8 @@ describe('能力位驱动交互', () => {
         canInput: false,
         inputHint: '鸿蒙的触摸注入（uinput）尚未在真机上验证；当前画面为只读',
         inputMode: 'none',
+        canType: false,
+        typeHint: null,
       },
     };
     host = document.createElement('div');
@@ -889,6 +901,8 @@ describe('小程序（元素级输入）', () => {
         canInput: true,
         inputHint: '小程序的输入是元素级',
         inputMode: 'element',
+        canType: false,
+        typeHint: '小程序没有键盘通道',
       },
     };
   }
@@ -987,6 +1001,9 @@ describe('设备列表折叠', () => {
         canInput: true,
         inputHint: null,
         inputMode: 'coordinate',
+        // 坐标级平台（iOS/Android）都能输入文本
+        canType: true,
+        typeHint: null,
       },
       harmony: off('缺 hdc'),
       miniprogram: off('缺开发者工具'),
@@ -1231,6 +1248,8 @@ describe('能力位驱动交互', () => {
         canInput: false,
         inputHint: '鸿蒙的触摸注入（uinput）尚未在真机上验证；当前画面为只读',
         inputMode: 'none',
+        canType: false,
+        typeHint: null,
       },
     };
     host = document.createElement('div');
@@ -1437,6 +1456,8 @@ describe('小程序（元素级输入）', () => {
         canInput: true,
         inputHint: '小程序的输入是元素级',
         inputMode: 'element',
+        canType: false,
+        typeHint: '小程序没有键盘通道',
       },
     };
   }
@@ -1535,6 +1556,9 @@ describe('设备列表折叠', () => {
         canInput: true,
         inputHint: null,
         inputMode: 'coordinate',
+        // 坐标级平台（iOS/Android）都能输入文本
+        canType: true,
+        typeHint: null,
       },
       harmony: off('缺 hdc'),
       miniprogram: off('缺开发者工具'),
@@ -1789,5 +1813,306 @@ describe('帧尺寸与设备尺寸不一致', () => {
     // 整帧映射：帧 988×2108 的中部 → (494, 1054)
     expect(Math.abs((sent!.args.x1 as number) - 494)).toBeLessThanOrEqual(3);
     expect(Math.abs((sent!.args.y1 as number) - 1054)).toBeLessThanOrEqual(3);
+  });
+});
+
+/**
+ * **系统边缘手势标记必须发到后端**（iOS）。
+ *
+ * # 这一层在守什么
+ *
+ * 后端已经验证：不带 `edge` 标记时，底部上滑与边缘返回**完全无效**
+ * （iOS 只当普通触摸）。也就是说「前端有没有把它发出去」直接决定这两个
+ * 手势能不能用——而漏发的表现是「点了/滑了没反应」，没有任何报错。
+ *
+ * 同时守住反面：**不在边缘区的拖动绝不能带标记**。标记会覆盖落点判定
+ * （实测：标了下边缘后从 y=0.90 起滑也能回主屏），所以标错等于把那片
+ * 区域的正常拖动抢走——用户会觉得列表滑不动。
+ */
+describe('边缘手势标记（iOS）', () => {
+  /** 一台运行中的 iOS 设备 + 整帧即设备的画面（简化坐标换算）。 */
+  function iosReady(): PlatformStatus {
+    return { ...iosAvailable, devices: iosAvailable.devices.map((d) => ({ ...d })) };
+  }
+
+  /** 只让 iOS 可用的平台集合。
+   *
+   * **必须把 Android 关掉**：defaultStatus() 里 Android 是可用的，面板会默认
+   * 选它，于是这些用例实际走的是 Android 路径（edge 恒为 0）——我第一版就
+   * 这么写的，两条边缘用例失败，而代码是对的。（与既有教训同类：夹具与用例
+   * 的本意不符时，失败信息会指向错误的地方。） */
+  function onlyIos(): SimulatorStatus {
+    const d = defaultStatus();
+    return { ...d, android: off('本用例只验证 iOS 路径'), ios: iosReady() };
+  }
+
+  /** 造一个「整帧就是设备」的 iOS 帧：显示 500×1000 ↔ 设备 1000×2000。 */
+  function iosFrame(): SimulatorFrame {
+    return {
+      dataUrl: 'data:image/png;base64,AAAA',
+      width: 1000,
+      height: 2000,
+      deviceRect: null,
+      deviceSize: null,
+    };
+  }
+
+  it('从底边缘向上滑：带下边缘标记（3）', async () => {
+    status = onlyIos();
+    nextFrame = iosFrame();
+    await mount();
+    stubRect(img(), 0, 0, 500, 1000);
+    // 归一化 y=0.99（底边缘区内）向上滑到 y=0.4
+    await pointer('pointerdown', 250, 990);
+    await pointer('pointermove', 250, 700);
+    await pointer('pointerup', 250, 400);
+    const call = lastInput();
+    expect(call!.args.action).toBe('swipe');
+    expect(call!.args.platform).toBe('ios');
+    expect(call!.args.edge, '底边缘上滑必须带 edge=3，否则完全不生效').toBe(3);
+  });
+
+  it('从左边缘向右滑：带左边缘标记（1）', async () => {
+    status = onlyIos();
+    nextFrame = iosFrame();
+    await mount();
+    stubRect(img(), 0, 0, 500, 1000);
+    // 归一化 x=0.01（左边缘区内）向右滑到 x=0.8
+    await pointer('pointerdown', 5, 500);
+    await pointer('pointermove', 200, 500);
+    await pointer('pointerup', 400, 500);
+    expect(lastInput()!.args.edge, '边缘返回必须带 edge=1').toBe(1);
+  });
+
+  it('画面中部的滑动**不带**标记（不能抢走正常拖动）', async () => {
+    status = onlyIos();
+    nextFrame = iosFrame();
+    await mount();
+    stubRect(img(), 0, 0, 500, 1000);
+    // 中部上滑 = 滚动列表，不该被当成回主屏
+    await pointer('pointerdown', 250, 700);
+    await pointer('pointermove', 250, 400);
+    await pointer('pointerup', 250, 200);
+    expect(lastInput()!.args.edge, '画面内部的滑动必须 edge=0').toBe(0);
+  });
+
+  it('底边缘但方向不对（横滑）不带标记', async () => {
+    status = onlyIos();
+    nextFrame = iosFrame();
+    await mount();
+    stubRect(img(), 0, 0, 500, 1000);
+    // y=0.99 在底边缘，但主要方向是横向 → 不是回主屏
+    await pointer('pointerdown', 100, 990);
+    await pointer('pointermove', 300, 990);
+    await pointer('pointerup', 450, 990);
+    expect(lastInput()!.args.edge, '底边缘的横向拖动不是回主屏').toBe(0);
+  });
+
+  it('点击不带标记（边缘标记只对滑动有意义）', async () => {
+    status = onlyIos();
+    nextFrame = iosFrame();
+    await mount();
+    stubRect(img(), 0, 0, 500, 1000);
+    await pointer('pointerdown', 250, 990);
+    await pointer('pointerup', 250, 990);
+    expect(lastInput()!.args.action).toBe('tap');
+    expect(lastInput()!.args.edge, '点击不需要边缘标记').toBe(0);
+  });
+
+  it('Android 的滑动不带标记（那是 iOS 独有的参数）', async () => {
+    // Android 走 adb input swipe，没有边缘手势概念；带上标记只会让人
+    // 误以为各平台一致，掩盖真实差异
+    status = defaultStatus(); // Android 可用、iOS 不可用
+    await mount();
+    stubRect(img(), 0, 0, 500, 1000);
+    await pointer('pointerdown', 250, 990);
+    await pointer('pointermove', 250, 700);
+    await pointer('pointerup', 250, 400);
+    const call = lastInput();
+    expect(call!.args.platform).toBe('android');
+    expect(call!.args.edge, '边缘标记只对 iOS 有意义').toBe(0);
+  });
+});
+
+/**
+ * **键盘输入必须接到设备上**（iOS）。
+ *
+ * # 这一层在守什么
+ *
+ * 键盘的接线有三处容易断，而断了都**没有任何报错**：
+ *  1. 按键没有被翻译成要发送的字符（`keyToSend` 漏了某个键）；
+ *  2. 翻译了但没 invoke（发不出去）；
+ *  3. 焦点不在画面区时也发（用户在左栏输入框打字，字符跑进了模拟器）。
+ *
+ * 所以这里既测「该发的发出去了」，也测「不该发的时候没发」。
+ * 第三条尤其重要：它的现象是「打字打到了别的地方」，而用户完全
+ * 不知道字符去哪了。
+ */
+describe('键盘输入（iOS）', () => {
+  function iosReady(): PlatformStatus {
+    return { ...iosAvailable, devices: iosAvailable.devices.map((d) => ({ ...d })) };
+  }
+  function onlyIos(): SimulatorStatus {
+    const d = defaultStatus();
+    return { ...d, android: off('本用例只验证 iOS 路径'), ios: iosReady() };
+  }
+  function iosFrame(): SimulatorFrame {
+    return { dataUrl: 'data:image/png;base64,AAAA', width: 1000, height: 2000, deviceRect: null, deviceSize: null };
+  }
+
+  /** 取最近一次 action === 'text' 的调用。 */
+  const lastText = () =>
+    [...calls].reverse().find((c) => c.cmd === 'simulator_input' && c.args.action === 'text');
+
+  /** 向画面区派发一个 keydown（jsdom 里用 KeyboardEvent）。 */
+  async function key(k: string) {
+    const screen = host!.querySelector('.sim-screen') as HTMLElement;
+    await act(async () => {
+      screen.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  /** 点击画面 → 键盘接入（与真实用法一致：先点一下再打字）。
+   *
+   * # 为什么必须用 `el.focus()` 而不是自己派发 focus 事件
+   *
+   * React 17+ 对 `onFocus` 走的是 **focusin 事件委托**（挂在容器上，
+   * 靠冒泡捕获），而我第一版手工 `dispatchEvent(new FocusEvent('focus'))`
+   * ——focus **不冒泡**，React 根本收不到，于是 `keyboardOn` 始终是 false、
+   * 四条用例全红而**代码是对的**。
+   * 真事件路径是 `el.focus()`：jsdom 会自己派发 focus/focusin 并设置
+   * `document.activeElement`，与真实浏览器同一条链。 */
+  async function focusScreen() {
+    const screen = host!.querySelector('.sim-screen') as HTMLElement;
+    await act(async () => {
+      screen.focus();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  it('字母、数字、符号都作为 text 发出', async () => {
+    status = onlyIos();
+    nextFrame = iosFrame();
+    await mount();
+    stubRect(img(), 0, 0, 500, 1000);
+    await focusScreen();
+
+    await key('a');
+    await key('Z');
+    await key('!');
+    await key('7');
+
+    const sent = [...calls]
+      .filter((c) => c.args.action === 'text')
+      .map((c) => c.args.text);
+    expect(sent).toEqual(['a', 'Z', '!', '7']);
+  });
+
+  it('特殊键映射成不可打印字符（由后端转成 HID 用量码）', async () => {
+    status = onlyIos();
+    nextFrame = iosFrame();
+    await mount();
+    stubRect(img(), 0, 0, 500, 1000);
+    await focusScreen();
+
+    await key('Enter');
+    await key('Tab');
+    await key('Backspace');
+    await key('Escape');
+
+    const sent = [...calls]
+      .filter((c) => c.args.action === 'text')
+      .map((c) => c.args.text);
+    // 退格必须有：打错一个字只能删掉重来是不可接受的
+    expect(sent).toEqual(['\n', '\t', '\b', '\x1b']);
+  });
+
+  it('修饰键与方向键不发送（交回浏览器，不发错的码）', async () => {
+    status = onlyIos();
+    nextFrame = iosFrame();
+    await mount();
+    stubRect(img(), 0, 0, 500, 1000);
+    await focusScreen();
+
+    await key('Shift');
+    await key('ArrowLeft');
+    await key('Control');
+    await key('PageUp');
+
+    expect(lastText(), '这些键不该产生任何 text 输入').toBeUndefined();
+  });
+
+  it('**焦点不在画面区时不发送**（否则左栏打字会跑进模拟器）', async () => {
+    status = onlyIos();
+    nextFrame = iosFrame();
+    await mount();
+    stubRect(img(), 0, 0, 500, 1000);
+    // 注意：**没有** focusScreen()
+
+    await key('a');
+    await key('Enter');
+
+    expect(lastText(), '未聚焦时按键绝不能发给设备').toBeUndefined();
+  });
+
+  it('失焦后停止发送', async () => {
+    status = onlyIos();
+    nextFrame = iosFrame();
+    await mount();
+    stubRect(img(), 0, 0, 500, 1000);
+    const screen = host!.querySelector('.sim-screen') as HTMLElement;
+
+    await focusScreen();
+    await key('a');
+    expect(lastText()!.args.text).toBe('a');
+
+    await act(async () => {
+      screen.blur();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await key('b');
+    // 仍然是 'a'（失焦后的 b 没有被发出）
+    expect(lastText()!.args.text).toBe('a');
+  });
+
+  it('**没有键盘能力的平台不接管键盘**（小程序/鸿蒙）', async () => {
+    // 小程序：元素模式、canType 为 false
+    const mp = { ...off(''), available: true, canInput: true, inputMode: 'element' as const,
+                 canType: false, typeHint: '小程序没有键盘通道',
+                 devices: [androidDevice({ id: '/p', runtimeId: '/p', name: '小程序' })] };
+    status = { ...defaultStatus(), android: off('只测小程序'), miniprogram: mp };
+    nextFrame = iosFrame();
+    await mount();
+    stubRect(img(), 0, 0, 500, 1000);
+
+    // 就算强行聚焦画面区，按键也不该发出去
+    await focusScreen();
+    await key('a');
+    expect(lastText(), '无键盘能力的平台不能因为聚焦就发按键').toBeUndefined();
+
+    // 但要**说明为什么**，而不是静默不显示
+    const badge = host!.querySelector('.sim-kb');
+    expect(badge, '要有键盘状态指示（说明缺什么）').toBeTruthy();
+    expect(badge!.getAttribute('title')).toContain('键盘通道');
+  });
+
+  it('键盘状态在界面上可见（否则打不出字时无从判断原因）', async () => {
+    status = onlyIos();
+    nextFrame = iosFrame();
+    await mount();
+    stubRect(img(), 0, 0, 500, 1000);
+
+    const badge = () => host!.querySelector('.sim-kb');
+    expect(badge(), '要有键盘状态指示').toBeTruthy();
+    expect(badge()!.textContent, '初始应显示未接入').toContain('未接入');
+
+    await focusScreen();
+    // 状态切换要经过一次渲染
+    await settle();
+    expect(badge()!.textContent, '聚焦后应显示已接入').toContain('已接入');
   });
 });

@@ -399,13 +399,27 @@ async fn crash_recovery_after_sigkill() {
     // 必须等到**至少一个 Item 已落库**再强杀。
     // 只等 TurnStarted 是不够的：那时 item 事件尚未产生，
     // 日志里除了 thread/turn 之外什么都没有，也就无从验证「历史是否保留」。
+    // 收集过程中看到的事件：**失败时把实际序列写进消息**。
+    //
+    // 这条测试在跑整套（多 crate 并行、机器负载高）时超时失败过一次，
+    // 而单独跑稳定通过。那种「有时红」的测试若只报「未观察到」，
+    // 排查的人无从区分「子进程根本没起来」与「起来了但事件慢」。
+    let mut seen: Vec<String> = Vec::new();
     let got_item = h
-        .wait_for(Duration::from_secs(20), |ev| match ev {
-            AppEvent::ItemUpserted { .. } => Some(()),
-            _ => None,
+        .wait_for(Duration::from_secs(20), |ev| {
+            seen.push(format!("{ev:?}").chars().take(70).collect());
+            match ev {
+                AppEvent::ItemUpserted { .. } => Some(()),
+                _ => None,
+            }
         })
         .await;
-    assert!(got_item.is_some(), "未观察到任何 Item 事件");
+    if got_item.is_none() {
+        panic!(
+            "未观察到任何 Item 事件（等了 20s）。期间共收到 {} 条事件：{seen:#?}",
+            seen.len()
+        );
+    }
 
     // ── 强杀子进程：一切清理逻辑都来不及跑 ──────────────────────────────
     let pid = h.service.pid().expect("未取得子进程 PID");

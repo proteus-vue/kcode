@@ -945,14 +945,27 @@ async fn simulator_input(
     x2: Option<i64>,
     y2: Option<i64>,
     duration_ms: Option<u64>,
+    // 系统边缘手势标记（只有 iOS 用；见 src/components/simulatorGesture.ts
+    // 的 inferEdgeGesture）：0=普通 1=左 2=上 3=下 4=右。
+    // 这里不能用文档注释：Tauri 命令参数只允许 allow/cfg 之类的内建属性。
+    edge: Option<u32>,
+    // 要输入的文本（只有 action == "text" 用）。
+    text: Option<String>,
 ) -> Result<(), CommandError> {
     let p = simulator::Platform::parse(&platform).map_err(CommandError::from)?;
+    // 文本输入与手势走不同的后端入口（见 simulator::input_text 的说明：
+    // 文本没有坐标，语义上不是一种「触摸」）。对外仍是同一个命令。
+    if action == "text" {
+        let text = text.unwrap_or_default();
+        return simulator::input_text(p, &id, &text).await.map_err(CommandError::from);
+    }
     let t = simulator::Touch {
         x1: x1.unwrap_or(0),
         y1: y1.unwrap_or(0),
         x2: x2.unwrap_or(0),
         y2: y2.unwrap_or(0),
         duration_ms: duration_ms.unwrap_or(120),
+        edge: edge.unwrap_or(0),
     };
     simulator::input(p, &id, &action, t).await.map_err(CommandError::from)
 }

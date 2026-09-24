@@ -11,6 +11,10 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyGesture,
   clampDuration,
+  EDGE_BOTTOM_MAX_Y,
+  EDGE_LEFT_MAX_X,
+  edgeFlag,
+  inferEdgeGesture,
   MAX_SWIPE_MS,
   MIN_SWIPE_MS,
   TAP_SLOP_PX,
@@ -89,5 +93,68 @@ describe('滑动时长夹紧', () => {
   it('滑动时使用夹紧后的时长', () => {
     const g = classifyGesture(at(0, 0), at(100, 100), 99999);
     expect(g.kind === 'swipe' && g.durationMs).toBe(MAX_SWIPE_MS);
+  });
+});
+
+/**
+ * 系统边缘手势的推断。
+ *
+ * # 为什么这个判定的边界特别要紧
+ *
+ * 边缘标记会**覆盖落点判定**（实测：标了底边缘后，从 y=0.90 起滑也能回主屏）。
+ * 也就是说标记是一次下注，标错的代价是那一整片区域的正常拖动全部失效——
+ * 用户会以为「列表滑不动 / 卡了」，而不会有任何报错。
+ *
+ * 所以这里既钉住「该标的必须标」（不标就完全没有手势），
+ * 也钉住「不该标的绝不能标」（标错方向就是纯粹的功能损失）。
+ */
+describe('边缘手势推断', () => {
+  it('从底边缘向上滑 → 回主屏', () => {
+    expect(inferEdgeGesture(0.5, 0.995, 0.5, 0.4)).toBe('bottom');
+    expect(inferEdgeGesture(0.5, 0.99, 0.5, 0.3)).toBe('bottom');
+  });
+
+  it('从左边缘向右滑 → 返回', () => {
+    expect(inferEdgeGesture(0.005, 0.5, 0.8, 0.5)).toBe('left');
+  });
+
+  it('不在边缘区内的一律不标（普通拖动不能被抢走）', () => {
+    // 画面中部上滑是滚动列表，绝不能标成回主屏
+    expect(inferEdgeGesture(0.5, 0.6, 0.5, 0.3)).toBe('none');
+    // 画面中部右滑是横向滚动/翻页
+    expect(inferEdgeGesture(0.3, 0.5, 0.7, 0.5)).toBe('none');
+    // 刚过阈值之外
+    expect(inferEdgeGesture(0.5, EDGE_BOTTOM_MAX_Y - 0.01, 0.5, 0.3)).toBe('none');
+    expect(inferEdgeGesture(EDGE_LEFT_MAX_X + 0.01, 0.5, 0.8, 0.5)).toBe('none');
+  });
+
+  it('方向不对就不标（落点在边缘但方向不符）', () => {
+    // 在底边缘**向下**滑（拉出控制中心那类）不是回主屏
+    expect(inferEdgeGesture(0.5, 0.99, 0.5, 1.0)).toBe('none');
+    // 在底边缘横向滑（指示条区域的横向拖动）不是回主屏
+    expect(inferEdgeGesture(0.2, 0.99, 0.8, 0.99)).toBe('none');
+    // 在左边缘向上/下滑（边缘滚动）不是返回
+    expect(inferEdgeGesture(0.005, 0.3, 0.005, 0.7)).toBe('none');
+    // 左边缘向左滑（滑出屏幕）不是返回
+    expect(inferEdgeGesture(0.03, 0.5, 0.001, 0.5)).toBe('none');
+  });
+
+  it('阈值边界本身算边缘（含端点）', () => {
+    expect(inferEdgeGesture(0.5, EDGE_BOTTOM_MAX_Y, 0.5, 0.4)).toBe('bottom');
+    expect(inferEdgeGesture(EDGE_LEFT_MAX_X, 0.5, 0.8, 0.5)).toBe('left');
+  });
+
+  it('斜向拖动以主方向定归属（不能两者都算）', () => {
+    // 从底边起、向右上斜着滑：纵向分量更大 → 回主屏
+    expect(inferEdgeGesture(0.5, 0.99, 0.7, 0.5)).toBe('bottom');
+    // 从左边缘起、向右下斜着滑：横向分量更大 → 返回
+    expect(inferEdgeGesture(0.01, 0.3, 0.6, 0.5)).toBe('left');
+  });
+
+  it('标记值必须与注入层的 IndigoHIDEdge 常量一致', () => {
+    // helper 里 edgeLeft=1 / edgeBottom=3，写错就是「手势静默失效」
+    expect(edgeFlag('none')).toBe(0);
+    expect(edgeFlag('left')).toBe(1);
+    expect(edgeFlag('bottom')).toBe(3);
   });
 });

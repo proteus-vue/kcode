@@ -830,7 +830,23 @@ async fn thread_rename_reaches_server_and_is_readable() {
 
     let list = h.service.list_threads_remote(None).await.expect("列举失败");
     let got = list.iter().find(|t| t.thread_id == thread_id);
-    assert!(got.is_some(), "重命名后线程不在列表里");
+    // 失败时说清**实际拿到了什么**：这条测试在多 crate 并行跑整套时偶发失败过
+    // （单独跑稳定通过）。只报「不在列表里」无法区分两种完全不同的原因——
+    // 「服务端还没把新线程纳入列表」（时序）与「重命名把线程搞丢了」（真 bug）。
+    // 前者要放宽等待，后者要改代码，混在一条消息里就没法判断。
+    if got.is_none() {
+        let listed: Vec<String> = list
+            .iter()
+            .map(|t| {
+                let id = &t.thread_id;
+                format!("{}={:?}", &id[..8.min(id.len())], t.name)
+            })
+            .collect();
+        panic!(
+            "重命名后线程 {thread_id} 不在列表里（服务端共返回 {} 条：{listed:?}）",
+            list.len()
+        );
+    }
     assert_eq!(
         got.unwrap().name.as_deref(),
         Some("重命名验证"),

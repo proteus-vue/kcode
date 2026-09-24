@@ -626,6 +626,16 @@ export interface PlatformStatus {
    * 实际是平台能力形态不同。
    */
   inputMode: 'none' | 'coordinate' | 'element';
+  /**
+   * 能否**输入文本**（键盘）。
+   *
+   * 与 `canInput` 分开，因为「能点」与「能打字」在四个平台上确实不同：
+   * iOS / Android 都能；小程序能点但**没有键盘通道**；鸿蒙两者都未验证。
+   * 界面据此决定是否显示键盘入口——而不是画一个点了会报错的按钮。
+   */
+  canType: boolean;
+  /** `canType` 为 false 时的原因（面向用户）。 */
+  typeHint: string | null;
 }
 
 /** 小程序当前页的一个可点元素。 */

@@ -30,7 +30,7 @@
 | **L3** | React 前端：**液态玻璃三栏 UI**、审批弹窗、Diff 审阅、流式输出、Markdown、模型选择 | ✅ |
 
 <!-- test-stats:begin -->
-合计 **348 项 Rust 测试 + 609 项前端测试 + 56 项协议契约断言**——
+合计 **356 项 Rust 测试 + 632 项前端测试 + 56 项协议契约断言**——
 数字由 `scripts/test-stats.mjs` 实际运行统计，明细见 [`docs/test-stats.md`](docs/test-stats.md)。
 <!-- test-stats:end -->
 
@@ -44,7 +44,9 @@ CI 比对其结果与本文、`docs/test-stats.md` 是否一致（与协议事�
 `thread/resume`·`thread/fork` 生命周期（`thread/archive` 与重命名已落地），
 以及 Phase 2 的 granular approvals、`auto_review`、MCP、命令面板与快捷键注册。
 实施计划见 [`docs/KCode落地方案.md`](docs/KCode落地方案.md)；
-UI 对标的逐项状态见 [`docs/UI对标指标清单.md`](docs/UI对标指标清单.md)。
+UI 对标的逐项状态见 [`docs/UI对标指标清单.md`](docs/UI对标指标清单.md)；
+**模拟器四平台的能力边界（含尚未验证的部分）见
+[`docs/模拟器接入状态.md`](docs/模拟器接入状态.md)**。
 
 > **CI 状态：三个 job 全绿**（2026-09-24，CI #70 起）——
 > `verify` / `rust` / `web` 全部通过，覆盖协议漂移、协议事实清单、codex 哈希、
@@ -222,6 +224,7 @@ kcode/
 │  ├─ protocol-facts.md       协议事实清单（自动生成，对账基准）
 │  ├─ test-stats.md           测试统计（自动生成，数字的单一来源）
 │  ├─ 协议勘误与修正.md        勘误记录与依据
+│  ├─ 模拟器接入状态.md        **四平台能力状态快照**（含未验证项，勿当能用）
 │  └─ archive/               v1.0 原始调研材料（溯源用）
 ├─ crates/
 │  ├─ codex-bridge/            L1 适配层（不依赖 Tauri）

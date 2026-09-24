@@ -139,20 +139,228 @@ func emit(_ jpeg: Data) {
 
 // MARK: - 画面输出回调
 
+/// 一个矩形（捕获帧的像素坐标，**左上原点**）。
+struct CropRect {
+    var x: CGFloat
+    var y: CGFloat
+    var width: CGFloat
+    var height: CGFloat
+}
+
+/// 从一帧里找出「真正的设备屏幕」区域。
+///
+/// # 搜索范围
+///
+/// 传进来的是**标题栏以下的整个窗口**，不是算出来的机身矩形。原因：
+/// 设备可以旋转，旋转后机身矩形完全是另一个形状（宽高比倒数），
+/// 用竖屏的机身矩形去找横屏的屏幕会大面积落空。而「标题栏以下」这个
+/// 范围对两个方向都成立，所以旋不旋转都能扫。
+///
+/// # 判据为什么可靠
+///
+/// 外壳是**连续的黑带**：某一列若落在外壳上，整列几乎全黑（实测黑占比
+/// 0.90）；落在屏幕上则是内容（实测 0.15）。两者差 6 倍。
+/// 所以从四个方向分别找「第一段连续足够长的非黑区」，就是屏幕边界。
+///
+/// # 为什么用「连续长度」而不是「跳过第一段黑带」
+///
+/// 实测从外向内有两段黑带：窗口与机身之间的空隙（y 48..57 全黑）、
+/// 机身外壳本身的描边（y 64..70 黑占比 0.88）。只跳第一段会停在 59，
+/// 那还在外壳里（实测就是这么失败的：检测没通过，退回机身矩形）。
+///
+/// # 合理性校验（两道）
+///
+/// 1. **宽高比**必须接近设备比例（正反两个方向都接受，因为可能已旋转）；
+/// 2. **尺寸**不能太小。
+///
+/// 若设备当时正显示深色画面（比如全黑的视频页），屏幕也会被判成「黑带」，
+/// 检测会失败——失败时保留上一次的结果，不更新（宁可画面多一圈黑边，
+/// 也不能裁错：裁掉屏幕会让点击整体偏移）。
+func detectScreenRect(
+    pixelBuffer: CVPixelBuffer, search: CropRect, deviceAspect: Double
+) -> CropRect? {
+    guard deviceAspect > 0 else { return nil }
+    CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+    guard let baseAddr = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
+    let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+    let pw = CVPixelBufferGetWidth(pixelBuffer)
+    let ph = CVPixelBufferGetHeight(pixelBuffer)
+
+    /// 取某点亮度（BGRA）。
+    func luma(_ x: Int, _ y: Int) -> Int {
+        let p = baseAddr + y * bytesPerRow + x * 4
+        let b = Int(p.load(fromByteOffset: 0, as: UInt8.self))
+        let g = Int(p.load(fromByteOffset: 1, as: UInt8.self))
+        let r = Int(p.load(fromByteOffset: 2, as: UInt8.self))
+        return (r * 299 + g * 587 + b * 114) / 1000
+    }
+
+    let x0 = max(0, Int(search.x)), x1 = min(pw - 1, Int(search.x + search.width) - 1)
+    let y0 = max(0, Int(search.y)), y1 = min(ph - 1, Int(search.y + search.height) - 1)
+    guard x1 > x0 + 8, y1 > y0 + 8 else { return nil }
+
+    let step = 2
+    let rows = Array(stride(from: y0, through: y1, by: step))
+    let cols = Array(stride(from: x0, through: x1, by: step))
+
+    /// 「属于窗口装饰/外壳」的亮度上限。
+    ///
+    /// # 这个阈值是实测定的，不能凭感觉改
+    ///
+    /// 两个平台实测到的装饰亮度：
+    ///   · 窗口背景/外边距：纯黑（luma 0）
+    ///   · iOS 标题栏：rgb(30,30,30) → luma **30**
+    ///   · iOS 机身描边：rgb(44,44,44) → luma **44**
+    ///   · Android 模拟器工具条：纯黑（luma 0）
+    ///
+    /// 早先我用 `< 30`，恰好把 luma=30 的 iOS 标题栏**排除在「暗」之外**
+    /// ——那时搜索起点从标题栏下方开始，所以没暴露；后来改成整帧搜索，
+    /// 标题栏被判成内容，iOS 的 top 从 72 变成 0（**画面顶部多出一条标题栏**，
+    /// 实测到的回归）。取 60：能盖住上面全部四种装饰，又仍明显低于
+    /// 正常界面的内容亮度（设置页/主屏实测 luma ≥ 100）。
+    ///
+    /// 深色界面（深色模式）会落入这个阈值，但那时由**宽高比推导**
+    /// 兜底（见 detectScreenRect 的候选 2），不靠亮度硬判。
+    let darkLuma = 60
+
+    /// 一列里「暗」像素的占比。
+    func blackFracCol(_ x: Int) -> Double {
+        var n = 0
+        for y in rows where luma(x, y) < darkLuma { n += 1 }
+        return Double(n) / Double(rows.count)
+    }
+    /// 一行里「暗」像素的占比。
+    func blackFracRow(_ y: Int) -> Double {
+        var n = 0
+        for x in cols where luma(x, y) < darkLuma { n += 1 }
+        return Double(n) / Double(cols.count)
+    }
+
+    /// 从外向内找「内容真正开始」的位置：第一段**连续足够长**的非黑区。
+    func firstContent(_ vals: [Int], frac: (Int) -> Double) -> Int? {
+        // 24px（step=2 → 12 个采样点）的内容宽度才算数
+        let run = 12
+        var i = 0
+        while i < vals.count {
+            if frac(vals[i]) <= 0.5 {
+                var j = i
+                var clean = true
+                while j < min(i + run, vals.count) {
+                    if frac(vals[j]) > 0.5 { clean = false; break }
+                    j += 1
+                }
+                if clean { return vals[i] }
+            }
+            i += 1
+        }
+        return nil
+    }
+
+    guard let left = firstContent(cols, frac: blackFracCol),
+          let top = firstContent(rows, frac: blackFracRow)
+    else { return nil }
+    let right = firstContent(cols.reversed(), frac: blackFracCol)
+    let bottom = firstContent(rows.reversed(), frac: blackFracRow)
+
+    /// 比例是否与设备一致（**正反都接受**——设备可能已旋转）。
+    func aspectMatches(_ w: CGFloat, _ h: CGFloat) -> Bool {
+        guard w >= 80, h >= 80 else { return false }
+        let a = Double(w / h)
+        return abs(a - deviceAspect) / deviceAspect < 0.04
+            || abs(a - 1 / deviceAspect) / (1 / deviceAspect) < 0.04
+    }
+
+    // ── 候选 1：四条边都扫到，且比例自洽 ──────────────────────────────
+    //
+    // 这是 iOS 的常态（机身四周都是黑边，四条边都扫得准）。
+    if let right, let bottom {
+        let w = CGFloat(right - left + 1)
+        let h = CGFloat(bottom - top + 1)
+        if aspectMatches(w, h) {
+            return CropRect(x: CGFloat(left), y: CGFloat(top), width: w, height: h)
+        }
+    }
+
+    // ── 候选 2：用已知宽高比**推导缺失的边** ──────────────────────────
+    //
+    // # 为什么需要这一条（实测，Android）
+    //
+    // Android 模拟器窗口的实测数据（窗口帧 450×931，设备 1080×2340）：
+    //   left=20 ✓  right=378 ✓  top=22 ✓  bottom=**734** ✗ —— 真值是 800。
+    // 原因不是检测坏了，而是**设备自己的深色导航栏**（黑色背景 + 白色按钮）
+    // 与窗口黑边在像素上无法区分：逐行扫到 y≈780 时黑占比就超过阈值了，
+    // 于是 bottom 停在导航栏上沿。四条边不自洽 → 比例 0.50 对不上 0.46。
+    //
+    // 但「左侧/上方」的扫描是可靠的（设备外面确实是窗口背景），
+    // 而**宽高比是已知的**——所以可以由宽推出高，或由高推出宽。
+    // 两条都试，取先满足的那条。
+    let devRatio = CGFloat(deviceAspect)
+    let searchBottom = CGFloat(y1), searchRight = CGFloat(x1)
+
+    // 2a. 用宽度定尺寸（left/right 都可信时）
+    if let right {
+        let w = CGFloat(right - left + 1)
+        let h = (w / devRatio).rounded()
+        let b = CGFloat(top) + h - 1
+        if b <= searchBottom, aspectMatches(w, h) {
+            return CropRect(x: CGFloat(left), y: CGFloat(top), width: w, height: h)
+        }
+    }
+    // 2b. 用高度定尺寸（那条边可信时）
+    if let bottom {
+        let h = CGFloat(bottom - top + 1)
+        let w = (h * devRatio).rounded()
+        let r = CGFloat(left) + w - 1
+        if r <= searchRight, aspectMatches(w, h) {
+            return CropRect(x: CGFloat(left), y: CGFloat(top), width: w, height: h)
+        }
+    }
+    // 2c. 只信 left/top，用「窗口内容区」的最大可能尺寸按比例嵌进去
+    //
+    // 兜底：若连 right/bottom 都不可信（整屏深色内容），用搜索范围的尺寸
+    // 按设备比例内切。这比「不裁」好——不裁会把窗口边框一起显示出来，
+    // 而那会导致点击整体偏移。
+    let availW = searchRight - CGFloat(left) + 1
+    let availH = searchBottom - CGFloat(top) + 1
+    var w = availW
+    var h = (w / devRatio).rounded()
+    if h > availH {
+        h = availH
+        w = (h * devRatio).rounded()
+    }
+    if aspectMatches(w, h) {
+        return CropRect(x: CGFloat(left), y: CGFloat(top), width: w, height: h)
+    }
+    return nil
+}
+
 final class FrameSink: NSObject, SCStreamOutput {
     // CI/CG 对象**必须由主线程创建后传入**：在后台线程首次初始化 CoreGraphics
     // 会触发 `CGS_REQUIRE_INIT` 断言直接崩溃（本文件实测踩到）。
     private let ciContext: CIContext
     private let colorSpace: CGColorSpace
     private let quality: Double
+    /// 检测的搜索范围（**标题栏以下的整个窗口**，见 detectScreenRect）。
+    private let searchRect: CropRect
+    /// 设备宽高比：检测结果的合理性判据（0 = 上游没给，跳过检测）。
+    private let deviceAspect: Double
+    /// 每帧要保留的区域（**捕获帧的像素坐标，左上原点**）。
+    /// 检测成功后确定；nil = 不裁（几何未知时的退化行为）。
+    private var crop: CropRect?
     private var frames = 0
+    /// 上次重新检测时的帧号。用于**周期性重检**（见 stream 里的说明）。
+    private var lastDetectFrame = 0
     private var encodeTotalMs = 0.0
     private var lastReportAt = DispatchTime.now()
     private var lastReportFrames = 0
     private let startedAt = DispatchTime.now()
 
-    init(quality: Double, ciContext: CIContext, colorSpace: CGColorSpace) {
+    init(quality: Double, searchRect: CropRect, deviceAspect: Double,
+         ciContext: CIContext, colorSpace: CGColorSpace) {
         self.quality = quality
+        self.searchRect = searchRect
+        self.deviceAspect = deviceAspect
         self.ciContext = ciContext
         self.colorSpace = colorSpace
     }
@@ -162,8 +370,56 @@ final class FrameSink: NSObject, SCStreamOutput {
         // SCK 会在流状态变化时送空帧（无 imageBuffer），跳过
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
+        // 检测屏幕区域：首帧一次，之后**周期性重检**。
+        //
+        // # 为什么要周期重检
+        //
+        // 设备可以旋转（用户在 Simulator 里按 ⌘←/⌘→）。旋转后画面宽高比
+        // 变成倒数，只算一次得到的矩形就错位了：画面会被裁掉一大块。
+        // 重检一次约 0.3ms（采样 2 步长、区域有限），每 30 帧（约 1 秒）一次
+        // 完全可以忽略——而它换来的是「旋转后画面自动跟上」。
+        //
+        // 失败时**保留上次结果**：设备正在显示深色内容时检测会失败，
+        // 那时沿用旧矩形（多为正确），而不是退回更大的区域。
+        let needDetect = frames == 0 || frames - lastDetectFrame >= 30
+        if needDetect {
+            lastDetectFrame = frames
+            if let d = detectScreenRect(pixelBuffer: pixelBuffer,
+                                        search: searchRect, deviceAspect: deviceAspect) {
+                let changed = crop == nil
+                    || abs(d.x - crop!.x) > 1 || abs(d.y - crop!.y) > 1
+                    || abs(d.width - crop!.width) > 1 || abs(d.height - crop!.height) > 1
+                crop = d
+                if changed {
+                    let kind = d.width > d.height ? "横屏" : "竖屏"
+                    log(String(format: "KCDEVICE_CROP %.2f %.2f %.2f %.2f（%@" +
+                               "，已按外壳黑带收窄）", d.x, d.y, d.width, d.height, kind))
+                }
+            } else if crop == nil {
+                // 首次就检测失败：不裁（退化为整帧窗口），并把原因说清楚
+                log(String(format: "KCDEVICE_CROP %.2f %.2f %.2f %.2f（检测未通过，不裁）",
+                           searchRect.x, searchRect.y, searchRect.width, searchRect.height))
+            }
+        }
+
         let t0 = DispatchTime.now()
-        let ci = CIImage(cvPixelBuffer: pixelBuffer)
+        var ci = CIImage(cvPixelBuffer: pixelBuffer)
+        // 裁掉窗口外壳与标题栏：只把设备屏幕送出去。
+        // 这**不只是好看**——不裁的话画面上会出现 Simulator 自己的工具栏按钮
+        // （home/截图/旋转），而它们不是设备像素，点上去永远不会有反应。
+        // 用户实测反馈「这些区域点了没反应」，指的正是它们。
+        // 与其让人去点一个注定无效的区域，不如不显示。
+        if let c = crop {
+            let h = ci.extent.height
+            // CIImage 是**左下原点**，而我们的坐标是左上原点，y 要翻过来
+            let rect = CGRect(x: c.x, y: h - c.y - c.height, width: c.width, height: c.height)
+                .intersection(ci.extent)
+            if rect.width > 1, rect.height > 1 {
+                ci = ci.cropped(to: rect)
+                    // 归零原点：否则 JPEG 会按 extent 偏移量多出黑边
+                    .transformed(by: CGAffineTransform(translationX: -rect.minX, y: -rect.minY))
+            }
+        }
         guard let data = ciContext.jpegRepresentation(
             of: ci, colorSpace: colorSpace,
             options: [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): quality]
@@ -231,50 +487,50 @@ func run(ciContext: CIContext, colorSpace: CGColorSpace) async throws {
     // 所有点击都会整体偏移（用户实测反馈「点击区域和实际触达的不一致，
     // 差得很远」）。
     //
-    // 几何关系（实测确定）：
-    //   窗口 = 标题栏（顶部约 105px）+ 设备视图（按设备宽高比等比缩放）
-    //   设备视图受**可用高度**约束（高度不够时左右留白）
+    // 曾经这里还算过「设备视图在窗口里的矩形」（按设备宽高比等比缩放、
+    // 受可用高度约束），上层再用它做点击换算。**现在不需要了**：
+    // 屏幕区域由 detectScreenRect 从**实际像素**检测出来，比按比例推算更准
+    // （推算出的矩形包住的是机身轮廓，含外壳黑边，每边多约 9px）。
+    // 推算逻辑已删除——留着只会让人以为它还在被使用。
     //
-    // 实测样例：窗口 988x2108、设备 1320x2868（比例 0.4603）→
-    //   设备视图 921x2001，左右各留 34px，顶部标题栏 107px
-    // 像素验证：x=32..34 处有外壳描边（rgb 44,44,44），x>=35 进入内容；
-    //           y<=105 为标题栏（rgb 30,30,30），y>=106 变黑（设备外壳）。
+
+    // 输出给上层：**送出去的帧就是设备屏幕**（我们裁过），所以设备占满整帧。
     //
-    // 设备宽高比从哪来？窗口自己的宽高比**不等于**设备比例（含标题栏），
-    // 所以要由上层告诉我们设备比例；这里先按「已知设备比例」的口径计算。
-    let contentTop = titleBarHeight(window: window)
-    let availH = window.frame.height - contentTop
-    let devRatio = opts.deviceAspect > 0 ? opts.deviceAspect : (window.frame.width / availH)
-    var viewW = window.frame.width
-    var viewH = viewW / devRatio
-    if viewH > availH {
-        viewH = availH
-        viewW = viewH * devRatio
-    }
-    let insetX = (window.frame.width - viewW) / 2
-    // 输出给上层：KCDEVICE <x> <y> <w> <h>（**归一化到窗口尺寸**的比例）
-    let geom = String(
-        format: "KCDEVICE %.6f %.6f %.6f %.6f",
-        insetX / window.frame.width,
-        contentTop / window.frame.height,
-        viewW / window.frame.width,
-        viewH / window.frame.height
-    )
+    // 这条曾经是「设备在窗口帧里的位置」（0.034 0.051 0.932 0.949）——那是
+    // 裁切之前的口径：那时上层必须自己做一次裁剪换算，而换算用的矩形包住的是
+    // **机身轮廓**（含外壳黑边），不是屏幕，边缘点击会偏约 2%。
+    // 现在裁剪在 helper 里做（含周期性的屏幕检测，见 detectScreenRect），
+    // 上层拿到什么就是屏幕，映射变成 1:1，不会再有那层误差。
+    //
     // ⚠️ 走到 **stderr** 而不是 stdout：stdout 是帧数据通道，
     // 混入文本行会破坏上层的帧协议解析（帧以 `KCFRAME <len>\n` 开头）。
     // stderr 本就是日志通道，上层在那里找 `KCDEVICE ` 前缀。
-    log(geom)
-    let sx = CGFloat(cfg.width) / window.frame.width
-    let sy = CGFloat(cfg.height) / window.frame.height
-    log(String(
-        format: "KCDEVICE_PX %.2f %.2f %.2f %.2f",
-        insetX * sx, contentTop * sy, viewW * sx, viewH * sy
-    ))
+    log("KCDEVICE 0.000000 0.000000 1.000000 1.000000")
+    // 检测的搜索范围：**标题栏以下的整个窗口**（旋转后机身矩形完全不同，
+    // 只有「标题栏以下」对两个方向都成立，见 detectScreenRect 的说明）。
+    // 搜索范围 = **整个窗口帧**。
+    //
+    // # 为什么不再从「标题栏以下」开始
+    //
+    // 曾经这里按 `titleBarHeight()`（写死 53.5pt，实测自 iOS Simulator）下移
+    // 搜索起点。那个假设**只对 iOS 成立**：Android 模拟器窗口几乎没有标题栏，
+    // 设备画面从 y≈22 就开始，而搜索起点被推到 y≈49 —— 于是**画面顶部被切掉**，
+    // 检测出来的高度偏小、宽高比校验不过，整块回退成「不裁」（实测到的现象是
+    // `KCDEVICE_CROP ... 检测未通过，不裁`，画面上带着模拟器工具条）。
+    //
+    // 现在从 y=0 扫：标题栏本身是深色的（iOS 上实测 rgb 30,30,30），
+    // 它不会被判成内容，所以「从整帧扫」对两个平台都成立，
+    // 也就不需要那个平台相关的常量了。
+    let searchRect = CropRect(
+        x: 0, y: 0, width: CGFloat(cfg.width), height: CGFloat(cfg.height)
+    )
 
 
     let filter = SCContentFilter(desktopIndependentWindow: window)
     let stream = SCStream(filter: filter, configuration: cfg, delegate: nil)
-    let sink = FrameSink(quality: opts.quality, ciContext: ciContext, colorSpace: colorSpace)
+    let sink = FrameSink(quality: opts.quality, searchRect: searchRect,
+                         deviceAspect: opts.deviceAspect,
+                         ciContext: ciContext, colorSpace: colorSpace)
     try stream.addStreamOutput(sink, type: .screen, sampleHandlerQueue: DispatchQueue(label: "kcode.cast.frames"))
 
     let t0 = DispatchTime.now()

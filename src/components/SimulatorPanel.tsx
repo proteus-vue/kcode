@@ -45,7 +45,7 @@ import type {
   MpElement,
   MpViewport,
 } from '../types/domain';
-import { classifyGesture, type Gesture } from './simulatorGesture';
+import { classifyGesture, edgeFlag, inferEdgeGesture, type Gesture } from './simulatorGesture';
 
 /**
  * 轮询间隔（按平台自适应）。
@@ -531,6 +531,21 @@ export function SimulatorPanel({
       const p1 = map(cx, cy, r.width, r.height, devW, devH);
       const p2 = map(x2, y2, r.width, r.height, devW, devH);
       if (!p1) return;
+      // 系统边缘手势：只有 iOS 的**滑动**需要显式标记（见 inferEdgeGesture
+      // 的说明——我们绕过触摸驱动注入，「算不算系统手势」这个判定没人做，
+      // 必须自己标）。用**归一化坐标**判定，与设备分辨率无关。
+      //
+      // ⚠️ 必须限定 action === 'swipe'：点击调用时 x2/y2 是默认值 0，
+      // 于是「终点」成了左上角，任何一次边缘处的点击都会被算成
+      // 「从底边滑到左上」→ 误标成回主屏。这个 bug 是测试抓出来的
+      // （点击不带标记那条用例失败，实际收到 3）。点击本身用不上标记，
+      // 所以限定在 swipe 既简单又准确。
+      const edge =
+        platform === 'ios' && action === 'swipe' && p2
+          ? edgeFlag(
+              inferEdgeGesture(p1[0] / devW, p1[1] / devH, p2[0] / devW, p2[1] / devH),
+            )
+          : 0;
       setInputBusy(true);
       try {
         await invoke('simulator_input', {
@@ -542,6 +557,7 @@ export function SimulatorPanel({
           x2: p2 ? p2[0] : 0,
           y2: p2 ? p2[1] : 0,
           durationMs,
+          edge,
         });
         setError(null);
         // **输入后立刻补一帧**，不等下一次 600ms 轮询。
@@ -563,6 +579,95 @@ export function SimulatorPanel({
   const sendKey = useCallback(
     (action: 'back' | 'home') => void sendInput(action, 0, 0),
     [sendInput],
+  );
+
+  /**
+   * 键盘输入：把一段文本发给设备。
+   *
+   * # 为什么不复用 sendInput
+   *
+   * `sendInput` 的入参是**坐标**（先换算成设备像素再发），而文本没有坐标。
+   * 硬塞进去要么传假坐标、要么在函数里加分支——两者都让那条链路更难读。
+   * 这里只做「发一次 IPC」，坐标换算那层不参与。
+   *
+   * # 为什么逐段发而不是累积
+   *
+   * 每次按键都立刻发一次，不做「攒一段再发」：用户在设备上看到字符出现
+   * 的速度就是他的打字节奏，攒起来会变成「打完了才一起冒出来」。
+   * 代价是每次一个 IPC——但 HID 注入本身是毫秒级，这条路实测流畅。
+   */
+  const sendText = useCallback(
+    async (text: string) => {
+      if (!platform || !runtimeId || !text) return;
+      try {
+        await invoke('simulator_input', { platform, id: runtimeId, action: 'text', text });
+        setError(null);
+      } catch (e) {
+        setError(extractErrorMessage(e));
+      }
+    },
+    [platform, runtimeId],
+  );
+
+  /** 这个平台能否输入文本（键盘）。见 PlatformStatus.canType 的说明。
+   *  声明位置要在用到它的回调**之前**——`const` 有 TDZ，放在后面会
+   *  在首次渲染时抛 "used before declaration"。 */
+  const canType = plat?.canType === true;
+
+  /**
+   * 键盘是否已「接上」设备。
+   *
+   * 用**焦点**表示：画面区拿到焦点后按键才发给设备，失焦（点别处）就停。
+   * 不这么做的话，用户在左栏的输入框里打字也会被当成给模拟器的输入——
+   * 那会打进设备的输入框，用户根本不知道字符去哪了。
+   */
+  const [keyboardOn, setKeyboardOn] = useState(false);
+
+  /**
+   * 把按键翻译成要发送的**一个字符**；返回 null 表示这个键不处理。
+   *
+   * 特殊键也走这条路（编码成不可打印字符，由后端映射成 HID 用量码）：
+   * 退格 `\b`、回车 `\n`、Tab `\t`、Esc `\x1b`。
+   * 这样前端只需要「发一个字符」这一件事，不必知道 HID 用量码，
+   * 也不必为特殊键单开一条后端链路。
+   *
+   * 不处理（返回 null）的键：Shift/Ctrl/Alt/方向键/Home/PageUp 等。
+   * 它们要么是修饰键（状态由浏览器随下一个字符一起给出），要么涉及
+   * 光标移动等我们尚未映射的能力——**交回浏览器**比发一个错的码好。
+   */
+  const keyToSend = useCallback((e: React.KeyboardEvent): string | null => {
+    switch (e.key) {
+      case 'Enter':
+        return '\n';
+      case 'Tab':
+        return '\t';
+      case 'Backspace':
+        return '\b';
+      case 'Escape':
+        return '\x1b';
+      default:
+        // 可打印字符（含大写、数字、符号）。`length === 1` 能排除
+        // 'Shift'/'ArrowLeft' 这类多字符键名；中文输入法提交的
+        // 也会走到这里（但后端只支持 ASCII，会给出明确报错）。
+        return e.key.length === 1 ? e.key : null;
+    }
+  }, []);
+
+  const onScreenKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      // 两道门：能力位（这个平台支不支持打字）+ 焦点（键盘是否接到设备上）。
+      // 缺能力位的话，在小程序/鸿蒙上打字会发出一个注定报错的 IPC；
+      // 而能力位不该在这里判平台名——那是后端的能力，后端才知道。
+      if (!keyboardOn || !canType) return;
+      const text = keyToSend(e);
+      if (text === null) return;
+      // 必须 preventDefault：否则空格会滚动页面、`/` 会触发浏览器的快速查找、
+      // 退格在某些浏览器里会「返回上一页」。这些默认动作与「把字符送给设备」
+      // 无关，留着只会让界面乱跳。
+      e.preventDefault();
+      void sendText(text);
+    },
+    [keyboardOn, canType, keyToSend, sendText],
   );
 
   /**
@@ -1003,7 +1108,13 @@ export function SimulatorPanel({
             <div
               className={`sim-screen ${inputBusy ? 'is-busy' : ''} ${
                 dragging ? 'is-dragging' : ''
-              } ${interactive ? '' : 'is-readonly'}`}
+              } ${interactive ? '' : 'is-readonly'} ${keyboardOn ? 'is-keyboard' : ''}`}
+              // 画面区要能获得焦点，键盘事件才有依附。tabIndex=0 让它
+              // 可被 Tab 与点击聚焦（点击聚焦由下面的 onPointerDown 触发）。
+              tabIndex={interactive ? 0 : -1}
+              onKeyDown={onScreenKeyDown}
+              onFocus={() => setKeyboardOn(true)}
+              onBlur={() => setKeyboardOn(false)}
             >
               <img
                 ref={imgRef}
@@ -1014,6 +1125,9 @@ export function SimulatorPanel({
                   // 只读模式下不接管指针：没有输入能力时让事件照常冒泡，
                   // 用户仍能选中/拖动图片而不产生「点了没反应」的错觉
                   if (!interactive) return;
+                  // 点画面 = 把键盘接到设备上（与真机「点输入框弹出键盘」一致）。
+                  // 反过来，焦点在别处时按键不发给设备——见 keyboardOn 的说明。
+                  e.currentTarget.parentElement?.focus();
                   const img = e.currentTarget.getBoundingClientRect();
                   const x = e.clientX - img.left;
                   const y = e.clientY - img.top;
@@ -1226,8 +1340,34 @@ export function SimulatorPanel({
               >
                 <Icon name="dot" size={13} />
               </button>
+              {/* 键盘状态：**必须可见**。
+                  键盘是「点一下画面就把输入接到设备」的隐式状态，不显示的话
+                  用户打不出字时无从判断是「没聚焦」还是「注入坏了」——
+                  而这两者要采取的动作完全不同（点一下画面 vs 报 bug）。 */}
+              {plat.canType && (
+                <span
+                  className={`sim-kb ${keyboardOn ? 'is-on' : ''}`}
+                  title={
+                    keyboardOn
+                      ? '键盘已接到设备上：现在打字会送到模拟器。点界面别处即断开。'
+                      : '点一下画面即可把键盘接到设备上，然后就能直接打字。'
+                  }
+                >
+                  <Icon name="keyboard" size={12} />
+                  {keyboardOn ? '键盘已接入' : '键盘未接入'}
+                </span>
+              )}
+              {/* 不能打字时**说清为什么**，而不是不显示。
+                  不显示的话用户会以为「这个平台没有键盘功能」，
+                  而实际原因可能是「我们还没做」——那是我们的待办，不是平台限制。 */}
+              {!plat.canType && plat.typeHint && (
+                <span className="sim-kb is-off" title={plat.typeHint}>
+                  <Icon name="keyboard" size={12} />
+                  键盘未接入
+                </span>
+              )}
               <span className="sim-bar-hint">
-                在画面上点击或拖动即可操作设备
+                点画面：键盘接入 + 触摸；拖动：滑动
               </span>
             </div>
           )}

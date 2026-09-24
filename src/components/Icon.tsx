@@ -71,6 +71,7 @@ type IconName =
   | 'arrow-left'
   | 'arrow-right'
   | 'arrow-up'
+  | 'keyboard'
   | 'undo';
 
 const ICONS: Record<IconName, ReactNode> = {
@@ -166,6 +167,16 @@ const ICONS: Record<IconName, ReactNode> = {
   ),
   /** 状态点。实心，用于线程行的运行/失败指示。 */
   dot: <circle cx="8" cy="8" r="2.75" fill="currentColor" stroke="none" />,
+  // 键盘：机身用圆角矩形（rx 与容器类一致 = 1.5），内部几个按键点。
+  // 内容区控制在 1.75–14.25：x 从 1.75 到 14.25，y 从 4.5 到 11.5
+  // （横向扁形才像键盘，正方形会看成别的东西）。
+  // 按键用短横线而不是方点：小尺寸下 1.4 的描边画方点会糊成一团。
+  keyboard: (
+    <>
+      <rect x="1.75" y="4.5" width="12.5" height="7" rx="1.5" />
+      <path d="M4.4 7h.01M6.8 7h.01M9.2 7h.01M11.6 7h.01M4.8 9.6h6.4" />
+    </>
+  ),
   search: (
     <>
       <circle cx="7.1" cy="7.1" r="4.35" />
