@@ -267,6 +267,31 @@ impl Session {
         Ok(Viewport { width, screen_height, pixel_ratio })
     }
 
+    /// 当前页面栈深度（1 = 在首页）。
+    pub async fn page_stack_depth(&mut self) -> Result<usize, String> {
+        let r = self.call("App.getPageStack", json!({})).await?;
+        Ok(r.get("pageStack").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0))
+    }
+
+    /// 调一个 `wx.*` 接口。
+    ///
+    /// `args` 必须是**数组**（对应 `wx.foo(a, b)` 的位置参数）——实测形状
+    /// 传错会得到 `Uncaught [object Object]`，那条错误对用户没有任何信息量。
+    /// 这里把它翻译成人话。
+    pub async fn call_wx(&mut self, method: &str, args: Value) -> Result<Value, String> {
+        self.call("App.callWxMethod", json!({ "method": method, "args": args }))
+            .await
+            .map_err(|e| {
+                if e.contains("[object Object]") {
+                    format!(
+                        "{method} 被拒绝（当前页面状态不允许这次调用；例如已在首页时不能返回上一页）"
+                    )
+                } else {
+                    e
+                }
+            })
+    }
+
     /// 点一个元素。
     pub async fn tap(&mut self, page_id: &str, element_id: &str) -> Result<(), String> {
         self.call(
@@ -525,6 +550,38 @@ pub fn decode_base64(s: &str) -> Option<Vec<u8>> {
 /// 而不是静默换一个（那会让下次又连不上）。
 pub const AUTO_PORT: u16 = 9420;
 
+/// 自动化端口的候选列表。
+///
+/// # 为什么不能只认 9420
+///
+/// 实测：`cli auto --auto-port 9420` 在 9420 已被占用时**会自己换端口**，
+/// 并在输出里如实报告（`{"autoPort":9421,"requestedAutoPort":9420}`）。
+/// 我们的代码写死 9420，于是连不上——而报出的原因是「服务未启动」，
+/// 与真实原因（端口漂移）差了一层。
+///
+/// 这是「把假设当事实」的老问题（§3.39 记过同类）：端口是**运行时事实**，
+/// 应该探测而不是假定。
+pub fn auto_port_candidates() -> Vec<u16> {
+    vec![9420, 9421, 9422, 9423]
+}
+
+/// 探测实际在监听的自动化端口。都不可用时返回默认值（由调用方报错）。
+pub async fn active_auto_port() -> u16 {
+    for p in auto_port_candidates() {
+        let ok = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            TcpStream::connect(("127.0.0.1", p)),
+        )
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false);
+        if ok {
+            return p;
+        }
+    }
+    AUTO_PORT
+}
+
 /// 从微信开发者工具的数据目录里**推断当前打开的项目**。
 ///
 /// # 数据源是「最近打开列表」，不是日志
@@ -656,15 +713,93 @@ pub async fn ensure_automation(cli: &std::path::Path, project: &std::path::Path)
     Ok(())
 }
 
-/// 自动化端口是否已就绪（能建 TCP 连接即视为就绪）。
+/// 返回上一页（`wx.navigateBack`）。
+///
+/// # ⚠️ 这个接口的响应**不能当作结果**（实测踩坑）
+///
+/// `navigateBack` 在两种情况下返回**完全相同**的响应
+/// `Uncaught [object Object]`：
+///
+/// | 情况 | 响应 | 实际效果 |
+/// |---|---|---|
+/// | 在首页调用 | `Uncaught [object Object]` | 栈深不变（真的失败） |
+/// | 在子页调用 | `Uncaught [object Object]` | **栈深 2 → 1（其实成功了）** |
+///
+/// 也就是说：**它会误报失败**。我第一版把这条错误当失败抛出，
+/// 结果「返回」功能看起来完全无效——而它其实每次都成功了。
+///
+/// 所以这里的判据是**页面栈深度**：
+/// 1. 调用前取栈深；≤1 直接给可读原因（不去调，避免那条无意义的错误）；
+/// 2. 调用后**再取一次栈深**，真的变浅了才算成功。
+///    没有变浅时把上游错误透出去（这时它确实是失败）。
+///
+/// 这与本项目反复记录的教训同源（§3.37/§3.39）：**响应类元信息不可信，
+/// 要看真实状态**。区别是这次错的方向相反——不是"假的成功"，而是"假的失败"。
+pub async fn navigate_back() -> Result<(), String> {
+    let port = active_auto_port().await;
+    let mut s = Session::connect(port)
+        .await
+        .map_err(|e| format!("{e}\n提示：请先在面板上点「重新检测」以启动自动化服务。"))?;
+
+    let before = s.page_stack_depth().await?;
+    if before <= 1 {
+        return Err("已经在首页：没有上一页可返回".to_owned());
+    }
+
+    // 忽略响应里的 error（见上面的说明），只看栈深变化
+    let resp_err = s.call_wx("navigateBack", json!([{ "delta": 1 }])).await.err();
+
+    // 等一小会儿让跳转落地，再确认栈深——这是唯一可信的判据
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let after = Session::connect(port)
+        .await
+        .map_err(|e| format!("确认结果时连接失败：{e}"))?
+        .page_stack_depth()
+        .await?;
+
+    if after < before {
+        return Ok(());
+    }
+    Err(match resp_err {
+        Some(e) => format!("返回失败：{e}"),
+        None => format!("返回后页面栈未变化（仍为 {before} 层）"),
+    })
+}
+
+/// 回到首页（`reLaunch`，会**重置**页面栈）。
+///
+/// 与「返回」分开：`navigateBack` 只退一层，而用户在深栈里常想一步回首页。
+/// 实测 `reLaunch` 返回 `{"errMsg":"reLaunch:ok"}` 且栈深变为 1。
+pub async fn re_launch_home() -> Result<(), String> {
+    let port = active_auto_port().await;
+    let mut s = Session::connect(port)
+        .await
+        .map_err(|e| format!("{e}\n提示：请先在面板上点「重新检测」以启动自动化服务。"))?;
+    // `reLaunch` 的响应是可信的（实测 `{"errMsg":"reLaunch:ok"}`），
+    // 不像 `navigateBack` 会误报。这里仍然按响应判断。
+    s.call_wx("reLaunch", json!([{ "url": "/pages/index" }])).await?;
+    Ok(())
+}
+
+/// 自动化端口是否已就绪（任一候选端口能连上即视为就绪）。
+///
+/// 注意「就绪」的定义是**能建 TCP 连接**，不是「服务健康」——后者要靠
+/// 真发一个请求才知道。之前踩过：连接能建但服务端不响应（§3.36 的
+/// 「一次只服务一个连接」），所以真正的可用性由调用方按请求结果判断。
 pub async fn is_ready() -> bool {
-    tokio::time::timeout(
-        std::time::Duration::from_millis(800),
-        TcpStream::connect(("127.0.0.1", AUTO_PORT)),
-    )
-    .await
-    .map(|r| r.is_ok())
-    .unwrap_or(false)
+    for p in auto_port_candidates() {
+        let ok = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            TcpStream::connect(("127.0.0.1", p)),
+        )
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false);
+        if ok {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

@@ -117,19 +117,27 @@ echo "✓ IDE 服务端口：$IDE_PORT"
 # ── ③ 项目 ────────────────────────────────────────────────────────────
 PROJECT="${MP_PROJECT:-}"
 if [[ -z "$PROJECT" ]]; then
-  # 从工具日志尾部推断：找第一个含 project.config.json 的目录。
-  # 日志格式随版本可能变，所以这只是便利——失败时让人显式指定。
-  LATEST_LOG="$(ls -t "$HOME/Library/Application Support/微信开发者工具"/*/WeappLog/*.log 2>/dev/null | head -1)"
-  if [[ -n "$LATEST_LOG" ]]; then
+  # 来源：`WeappLocalData/ls_<hash>.json` —— 开发者工具的**最近项目列表**
+  # （按最近使用排序的路径数组）。
+  #
+  # ⚠️ 这里曾经读 `WeappLog/*.log`，那是**失效的**：本机当前版本的日志不在
+  # 那里（`WeappLog` 只剩旧文件）。用不存在的路径做推断 = 永远推断不出来，
+  # 而表现只是「未确定项目」，看起来像用户没打开项目。
+  # Rust 侧（miniprogram.rs 的 discover_project）已用同一来源，两处保持一致。
+  #
+  # 判据是**目录下真的有 project.config.json**，不是路径里含某个词。
+  while IFS= read -r f; do
     while IFS= read -r cand; do
-      d="$cand"
-      for _ in 1 2 3 4 5 6; do
-        if [[ -f "$d/project.config.json" ]]; then PROJECT="$d"; break 2; fi
-        d="$(dirname "$d")"
-        [[ "$d" == "/" || "$d" == "." ]] && break
-      done
-    done < <(grep -oE '/[A-Za-z0-9_./\u4e00-\u9fa5-]+' "$LATEST_LOG" 2>/dev/null | sort -u | head -400)
-  fi
+      [[ -n "$cand" && -f "$cand/project.config.json" ]] && { PROJECT="$cand"; break 2; }
+    done < <(python3 -c "
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    for x in (d if isinstance(d,list) else []):
+        if isinstance(x,str): print(x)
+except Exception: pass
+" "$f" 2>/dev/null)
+  done < <(ls -t "$HOME/Library/Application Support/微信开发者工具"/*/WeappLocalData/ls_*.json 2>/dev/null)
 fi
 if [[ -z "$PROJECT" || ! -f "$PROJECT/project.config.json" ]]; then
   echo "✗ 未确定小程序项目目录" >&2

@@ -2730,9 +2730,30 @@ pub async fn input(platform: Platform, id: &str, action: &str, t: Touch) -> Resu
         Platform::Android => input_android(id, action, t).await,
         Platform::Ios => input_ios(id, action, t).await,
         Platform::Harmony => input_harmony(id, action, t).await,
-        Platform::Miniprogram => {
-            Err("小程序尚未接入触摸注入（需要开发者工具的服务端口自动化会话）".to_owned())
-        }
+        Platform::Miniprogram => input_miniprogram(action).await,
+    }
+}
+
+/// 小程序的输入：**只有元素级点击**（协议没有坐标触摸），
+/// 但硬件键（返回/回首页）走 `wx` 接口，是另一条路。
+///
+/// # 能力边界（实测，2026-09-24）
+///
+/// - ✅ `Element.tap`（界面叠热区，按元素点）
+/// - ❌ 坐标触摸 `Page.touchstart`（unimplemented）
+/// - ✅ `navigateBack` / `reLaunch`（栈深 >1 时返回生效，实测 2 层 → 1 层）
+/// - ❌ 滑动（没有坐标触摸，也没有可注入的滚动接口；`scroll-view.scrollTo`
+///   是元素方法，只能对**指定的** scroll-view 用，不能表达"用户在画面上滑了一下"）
+async fn input_miniprogram(action: &str) -> Result<(), String> {
+    match action {
+        "back" => crate::miniprogram::navigate_back().await,
+        "home" => crate::miniprogram::re_launch_home().await,
+        // 点击不经过这里：界面直接调 `simulator_miniprogram_tap`（元素级）。
+        // 若走到这里说明前端发了一个小程序不支持的触摸动作（如 tap 带坐标）。
+        other => Err(format!(
+            "小程序不支持「{other}」这类触摸：协议没有坐标触摸。\
+             请直接点画面上的元素（界面已叠热区）。"
+        )),
     }
 }
 
@@ -4440,5 +4461,92 @@ mod mp_elements_live {
             page.elements.iter().any(|e| e.top > 1.0),
             "至少应有元素不在页面顶端（位置没取到时会全是 0）"
         );
+    }
+}
+
+#[cfg(test)]
+mod mp_nav_live {
+    //! 小程序「返回 / 回首页」的端到端验证（需自动化服务在跑）。
+    //!
+    //! 判据用**页面栈深度**，不用「命令返回成功」——本项目已四次踩到
+    //! 「返回成功但不生效」（§3.39 等）。返回的真实效果就是栈浅了一层。
+    use super::*;
+
+    async fn depth() -> usize {
+        let port = crate::miniprogram::active_auto_port().await;
+        let mut s = crate::miniprogram::Session::connect(port).await.expect("应能连上");
+        s.page_stack_depth().await.unwrap_or(0)
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn back_is_refused_on_home_and_works_after_navigating() {
+        if !crate::miniprogram::is_ready().await {
+            eprintln!("跳过：自动化服务未就绪");
+            return;
+        }
+        // 先回首页，保证起始状态确定
+        crate::miniprogram::re_launch_home().await.expect("应能回首页");
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert_eq!(depth().await, 1, "回首页后栈深应为 1");
+
+        // 首页调返回：必须给**可读**原因，而不是上游那条 [object Object]
+        let err = input(Platform::Miniprogram, "x", "back", Touch::tap(0, 0))
+            .await
+            .expect_err("首页不应允许返回");
+        eprintln!("首页返回被拒：{err}");
+        assert!(err.contains("首页"), "错误应说明已在首页: {err}");
+        assert!(!err.contains("object Object"), "不该透出上游不可读错误: {err}");
+
+        // 进子页：逐个点前几个可点元素，直到栈深 >1（不确定哪个会跳转，
+        // 因为页面内容随 demo 版本变——所以用**栈深**而不是具体文案做判据）
+        let page = miniprogram_elements().await.expect("应能取元素");
+        let port = crate::miniprogram::active_auto_port().await;
+        let mut entered = false;
+        for el in page.elements.iter().take(8) {
+            let Ok(mut s) = crate::miniprogram::Session::connect(port).await else { break };
+            let (pid, _) = match s.current_page().await { Ok(v) => v, Err(_) => break };
+            let _ = s.tap(&pid, &el.id).await;
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            if depth().await > 1 {
+                eprintln!("点「{}」进入了子页", el.text);
+                entered = true;
+                break;
+            }
+        }
+
+        if !entered {
+            eprintln!("⚠ 这些元素都没触发跳转，只验证了首页分支（返回必须被拒）");
+            return;
+        }
+
+        // 子页调返回：栈深必须真的回落（这是判据，不是「命令返回成功」）
+        let before = depth().await;
+        input(Platform::Miniprogram, "x", "back", Touch::tap(0, 0))
+            .await
+            .expect("子页应能返回");
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let after = depth().await;
+        eprintln!("返回：栈深 {before} → {after}");
+        assert!(after < before, "返回必须真的退栈（{before} → {after}）");
+
+        // 再调一次：此时已在首页，必须给可读原因
+        let err = input(Platform::Miniprogram, "x", "back", Touch::tap(0, 0))
+            .await
+            .expect_err("已在首页时应拒绝");
+        assert!(err.contains("首页"), "应说明已在首页: {err}");
+        eprintln!("✓ 返回链路全部验证通过");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn port_probe_finds_the_running_service() {
+        if !crate::miniprogram::is_ready().await {
+            eprintln!("跳过：自动化服务未就绪");
+            return;
+        }
+        let p = crate::miniprogram::active_auto_port().await;
+        eprintln!("探测到的自动化端口 = {p}");
+        assert!(crate::miniprogram::auto_port_candidates().contains(&p));
     }
 }
