@@ -759,9 +759,15 @@ pub fn ios_status(developer_dir: &str, simctl_found: bool) -> PlatformStatus {
     } else {
         "已安装的开发者目录里没有 simctl"
     };
+    // ⚠️ 提示里**不写死路径**。曾经的文案是
+    // `sudo xcode-select -s /Applications/Xcode.app`——而把 Xcode 装在外置卷
+    // 或改过名的用户照做会失败（本机 `/Applications` 下就没有 Xcode）。
+    // 改为说明两种解法，并指向本面板的自定义路径：那是唯一对任何安装位置
+    // 都成立的做法。
     PlatformStatus::unavailable(format!(
-        "{hint}。安装完整 Xcode 后执行 `sudo xcode-select -s /Applications/Xcode.app` \
-         即可使用 iOS 模拟器。"
+        "{hint}。两种解法：① 装完整 Xcode 后执行 `sudo xcode-select -s <你的 Xcode.app>/Contents/Developer`；\
+         ② 若 Xcode 已装在别处（外置卷、改名），在本面板的「自定义路径」里直接指定它——\
+         那不会改动系统设置。"
     ))
 }
 
@@ -836,18 +842,40 @@ pub fn short_key(key: &str) -> String {
 /// 也如实说明——两者对用户的下一步动作不同，糊成一句「不可用」等于让他
 /// 自己去猜。
 pub fn miniprogram_status(devtools_found: bool) -> PlatformStatus {
+    miniprogram_status_with(devtools_found, None, ToolSource::Discovered)
+}
+
+/// 同上，但带上「工具在哪、怎么找到的」。
+///
+/// 分开是为了让测试仍能只传一个布尔（`miniprogram_status`），
+/// 而探测路径额外把**路径与来源**交给界面——用户装了多份开发者工具、
+/// 或装在非默认位置时，这是唯一能解释「它检测到的是哪一个」的线索。
+pub fn miniprogram_status_with(
+    devtools_found: bool,
+    tool_at: Option<&Path>,
+    source: ToolSource,
+) -> PlatformStatus {
     if !devtools_found {
         return PlatformStatus::unavailable(
             "未找到微信开发者工具。小程序模拟器由它提供（不是独立设备）：\
              从 https://developers.weixin.qq.com/miniprogram/dev/devtools/download.html \
-             安装后即可在其中的「模拟器」区域预览。",
+             安装后即可在其中的「模拟器」区域预览；\
+             若它装在非默认位置（外置卷、改名），可在本面板的「自定义路径」里直接指定。",
         );
     }
-    PlatformStatus::unavailable(
+    let mut st = PlatformStatus::unavailable(
         "已安装微信开发者工具，但取画面尚未接入。小程序模拟器是开发者工具窗口内的\
          渲染区（不是独立进程），取画面需要在工具里开启「设置 → 安全设置 → 服务端口」\
          后由 CLI 建立自动化会话；这一步尚未实现。",
-    )
+    );
+    st.tool = tool_at.map(|p| {
+        let shown = p.display().to_string();
+        match source {
+            ToolSource::Override => format!("{shown}（手动指定）"),
+            _ => format!("{shown}（自动发现）"),
+        }
+    });
+    st
 }
 
 /// 把界面坐标换算成设备坐标。/// 把界面坐标换算成设备坐标。
@@ -886,6 +914,72 @@ pub fn to_device_coords(
     Some((clamp(x, dev_w), clamp(y, dev_h)))
 }
 
+/// 当前生效的 override（进程级）。
+///
+/// # 为什么用全局而不是逐层传参
+///
+/// 这些路径被约 10 个函数用到（探测、启动、停止、取帧、触摸、截图），
+/// 逐层传参要给每个签名都加一个参数、并改所有调用点——而它是**进程级的
+/// 配置**（一个用户在设置里指定一次，全部生效），不存在「同一进程里
+/// 两套不同 override」的真实需求。
+///
+/// 用 `Mutex` 而不是 `OnceLock`：用户改设置后要能立刻生效。
+static OVERRIDES: std::sync::Mutex<Option<ToolOverrides>> = std::sync::Mutex::new(None);
+
+/// 设置 override（由宿主层在读取设置文件、以及用户保存时调用）。
+pub fn set_overrides(ov: ToolOverrides) {
+    *OVERRIDES.lock().unwrap_or_else(|e| e.into_inner()) = Some(ov.normalized());
+}
+
+/// 当前 override（未设置时全为 `None`，即纯自动发现）。
+fn overrides() -> ToolOverrides {
+    OVERRIDES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default()
+}
+
+/// override 文件的路径（`<app_data>/tool-paths.json`）。
+///
+/// 放应用数据目录而不是 `CODEX_HOME`：这是**我们自己的**配置（与 codex 无关），
+/// 混进 codex 的目录会让「哪些是上游状态、哪些是我们的」变模糊。
+pub fn overrides_path(app_data: &Path) -> PathBuf {
+    app_data.join("tool-paths.json")
+}
+
+/// 从磁盘读 override 并设为当前生效值。文件不存在或损坏时用空值。
+///
+/// **不因损坏而报错**：一份坏掉的配置文件不该让整个模拟器面板不可用——
+/// 那会让用户连「哪里坏了」都看不到。退回自动发现，用户仍能用，
+/// 而清空设置重新指定即可。
+pub fn load_overrides(app_data: &Path) -> ToolOverrides {
+    let p = overrides_path(app_data);
+    let ov = std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|t| serde_json::from_str::<ToolOverrides>(&t).ok())
+        .unwrap_or_default()
+        .normalized();
+    set_overrides(ov.clone());
+    ov
+}
+
+/// 保存 override 并立即生效。
+///
+/// 立即调 `set_overrides` 而不是等下次启动：用户点「保存」后通常会立刻点
+/// 「重新检测」，那时必须已生效，否则他会以为保存失败。
+pub fn save_overrides(app_data: &Path, ov: ToolOverrides) -> Result<ToolOverrides, String> {
+    let ov = ov.normalized();
+    let p = overrides_path(app_data);
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("创建配置目录失败：{e}"))?;
+    }
+    let text = serde_json::to_string_pretty(&ov).map_err(|e| format!("序列化设置失败：{e}"))?;
+    std::fs::write(&p, text).map_err(|e| format!("写入 {} 失败：{e}", p.display()))?;
+    set_overrides(ov.clone());
+    Ok(ov)
+}
+
 /// 在候选路径里找一个存在**且可执行**的文件。
 ///
 /// 分成纯函数是为了能测「都没找到」与「找到但不是可执行」两种情形——
@@ -895,6 +989,269 @@ pub fn first_executable<S: AsRef<Path>>(candidates: &[S], is_exec: impl Fn(&Path
         .iter()
         .map(|c| c.as_ref().to_path_buf())
         .find(|p| is_exec(p))
+}
+
+// ── 开发者工具路径：自动发现 + 手动兜底 ─────────────────────────────────
+
+/// 开发者**手动指定**的工具路径（兜底）。
+///
+/// # 为什么必须有手动兜底
+///
+/// 自动发现只能覆盖「常见位置 + 常见命名」。实测踩到两类漏网，且都不是
+/// 罕见用法：
+///
+/// 1. **装在外置卷**：本机 Xcode 在
+///    `/Volumes/data1/applications/Xcode.app`、微信开发者工具在
+///    `/Volumes/data1/applications/wechatwebdevtools.app`，
+///    而固定的 `/Applications` 下一个都找不到。
+/// 2. **改过名字**：同一台机器上微信开发者工具有两种目录名
+///    （`wechatwebdevtools.app` 与 `微信开发者工具（NWJS）.app`）。
+///
+/// 任何自动搜索都会漏（命名约定会变、卷会挂载在不同的地方），
+/// 所以最终必须能让人**直接指定**。发现失败时的提示会指向这里。
+///
+/// 存于 `app_data/tool-paths.json`，缺失即全为 `None`（不写默认值，
+/// 这样「文件不存在」与「用户清空了某一项」可以区分）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ToolOverrides {
+    /// Android SDK 目录（其下应有 `platform-tools/adb`）。
+    pub android_sdk: Option<String>,
+    /// **Xcode.app 本身**（不是 `Contents/Developer` 那一层——由我们推导，
+    /// 让用户填的东西与他在访达里看到的一致）。
+    pub xcode: Option<String>,
+    /// HarmonyOS SDK 目录（其下应有 `openharmony/<版本>/toolchains/hdc`）。
+    pub harmony_sdk: Option<String>,
+    /// 微信开发者工具 `.app`。
+    pub miniprogram: Option<String>,
+}
+
+impl ToolOverrides {
+    /// 去掉空白项：界面清空输入框时传 `""`，语义应等同「未设置」。
+    ///
+    /// 不这么做的话，`Some("")` 会被当成一个有效路径去 join，得到相对路径
+    /// ——表现为「明明清空了却还是找不到工具」，且不报错。
+    pub fn normalized(mut self) -> Self {
+        fn clean(v: Option<String>) -> Option<String> {
+            v.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+        }
+        self.android_sdk = clean(self.android_sdk);
+        self.xcode = clean(self.xcode);
+        self.harmony_sdk = clean(self.harmony_sdk);
+        self.miniprogram = clean(self.miniprogram);
+        self
+    }
+
+    /// 是否设了任何一项（界面据此显示「已自定义」标记）。
+    pub fn any_set(&self) -> bool {
+        self.android_sdk.is_some()
+            || self.xcode.is_some()
+            || self.harmony_sdk.is_some()
+            || self.miniprogram.is_some()
+    }
+}
+
+/// 一个工具路径的**来源**，用于在界面上说清「为什么用的是这个」。
+///
+/// 三种来源的处置完全不同：手动指定错了要改设置；自动发现的可能不是
+/// 用户想要的那一份（机器上装了两个 Xcode 时）；系统选中项的改动是
+/// 全局的、不该被我们悄悄改。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ToolSource {
+    /// 开发者手动指定（优先级最高）。
+    Override,
+    /// 环境变量（如 `ANDROID_HOME`、`HDC_HOME`）。
+    Env,
+    /// 约定位置或自动扫描发现。
+    Discovered,
+    /// 系统当前选中（仅 Xcode：`xcode-select -p`）。
+    Selected,
+}
+
+/// 一条已解析的工具路径。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedTool {
+    pub path: String,
+    pub source: ToolSource,
+}
+
+/// 名字是否像 Xcode。
+///
+/// 子串 `xcode` + 后缀 `.app`：覆盖 `Xcode.app` 与 `Xcode-beta.app`。
+/// **不能**只判全等——beta 版与改名后的副本都会被漏掉。
+pub fn matches_xcode_app(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.starts_with("xcode") && n.ends_with(".app")
+}
+
+/// 名字是否是微信开发者工具。
+///
+/// **必须容忍命名变体**：本机实测同时存在 `wechatwebdevtools.app` 与
+/// `微信开发者工具（NWJS）.app` 两种目录名（后者带后缀括号）。
+///
+/// ⚠️ **不能放宽到「任何 *开发者工具」**：本机还装着支付宝的
+/// `小程序开发者工具.app`（`com.ant.miniprogram`）与京东的
+/// `jdvappdevtools.app`——它们名字里都带「开发者工具」，但都不是微信的。
+/// 认错了会让用户以为检测到了自己的工具，实际调的是别家。
+pub fn matches_miniprogram_app(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.contains("wechatwebdevtools") || name.contains("微信开发者工具")
+}
+
+/// 目录名是否是一个「应用目录」（放 `.app` 的目录）。
+///
+/// 实测的三种写法都要认：`Applications`、`applications`（外置卷上常见
+/// Linux 风格小写）、`office-applications`（自建目录）。
+fn is_applications_dir(name: &str) -> bool {
+    name.to_lowercase().contains("applications")
+}
+
+/// 列出目录下的子目录路径（不存在或不可读时给空表，不报错）。
+fn subdirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// 可能存放 `.app` 的应用目录。
+///
+/// # 为什么要扫外置卷（实测需求）
+///
+/// 开发者的工具装在外置盘上（本机即如此），固定的 `/Applications` 找不到。
+/// 扫描深度刻意限制：只在每个卷下找**名字带 `applications` 的目录**，
+/// 最多两层。这样两种实测布局都能覆盖：
+///
+/// ```text
+/// /Volumes/data1/applications/Xcode.app              ← 卷下第一层
+/// /Volumes/data1/work/office-applications/Xcode.app   ← 卷下第二层
+/// ```
+///
+/// 不遍历整盘：`/Volumes` 下可能有几十万个文件的大目录，而这里只需要
+/// 知道「哪些目录里放应用」。实测本机 5 个卷耗时约 40ms。
+fn app_roots() -> Vec<PathBuf> {
+    // 标准位置优先：用户**没改过任何东西**时应该命中这里。
+    let mut roots = vec![PathBuf::from("/Applications")];
+    if let Some(home) = std::env::var_os("HOME") {
+        roots.push(PathBuf::from(home).join("Applications"));
+    }
+
+    let mut extra: Vec<PathBuf> = Vec::new();
+    for vol in subdirs(Path::new("/Volumes")) {
+        // 跳过启动卷：它的 `/Applications` 就是上面第一项，
+        // 而 `System/Applications` 里全是系统自带应用（不可能是开发工具）。
+        // 不跳的代价是白读几百个目录项，且会把系统卷排到用户卷前面。
+        let is_boot = std::fs::symlink_metadata(&vol)
+            .map(|m| {
+                use std::os::unix::fs::MetadataExt;
+                // 启动卷在 macOS 上通常是 `/` 的同一设备
+                let root_dev = std::fs::metadata("/").map(|r| r.dev()).unwrap_or(0);
+                m.dev() == root_dev
+            })
+            .unwrap_or(false);
+        if is_boot {
+            continue;
+        }
+        // 卷根下直接叫 Applications 的
+        for sub in subdirs(&vol) {
+            let name = sub.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if is_applications_dir(&name) {
+                extra.push(sub.clone());
+            }
+            // 再下一层（`<卷>/work/office-applications` 这类自建布局）
+            for sub2 in subdirs(&sub) {
+                let n2 = sub2.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if is_applications_dir(&n2) {
+                    extra.push(sub2);
+                }
+            }
+        }
+    }
+
+    // **确定性**：`read_dir` 的顺序不保证稳定，而这里有多个候选时
+    // 「选哪个」会直接影响结果——本机装了两份可用的 Xcode，实测两次运行
+    // 就可能选到不同那份（版本也可能不同）。排序让它可复现。
+    extra.sort();
+    roots.append(&mut extra);
+
+    roots.retain(|p| p.is_dir());
+    roots.dedup();
+    roots
+}
+
+/// 「应用目录」扫描结果的缓存。
+///
+/// # 为什么缓存
+///
+/// 扫描约 40ms（本机 5 个卷），而 iOS 取帧轮询是 **600ms 一次**——
+/// 每帧都扫是不可接受的。缓存后只有在首次调用与用户点「重新检测」时扫描。
+///
+/// 用 `Mutex<Option<_>>` 而不是 `OnceLock`：需要能失效（新插了移动硬盘时
+/// 用户会点重新检测，那时应该真的重扫）。
+static APP_ROOTS: std::sync::Mutex<Option<Vec<PathBuf>>> = std::sync::Mutex::new(None);
+
+fn app_roots_cached() -> Vec<PathBuf> {
+    let mut guard = APP_ROOTS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(v) = guard.as_ref() {
+        return v.clone();
+    }
+    let v = app_roots();
+    *guard = Some(v.clone());
+    v
+}
+
+/// 让下一次扫描重新读盘（用户点「重新检测」时调用）。
+pub fn invalidate_app_roots() {
+    *APP_ROOTS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// 在应用目录里找**所有**名字匹配且通过校验的 `.app`（顺序稳定）。
+///
+/// 返回全部而不是第一个：装了多份同类工具时（本机就有两份 Xcode）
+/// 「沉默地挑了其中一个」等于让用户面对一个无法解释的选择——界面上
+/// 需要能看到还有别的候选，并用自定义路径指定想用哪一份。
+pub fn find_apps(matches: impl Fn(&str) -> bool, verify: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for root in app_roots_cached() {
+        let Ok(entries) = std::fs::read_dir(&root) else { continue };
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                p.is_dir() && matches(&name)
+            })
+            .collect();
+        // 目录内的顺序不保证稳定，排序让结果可复现（同一台机器每次给同一个）
+        found.sort();
+        out.extend(found.into_iter().filter(|p| verify(p)));
+    }
+    out
+}
+
+/// 只取第一个候选（不需要告知「还有别的」时用）。
+pub fn find_app(matches: impl Fn(&str) -> bool, verify: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    find_apps(matches, verify).into_iter().next()
+}
+
+/// 由 `Xcode.app` 推导开发者目录（`Contents/Developer`）。
+///
+/// 纯函数：界面让用户填的是他在访达里看到的那个 `.app`，
+/// 而 `xcrun` 需要的是里层目录——这个转换只该有一处。
+pub fn xcode_developer_dir(app: &Path) -> PathBuf {
+    app.join("Contents").join("Developer")
+}
+
+/// `Xcode.app` 里是否真有可用的 simctl。
+///
+/// 只判 `.app` 存在是不够的：残包、仅有壳的副本、下载中断的安装都会
+/// 「存在但不可用」，那时给出「已找到 Xcode」比找不到更误导。
+fn xcode_is_usable(app: &Path) -> bool {
+    xcode_developer_dir(app).join("usr").join("bin").join("simctl").is_file()
 }
 
 // ── 命令层（实际执行外部工具）──────────────────────────────────────────
@@ -907,7 +1264,30 @@ use tokio::process::Command;
 /// **必须有**：`adb` 在设备 offline 时不会失败，而是**一直阻塞**
 /// （等设备回来）。没有超时的话界面会永远转圈，而用户不知道在等什么。
 /// 3 秒对本地 adb 足够（实测 `screencap` 单帧 350ms）。
+///
+/// ⚠️ **不适用于 `simctl`**——见 `SIMCTL_TIMEOUT`。
 const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// `xcrun simctl` 的超时上限：**必须比 3 秒宽松得多**。
+///
+/// # 为什么单独一个常量（实测数字）
+///
+/// `simctl` 首次调用要启动 CoreSimulatorService，冷启动实测：
+///
+/// | 情形 | 耗时 |
+/// |---|---|
+/// | 冷启动（服务未起） | **4.2 s** |
+/// | 第二次 | 1.4 s |
+/// | 其后 | 0.3 s |
+///
+/// 用 3 秒的 `CMD_TIMEOUT` 时，**冷启动那次必然超时**，而超时被吞成
+/// 「没有设备」——界面表现为「iOS 可用但设备列表是空的」，看起来像检测
+/// 逻辑坏了，实际只是阈值太紧。这个坑是把 iOS 工具链接通后才暴露的：
+/// 在此之前 iOS 根本不可用，所以从没跑到这一步。
+///
+/// 取 30 秒：远大于冷启动的 4.2 秒（给更慢的机器与更多设备留余量），
+/// 又远小于「永久阻塞」——真挂住时用户等半分钟拿到明确报错，好过一直转圈。
+const SIMCTL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// 启动模拟器允许更长：冷启动要十几秒，但命令本身立刻返回（我们不等待启动完成）。
 const LAUNCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -928,28 +1308,57 @@ fn is_executable(p: &Path) -> bool {
 
 /// 定位 Android SDK 目录。
 ///
-/// 顺序：环境变量 → macOS 默认位置 → `~/Android/Sdk`。
-/// 不猜更多路径：猜错的后果是「找到一半」（比如只有 emulator 没有 adb），
-/// 那比明确报告未安装更难排查。
-fn android_sdk() -> Option<PathBuf> {
-    let mut cands: Vec<PathBuf> = vec![];
+/// 顺序：**手动指定** → 环境变量 → 约定位置（`~/Library/Android/sdk` 等）
+/// → 外置卷里的 Android SDK 候选目录。
+///
+/// 最后一步是为「把 SDK 装在外置盘」准备的：只在前面都落空时才扫，
+/// 因此常规机器上不会付这份成本。
+fn android_sdk() -> Option<(PathBuf, ToolSource)> {
+    let ov = overrides();
+    let ok = |p: &Path| p.join("platform-tools").join("adb").exists();
+
+    if let Some(p) = ov.android_sdk.as_ref().map(PathBuf::from) {
+        // 手动指定的**不静默回退**：填错了要明确报出来（在 probe 里），
+        // 否则用户会以为自己填的生效了、实际用的是别处那个。
+        return Some((p, ToolSource::Override));
+    }
+
+    let mut env_cands: Vec<PathBuf> = vec![];
     for var in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
         if let Ok(v) = std::env::var(var) {
             if !v.trim().is_empty() {
-                cands.push(PathBuf::from(v));
+                env_cands.push(PathBuf::from(v));
             }
         }
     }
+    if let Some(p) = env_cands.into_iter().find(|p| ok(p)) {
+        return Some((p, ToolSource::Env));
+    }
+
+    let mut fixed: Vec<PathBuf> = vec![];
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
-        cands.push(home.join("Library/Android/sdk"));
-        cands.push(home.join("Android/Sdk"));
+        fixed.push(home.join("Library/Android/sdk"));
+        fixed.push(home.join("Android/Sdk"));
     }
-    cands.into_iter().find(|p| p.join("platform-tools").join("adb").exists())
+    if let Some(p) = fixed.into_iter().find(|p| ok(p)) {
+        return Some((p, ToolSource::Discovered));
+    }
+
+    // 外置卷：名字像 SDK 且确实含 platform-tools/adb 的目录
+    let found = find_app(
+        |name| {
+            let n = name.to_lowercase();
+            n.contains("android") && !n.ends_with(".app")
+        },
+        |p| ok(p),
+    );
+    found.map(|p| (p, ToolSource::Discovered))
 }
 
+/// adb 路径（找不到 SDK 时回退到 PATH 上的常见位置）。
 fn adb_path() -> Option<PathBuf> {
-    if let Some(sdk) = android_sdk() {
+    if let Some((sdk, _)) = android_sdk() {
         let p = sdk.join("platform-tools").join("adb");
         if is_executable(&p) {
             return Some(p);
@@ -959,7 +1368,7 @@ fn adb_path() -> Option<PathBuf> {
 }
 
 fn emulator_path() -> Option<PathBuf> {
-    let sdk = android_sdk()?;
+    let (sdk, _) = android_sdk()?;
     let p = sdk.join("emulator").join("emulator");
     if is_executable(&p) {
         Some(p)
@@ -971,7 +1380,14 @@ fn emulator_path() -> Option<PathBuf> {
 /// 跑一条命令并收集 stdout（超时即杀，**不等待**）。
 async fn run_stdout(program: &Path, args: &[&str], timeout: std::time::Duration) -> Result<String, String> {
     let mut cmd = Command::new(program);
-    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    cmd.args(args);
+    run_command(cmd, timeout).await
+}
+
+/// 命令执行的实际实现（`run_stdout` 与 `run_xcrun` 共用）。
+async fn run_command(mut cmd: Command, timeout: std::time::Duration) -> Result<String, String> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    let shown = format!("{:?}", cmd.as_std().get_program());
     let fut = cmd.output();
     match tokio::time::timeout(timeout, fut).await {
         Ok(Ok(out)) if out.status.success() => {
@@ -979,19 +1395,126 @@ async fn run_stdout(program: &Path, args: &[&str], timeout: std::time::Duration)
         }
         Ok(Ok(out)) => {
             let err = String::from_utf8_lossy(&out.stderr);
-            Err(format!("{} 退出码 {:?}：{}", program.display(), out.status.code(), err.trim()))
+            Err(format!("{shown} 退出码 {:?}：{}", out.status.code(), err.trim()))
         }
-        Ok(Err(e)) => Err(format!("执行 {} 失败：{e}", program.display())),
+        Ok(Err(e)) => Err(format!("执行 {shown} 失败：{e}")),
         Err(_) => Err(format!(
-            "{} 超过 {} 秒未返回（设备可能无响应）",
-            program.display(),
+            "{shown} 超过 {} 秒未返回（设备可能无响应）",
             timeout.as_secs()
         )),
     }
 }
 
+/// 跑一条 `xcrun ...`，带上解析出的 `DEVELOPER_DIR`。
+///
+/// # 为什么注入环境变量而不是改 `xcode-select`
+///
+/// `xcode-select -s` 改的是**系统全局**状态，影响用户所有构建工具；
+/// 而且一旦 Xcode 装在外置卷上、卷没挂载，其它工具会连带一起坏
+/// （报错的现场与根因隔了一层，极难排查）。`DEVELOPER_DIR` 只作用于
+/// **本进程启动的这个子进程**，这正是我们需要的边界。
+///
+/// `dev_dir` 为 `None` 时不给环境变量——那表示系统当前选中的那份本身可用。
+async fn run_xcrun(
+    dev_dir: Option<&Path>,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    let mut cmd = Command::new("/usr/bin/xcrun");
+    cmd.args(args);
+    if let Some(d) = dev_dir {
+        cmd.env("DEVELOPER_DIR", d);
+    }
+    run_command(cmd, timeout).await
+}
+
+/// iOS 工具链的解析结果。
+struct IosToolchain {
+    /// 要注入子进程的 `DEVELOPER_DIR`；`None` = 系统当前选中的那份即可用。
+    developer_dir: Option<PathBuf>,
+    /// 是否已确认 `simctl` 可用。
+    simctl: bool,
+    /// 当前开发者目录（给界面展示）。
+    dev_dir_display: Option<String>,
+    /// 这份工具链是怎么来的（给界面展示）。
+    note: String,
+}
+
+/// 解析 iOS 工具链：手动指定 → 系统选中 → 自动发现。
+///
+/// # 为什么不缓存
+///
+/// 一次解析要跑 `xcode-select -p`（约 10ms）与一次应用目录扫描
+/// （首次约 40ms，其后走缓存）。它只在 iOS 的探测/取帧路径上，取帧间隔
+/// 600ms——10ms 是 1.7%，换来的是**改设置立刻生效**，且没有「缓存过期」
+/// 这类只在换工具时才显形的问题。
+async fn resolve_ios() -> IosToolchain {
+    let ov = overrides();
+    // ① 手动指定：最高优先级。**即使不可用也不回退**——填错了要明确报出来
+    //    （静默换成另一份会让用户以为设置生效了，那是最难查的一类）。
+    if let Some(p) = ov.xcode.as_deref() {
+        let dir = xcode_developer_dir(Path::new(p));
+        let ok = dir.join("usr").join("bin").join("simctl").is_file();
+        return IosToolchain {
+            developer_dir: Some(dir.clone()),
+            simctl: ok,
+            dev_dir_display: Some(dir.display().to_string()),
+            note: if ok {
+                format!("手动指定 {p}")
+            } else {
+                format!("手动指定的 Xcode 里没有 simctl：{p}")
+            },
+        };
+    }
+
+    // ② 系统当前选中的（`xcode-select -p`）。
+    let selected = run_stdout(Path::new("/usr/bin/xcode-select"), &["-p"], CMD_TIMEOUT)
+        .await
+        .unwrap_or_default();
+    let selected = selected.trim().to_owned();
+    if !selected.is_empty() && Path::new(&selected).join("usr/bin/simctl").is_file() {
+        return IosToolchain {
+            developer_dir: None,
+            simctl: true,
+            dev_dir_display: Some(selected),
+            note: "系统选中".to_owned(),
+        };
+    }
+
+    // ③ 自动发现：只在系统那份不可用时才找。若为「已选中且可用」的情况
+    //    去翻别的 Xcode，反而可能用上一份与用户系统设置不同的版本。
+    let candidates = find_apps(matches_xcode_app, xcode_is_usable);
+    if let Some(app) = candidates.first() {
+        let dir = xcode_developer_dir(app);
+        // 多个候选时把数量说出来：本机有两份 Xcode，静默选一个会让人
+        // 在别的界面看到不一致的版本却找不到原因。自定义路径可指定。
+        let note = if candidates.len() > 1 {
+            format!("自动发现 {}（共 {} 份，可在自定义路径里指定）", app.display(), candidates.len())
+        } else {
+            format!("自动发现 {}", app.display())
+        };
+        return IosToolchain {
+            developer_dir: Some(dir.clone()),
+            simctl: true,
+            dev_dir_display: Some(dir.display().to_string()),
+            note,
+        };
+    }
+
+    IosToolchain {
+        developer_dir: None,
+        simctl: false,
+        dev_dir_display: if selected.is_empty() { None } else { Some(selected) },
+        note: String::new(),
+    }
+}
+
 /// 探测本机模拟器可用性。
 pub async fn probe() -> SimulatorStatus {
+    // 探测时让应用目录扫描重来一遍：用户点「重新检测」最可能的情形正是
+    // **刚插上装了工具的移动硬盘**，或刚把工具拖到新位置。缓存只服务于
+    // 取帧轮询（600ms 一次，每次重扫 40ms 会明显拖累）。
+    invalidate_app_roots();
     SimulatorStatus {
         android: probe_android().await,
         ios: probe_ios().await,
@@ -1024,6 +1547,19 @@ fn read_avd_config(avd: &str) -> Option<String> {
 }
 
 async fn probe_android() -> PlatformStatus {
+    let ov = overrides();
+    // 手动指定的路径填错时要明确报出来。静默回退会让用户以为设置生效了，
+    // 而实际用的是别处那个 SDK——那是最难排查的一类（界面看着正常）。
+    if let Some(p) = ov.android_sdk.as_deref() {
+        let sdk = PathBuf::from(p);
+        if !sdk.join("platform-tools").join("adb").exists() {
+            return PlatformStatus::unavailable(format!(
+                "指定的 Android SDK 目录里没有 platform-tools/adb：{p}\n\
+                 请指向 SDK 根目录（其下应有 platform-tools/、emulator/），而不是 platform-tools 本身。"
+            ));
+        }
+    }
+
     let (emulator, adb) = (emulator_path(), adb_path());
     let (Some(emu), Some(adb_bin)) = (emulator, adb) else {
         let missing = match (emulator_path().is_some(), adb_path().is_some()) {
@@ -1032,7 +1568,8 @@ async fn probe_android() -> PlatformStatus {
             _ => "未找到 adb（Android SDK 的 platform-tools 未安装）",
         };
         return PlatformStatus::unavailable(format!(
-            "{missing}。安装 Android Studio 或在 SDK Manager 中补齐 platform-tools 与 emulator 后即可使用。"
+            "{missing}。安装 Android Studio 或在 SDK Manager 中补齐 platform-tools 与 emulator 后即可使用；\
+             若 SDK 装在非默认位置，可在本面板的「自定义路径」里直接指定。"
         ));
     };
 
@@ -1094,10 +1631,16 @@ async fn probe_android() -> PlatformStatus {
         obs.push(o);
     }
 
+    let android_src = android_sdk().map(|(_, s)| s);
     PlatformStatus {
         available: true,
         reason: None,
-        tool: Some(format!("{} + {}", emu.display(), adb_bin.display())),
+        tool: Some(match android_src {
+            // 来源写进 tool：多份 SDK 并存时，这是唯一能看出
+            // 「为什么用的是这一个」的线索（与 iOS 侧同一做法）。
+            Some(ToolSource::Override) => format!("{} + {}（手动指定）", emu.display(), adb_bin.display()),
+            _ => format!("{} + {}", emu.display(), adb_bin.display()),
+        }),
         devices: build_android_entries(&avds, &obs, &getprops),
         can_launch: true,
         can_input: true,
@@ -1106,27 +1649,36 @@ async fn probe_android() -> PlatformStatus {
 }
 
 async fn probe_ios() -> PlatformStatus {
-    // 只有完整 Xcode 才有 simctl
-    let dev_dir = run_stdout(Path::new("/usr/bin/xcode-select"), &["-p"], CMD_TIMEOUT)
-        .await
-        .unwrap_or_default();
-    let simctl_found = std::process::Command::new("/usr/bin/xcrun")
-        .args(["--find", "simctl"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    let mut st = ios_status(dev_dir.trim(), simctl_found);
-    if !simctl_found {
+    let ov = overrides();
+    let tc = resolve_ios().await;
+    let mut st = ios_status(tc.dev_dir_display.as_deref().unwrap_or(""), tc.simctl);
+    if !tc.simctl {
+        // 手动指定的路径失效时，指名道姓说清是哪个路径——否则用户会去
+        // 折腾系统设置，而他真正要改的是自己刚填的那一项。
+        if ov.xcode.is_some() {
+            st.reason = Some(format!(
+                "{}。可在本面板的「自定义路径」里改正，或清空它改用自动检测。",
+                tc.note
+            ));
+        }
         return st;
     }
 
+    // 把「用的是哪一份 Xcode」写进 tool：多份 Xcode 并存（或系统选中的是
+    // CommandLineTools 而我们自动找到了外置卷上的 Xcode）时，这是唯一能
+    // 解释「为什么它能用」的线索。
+    st.tool = Some(if tc.note.is_empty() {
+        "xcrun simctl".to_owned()
+    } else {
+        format!("xcrun simctl（{}）", tc.note)
+    });
+
     // 设备清单。`--json` 而不是默认的表格输出：表格的列因 Xcode 版本而变，
     // 而 JSON 的键（udid/state/name）是稳定的。
-    if let Ok(out) = run_stdout(
-        Path::new("/usr/bin/xcrun"),
+    if let Ok(out) = run_xcrun(
+        tc.developer_dir.as_deref(),
         &["simctl", "list", "devices", "--json"],
-        CMD_TIMEOUT,
+        SIMCTL_TIMEOUT,
     )
     .await
     {
@@ -1137,40 +1689,88 @@ async fn probe_ios() -> PlatformStatus {
 
 /// 找 hdc 可执行文件（鸿蒙设备连接器）。
 ///
+/// 顺序：**手动指定** → `HDC_HOME` → 约定位置 → 外置卷上的 HarmonyOS SDK。
+///
 /// 位置随 SDK 版本变化（`openharmony/<api>/toolchains/hdc`），因此
 /// **枚举一层目录**找 `toolchains/hdc`，而不是写死某个 API 版本号——
 /// 写死的话 SDK 一升级就找不到，而表现是「鸿蒙突然不可用」。
 fn hdc_path() -> Option<PathBuf> {
+    let ov = overrides();
+    // 手动指定的 SDK 根目录：先按 `<根>/hdc/hdc`，再按
+    // `<根>/openharmony/<版本>/toolchains/hdc` 找——用户填的可能是其中任一层。
+    if let Some(root) = ov.harmony_sdk.as_deref() {
+        let root = PathBuf::from(root);
+        let mut cands = vec![root.join("hdc").join("hdc")];
+        cands.extend(hdc_under_openharmony(&root));
+        if let Some(p) = first_executable(&cands, is_executable) {
+            return Some(p);
+        }
+        return None; // 指定了就**不静默回退**（与 Android / iOS 同一原则）
+    }
+
     let mut cands: Vec<PathBuf> = Vec::new();
     if let Ok(v) = std::env::var("HDC_HOME") {
         if !v.trim().is_empty() {
             cands.push(PathBuf::from(v).join("hdc"));
         }
     }
+    let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
-        for root in [home.join("Library/Huawei/Sdk"), home.join("Huawei/Sdk")] {
-            cands.push(root.join("hdc").join("hdc"));
-            // openharmony/<任意版本>/toolchains/hdc
-            if let Ok(entries) = std::fs::read_dir(root.join("openharmony")) {
-                let mut versions: Vec<PathBuf> =
-                    entries.flatten().map(|e| e.path()).collect();
-                // 倒序：新版本 SDK 排前面（目录名如 `9` / `10`，字符串倒序
-                // 对两位数以上不精确，但只是在「多个版本都装着」时挑一个，
-                // 挑错也不影响可用性——两个版本都带同一个 hdc）
-                versions.sort_by(|a, b| b.cmp(a));
-                for v in versions {
-                    cands.push(v.join("toolchains").join("hdc"));
-                }
-            }
-        }
+        roots.push(home.join("Library/Huawei/Sdk"));
+        roots.push(home.join("Huawei/Sdk"));
+    }
+    for root in &roots {
+        cands.push(root.join("hdc").join("hdc"));
+        cands.extend(hdc_under_openharmony(root));
     }
     cands.push(PathBuf::from("/opt/homebrew/bin/hdc"));
     cands.push(PathBuf::from("/usr/local/bin/hdc"));
-    first_executable(&cands, is_executable)
+
+    if let Some(p) = first_executable(&cands, is_executable) {
+        return Some(p);
+    }
+
+    // 外置卷：名字像鸿蒙 SDK 的目录（只在前面都落空时才扫）
+    let found = find_app(
+        |name| {
+            let n = name.to_lowercase();
+            n.contains("harmony") || n.contains("deveco")
+        },
+        |p| !hdc_under_openharmony(p).is_empty() || p.join("hdc").join("hdc").is_file(),
+    )?;
+    let mut extra = vec![found.join("hdc").join("hdc")];
+    extra.extend(hdc_under_openharmony(&found));
+    first_executable(&extra, is_executable)
+}
+
+/// `<root>/openharmony/<任意版本>/toolchains/hdc` 的全部候选。
+///
+/// 倒序：新版本 SDK 排前面（目录名如 `9` / `10`，字符串倒序对两位数以上
+/// 不精确，但只是在「多个版本都装着」时挑一个，挑错也不影响可用性
+/// ——两个版本都带同一个 hdc）。
+fn hdc_under_openharmony(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root.join("openharmony")) else { return Vec::new() };
+    let mut versions: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    versions.sort_by(|a, b| b.cmp(a));
+    versions
+        .into_iter()
+        .map(|v| v.join("toolchains").join("hdc"))
+        .collect()
 }
 
 async fn probe_harmony() -> PlatformStatus {
+    let ov = overrides();
+    // 指定了却找不到 → 明确报出来，不回退
+    if let Some(p) = ov.harmony_sdk.as_deref() {
+        if hdc_path().is_none() {
+            return PlatformStatus::unavailable(format!(
+                "指定的 HarmonyOS SDK 目录里没找到 hdc：{p}\n\
+                 其下应有 openharmony/<版本>/toolchains/hdc，或直接是含 hdc/hdc 的目录。"
+            ));
+        }
+    }
+
     let Some(hdc) = hdc_path() else {
         return harmony_status(false, &[], None);
     };
@@ -1187,13 +1787,34 @@ async fn probe_harmony() -> PlatformStatus {
     harmony_status(true, &targets, Some(&tool))
 }
 
-/// 小程序的探测：只看微信开发者工具是否安装。
+/// 小程序的探测：看微信开发者工具是否安装（以及装在哪）。
 ///
-/// 可能的安装位置（macOS）：
-/// - `/Applications/wechatwebdevtools.app`
-/// - `~/Applications/wechatwebdevtools.app`
-/// - `/Applications/微信开发者工具.app`（中文名，实测用户常改）
+/// 查找顺序：约定位置 → **应用目录扫描**（覆盖外置卷与改名，见
+/// `matches_miniprogram_app`）→ 手动指定（在 `probe` 里优先于本函数）。
 fn probe_miniprogram() -> PlatformStatus {
+    let ov = overrides();
+    // 手动指定优先，且**指定了就以它为准**（不回退）——填错了要能看出来。
+    if let Some(p) = ov.miniprogram.as_deref() {
+        let path = PathBuf::from(p);
+        if path.is_dir() {
+            return miniprogram_status_with(true, Some(&path), ToolSource::Override);
+        }
+        return PlatformStatus::unavailable(format!(
+            "指定的微信开发者工具不存在：{p}\n请指向 .app 本身（例如 \
+             /Volumes/你的卷/applications/wechatwebdevtools.app）。"
+        ));
+    }
+    probe_miniprogram_discover()
+}
+
+/// 小程序的自动发现（不含手动指定）。
+fn probe_miniprogram_discover() -> PlatformStatus {
+    // 约定位置（快速路径）→ 应用目录扫描（含外置卷）。
+    //
+    // ⚠️ 扫描用**文件名匹配**，不读 bundle id：读 Info.plist 要为每个候选
+    // 起一次 `defaults`（约 20ms × 候选数），而这里只需判断「是不是微信那份」。
+    // 名字匹配的边界由 `matches_miniprogram_app` 的文档说明——它会放行
+    // `微信开发者工具（NWJS）.app`，但不会误认支付宝/京东的开发者工具。
     let mut cands: Vec<PathBuf> = vec![
         PathBuf::from("/Applications/wechatwebdevtools.app"),
         PathBuf::from("/Applications/微信开发者工具.app"),
@@ -1203,8 +1824,13 @@ fn probe_miniprogram() -> PlatformStatus {
         cands.push(home.join("Applications/wechatwebdevtools.app"));
         cands.push(home.join("Applications/微信开发者工具.app"));
     }
-    let found = cands.iter().any(|p| p.exists());
-    miniprogram_status(found)
+    if let Some(p) = cands.into_iter().find(|p| p.exists()) {
+        return miniprogram_status_with(true, Some(&p), ToolSource::Discovered);
+    }
+    if let Some(p) = find_app(matches_miniprogram_app, |p| p.is_dir()) {
+        return miniprogram_status_with(true, Some(&p), ToolSource::Discovered);
+    }
+    miniprogram_status(false)
 }
 
 /// 启动一个 AVD（**不等待启动完成**：冷启动十几秒，界面应立刻拿到反馈）。/// 启动一个 AVD（**不等待启动完成**：冷启动十几秒，界面应立刻拿到反馈）。
@@ -1242,15 +1868,22 @@ async fn start_android(avd: &str) -> Result<(), String> {
 /// `simctl boot <udid>` 只「开机」，不打开 Simulator.app 窗口——
 /// 但画面仍可截图（`simctl io` 直接读设备的帧缓冲），符合本面板的用法。
 ///
-/// **未在真机验证**（本机无完整 Xcode，见模块文档「未验证项」）。
+/// 用的是**解析出的那份 Xcode**（可能是手动指定或外置卷上自动发现的），
+/// 而不是系统 `xcode-select` 选中的那一份——后者在只装了 CommandLineTools
+/// 的机器上没有 simctl。
 async fn start_ios(udid: &str) -> Result<(), String> {
+    let tc = resolve_ios().await;
+    if !tc.simctl {
+        return Err("没有可用的 simctl（需要完整 Xcode）".to_owned());
+    }
+    let dev = tc.developer_dir.as_deref();
     // `simctl boot` 对已启动的设备会返回错误码 149（"Unable to boot device in
     // current state: Booted"）。那是无害的——用户点「启动」时它已经开着，
     // 报错反而让人以为失败了。因此先查状态，已启动就直接成功返回。
-    let out = run_stdout(
-        Path::new("/usr/bin/xcrun"),
+    let out = run_xcrun(
+        dev,
         &["simctl", "list", "devices", "--json"],
-        CMD_TIMEOUT,
+        SIMCTL_TIMEOUT,
     )
     .await?;
     let already = parse_simctl_devices(&out)
@@ -1259,7 +1892,7 @@ async fn start_ios(udid: &str) -> Result<(), String> {
     if already {
         return Ok(());
     }
-    run_stdout(Path::new("/usr/bin/xcrun"), &["simctl", "boot", udid], CMD_TIMEOUT)
+    run_xcrun(dev, &["simctl", "boot", udid], SIMCTL_TIMEOUT)
         .await
         .map(|_| ())
 }
@@ -1273,7 +1906,12 @@ pub async fn stop(platform: Platform, id: &str) -> Result<(), String> {
             run_stdout(&adb, &["-s", &serial, "emu", "kill"], CMD_TIMEOUT).await.map(|_| ())
         }
         Platform::Ios => {
-            run_stdout(Path::new("/usr/bin/xcrun"), &["simctl", "shutdown", id], CMD_TIMEOUT)
+            // 用解析出的那份 Xcode（可能是手动指定/外置卷上发现的）
+            let tc = resolve_ios().await;
+            if !tc.simctl {
+                return Err("没有可用的 simctl（需要完整 Xcode）".to_owned());
+            }
+            run_xcrun(tc.developer_dir.as_deref(), &["simctl", "shutdown", id], SIMCTL_TIMEOUT)
                 .await
                 .map(|_| ())
         }
@@ -1435,16 +2073,20 @@ async fn shot_android(id: &str) -> Result<Vec<u8>, String> {
 ///
 /// **未在真机验证**（本机无完整 Xcode，见模块文档「未验证项」）。
 async fn shot_ios(udid: &str) -> Result<Vec<u8>, String> {
+    let tc = resolve_ios().await;
+    if !tc.simctl {
+        return Err("没有可用的 simctl（需要完整 Xcode）".to_owned());
+    }
     let tmp = temp_shot_path("ios", udid, "png");
     // 先删旧文件：`simctl` 在文件已存在时可能覆盖失败，而我们会读到上一次的
     // 旧画面——表现为「画面卡住不动」，且不报错。
     let _ = std::fs::remove_file(&tmp);
 
     let path = tmp.to_string_lossy().into_owned();
-    let res = run_stdout(
-        Path::new("/usr/bin/xcrun"),
+    let res = run_xcrun(
+        tc.developer_dir.as_deref(),
         &["simctl", "io", udid, "screenshot", &path],
-        CMD_TIMEOUT,
+        SIMCTL_TIMEOUT,
     )
     .await;
     let bytes = std::fs::read(&tmp).ok();
@@ -1732,6 +2374,9 @@ async fn input_harmony(id: &str, action: &str, t: Touch) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 只用到 tempdir；`tempfile` 是本 crate 的 dev-dependency，
+    // 不在 lib 的正常依赖里（因此不会进入发布产物）。
+    use tempfile::tempdir;
 
     #[test]
     fn avds_parsed_one_per_line() {
@@ -2372,6 +3017,161 @@ mod tests {
         // 都不满足时返回 None（调用方据此给「未安装」提示，而不是崩）
         assert!(first_executable(&cands, |_| false).is_none());
     }
+    // ── 开发者工具路径：命名匹配的边界 ────────────────────────────────
+
+    /// 名字匹配必须**放行改名变体**。
+    ///
+    /// 本机实测同时存在两种目录名（都指向微信开发者工具）——
+    /// 只认其中一种就会漏掉另一种，而表现是「明明装了却检测不到」。
+    #[test]
+    fn miniprogram_name_matching_accepts_variants() {
+        for ok in [
+            "wechatwebdevtools.app",
+            "微信开发者工具.app",
+            // 实测：带后缀括号的改名（用户从 dmg 拖出来常变成这样）
+            "微信开发者工具（NWJS）.app",
+            "WechatWebDevTools.app", // 大小写
+        ] {
+            assert!(matches_miniprogram_app(ok), "应认出 {ok}");
+        }
+    }
+
+    /// **不能**把别家的「开发者工具」认成微信的。
+    ///
+    /// 本机实测装着支付宝与京东的开发者工具，名字里都带「开发者工具」：
+    ///   `小程序开发者工具.app`（com.ant.miniprogram）
+    ///   `jdvappdevtools.app`（京东）
+    /// 认错会让用户以为检测到了自己的工具，而实际调的是别家——
+    /// 比「没检测到」更糟，因为它看起来是成功的。
+    #[test]
+    fn miniprogram_name_matching_rejects_other_vendors() {
+        for bad in [
+            "小程序开发者工具.app",
+            "jdvappdevtools.app",
+            "支付宝开发者工具.app",
+            "Taro开发者工具.app",
+        ] {
+            assert!(!matches_miniprogram_app(bad), "不该把 {bad} 当成微信开发者工具");
+        }
+    }
+
+    #[test]
+    fn xcode_name_matching_covers_beta_and_case() {
+        assert!(matches_xcode_app("Xcode.app"));
+        assert!(matches_xcode_app("Xcode-beta.app"));
+        assert!(matches_xcode_app("xcode.app"));
+        // 不能只判「含 xcode」——否则 Xcode.app 的备份目录也会被当候选
+        assert!(!matches_xcode_app("Xcode 14.2 Backups"));
+        assert!(!matches_xcode_app("CommandLineTools"));
+    }
+
+    #[test]
+    fn applications_dir_matching_accepts_real_layouts() {
+        // 实测的三种写法
+        assert!(is_applications_dir("Applications"));
+        assert!(is_applications_dir("applications"));           // 外置卷上的小写
+        assert!(is_applications_dir("office-applications"));    // 自建目录
+        assert!(!is_applications_dir("work"));
+        assert!(!is_applications_dir("备份"));
+    }
+
+    #[test]
+    fn xcode_developer_dir_is_derived_not_guessed() {
+        // 用户填的是访达里看到的 .app，我们要的是里层 —— 只该有一处转换
+        let d = xcode_developer_dir(Path::new("/Volumes/data1/applications/Xcode.app"));
+        assert_eq!(
+            d,
+            PathBuf::from("/Volumes/data1/applications/Xcode.app/Contents/Developer")
+        );
+    }
+
+    // ── 手动指定（兜底）──────────────────────────────────────────────
+
+    #[test]
+    fn overrides_normalize_blank_to_none() {
+        // 界面清空输入框会传 ""，语义应等同「未设置」——
+        // 否则 Some("") 会被 join 成相对路径，且不报错
+        let ov = ToolOverrides {
+            android_sdk: Some("  ".to_owned()),
+            xcode: Some(String::new()),
+            harmony_sdk: Some("/x/sdk".to_owned()),
+            miniprogram: None,
+        }
+        .normalized();
+        assert!(ov.android_sdk.is_none(), "空白应归一为 None");
+        assert!(ov.xcode.is_none(), "空串应归一为 None");
+        assert_eq!(ov.harmony_sdk.as_deref(), Some("/x/sdk"));
+        assert!(ov.any_set(), "有一项有效就应为 true");
+    }
+
+    #[test]
+    fn overrides_any_set_is_false_when_all_blank() {
+        let ov = ToolOverrides {
+            android_sdk: Some(" ".to_owned()),
+            xcode: None,
+            harmony_sdk: None,
+            miniprogram: None,
+        }
+        .normalized();
+        assert!(!ov.any_set(), "全空时 any_set 必须为 false（界面据此不显示「已自定义」）");
+    }
+
+    /// override 的 JSON 契约：字段名是 camelCase（前端按这个读），
+    /// 且**缺字段时不报错**（老版本写的文件要能被新版本读）。
+    #[test]
+    fn overrides_json_shape_is_stable_and_lenient() {
+        let ov: ToolOverrides =
+            serde_json::from_str(r#"{"androidSdk":"/a","xcode":"/X.app"}"#).unwrap();
+        assert_eq!(ov.android_sdk.as_deref(), Some("/a"));
+        assert_eq!(ov.xcode.as_deref(), Some("/X.app"));
+        assert!(ov.harmony_sdk.is_none());
+
+        // 空对象也合法（用户清空了全部设置）
+        let empty: ToolOverrides = serde_json::from_str("{}").unwrap();
+        assert!(!empty.any_set());
+
+        // 序列化用 camelCase（前端读得到）
+        let text = serde_json::to_string(&ov).unwrap();
+        assert!(text.contains("androidSdk"), "应为 camelCase: {text}");
+    }
+
+    #[test]
+    fn overrides_save_and_load_roundtrip() {
+        let dir = tempdir().unwrap();
+        let ov = ToolOverrides {
+            android_sdk: Some("/opt/android-sdk".to_owned()),
+            xcode: Some("/Volumes/data1/applications/Xcode.app".to_owned()),
+            harmony_sdk: None,
+            miniprogram: Some("/Volumes/data1/applications/wechatwebdevtools.app".to_owned()),
+        };
+        save_overrides(dir.path(), ov.clone()).unwrap();
+        // 重新读出来应一致（且 current 已生效）
+        let back = load_overrides(dir.path());
+        assert_eq!(back.android_sdk, ov.android_sdk);
+        assert_eq!(back.xcode, ov.xcode);
+        assert_eq!(back.miniprogram, ov.miniprogram);
+        assert_eq!(overrides().xcode, ov.xcode, "保存后应立刻生效，无需重启");
+    }
+
+    /// 配置文件损坏时**不能**让面板不可用：退回自动发现，用户仍能用。
+    #[test]
+    fn load_overrides_survives_corrupt_file() {
+        let dir = tempdir().unwrap();
+        std::fs::write(overrides_path(dir.path()), "{ 这不是 JSON").unwrap();
+        let ov = load_overrides(dir.path());
+        assert!(!ov.any_set(), "坏文件应退回空设置（纯自动发现），而不是报错");
+    }
+
+    #[test]
+    fn load_overrides_missing_file_is_empty() {
+        let dir = tempdir().unwrap();
+        let ov = load_overrides(dir.path());
+        assert!(!ov.any_set(), "文件不存在时全为 None");
+        assert!(
+            !overrides_path(dir.path()).exists(),
+            "读取不该顺手创建文件（避免「装了什么都没配」也留下痕迹）"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2575,5 +3375,86 @@ mod live_tests {
             reason.contains("开发者工具"),
             "原因里应点名微信开发者工具（用户据此知道要装/开什么）: {reason}"
         );
+    }
+
+
+}
+
+/// override 的端到端核验（需真实 Xcode，`--ignored` 手动跑）。
+///
+/// # ⚠️ 为什么是一个测试而不是几个
+///
+/// `OVERRIDES` 是**进程级**的（一个用户在设置里指定一次，全局生效），
+/// 因此共享它的测试**不能并行**——Rust 测试默认并行，两个测试都改全局时
+/// 会互相破坏对方的断言（实测踩到：一个把全局设成真实 Xcode 后，
+/// 另一个「填错路径」的断言立刻失效）。
+///
+/// 处置：把相关场景收在**同一个测试里顺序执行**。不引入 serial_test
+/// 之类的依赖来「让并行变成串行」——问题根源是这个全局量本身，
+/// 而在生产里它是对的（单用户、单份配置）；只在测试里需要协调。
+///
+/// 这也是为什么下面的 `live_tests` 里那些调 `probe()` 的测试是安全的：
+/// 它们不碰 override，而本模块的测试默认 `#[ignore]`（CI 不跑）。
+#[cfg(test)]
+mod e2e_override {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore]
+    async fn override_round_trip_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = "/Volumes/data1/applications/Xcode.app";
+
+        // ① 指定一份真实存在的 Xcode → 应走「手动指定」且由 .app 推导出目录
+        save_overrides(dir.path(), ToolOverrides {
+            xcode: Some(real.to_owned()), ..Default::default()
+        }).unwrap();
+        let tc = resolve_ios().await;
+        println!("[指定真实] note = {}", tc.note);
+        assert!(tc.simctl, "本机这份 Xcode 应可用: {}", tc.note);
+        assert!(tc.note.contains("手动指定"), "来源应标为手动指定: {}", tc.note);
+        assert_eq!(
+            tc.developer_dir.as_deref(),
+            Some(xcode_developer_dir(Path::new(real)).as_path()),
+            "DEVELOPER_DIR 应由指定的 .app 推导（不是用户填的原始串）"
+        );
+
+        // ② 指定一份**不存在**的路径 → 明确报出来，且**不回退**
+        save_overrides(dir.path(), ToolOverrides {
+            xcode: Some("/Volumes/nope/Xcode.app".to_owned()), ..Default::default()
+        }).unwrap();
+        let bad = resolve_ios().await;
+        println!("[指定错误] note = {}", bad.note);
+        assert!(!bad.simctl, "不存在的路径不应报告为可用");
+        assert!(bad.note.contains("没有 simctl"), "应明确报出填错了: {}", bad.note);
+        assert!(
+            bad.developer_dir.is_some(),
+            "指定了就走指定的那份（哪怕不可用）——静默回退会让用户以为设置生效了"
+        );
+
+        // ③ 清空 → 回到自动发现（本轮修的主功能：外置卷上的 Xcode 能被找到）
+        save_overrides(dir.path(), ToolOverrides::default()).unwrap();
+        let auto = resolve_ios().await;
+        println!("[清空] note = {}", auto.note);
+        assert!(!auto.note.contains("手动指定"), "清空后不应再是手动指定");
+        assert!(auto.simctl, "清空后仍应自动发现 Xcode（这是本轮修的主功能）");
+        assert!(
+            auto.note.contains("自动发现"),
+            "应说明是自动发现的: {}",
+            auto.note
+        );
+    }
+
+    /// 设置文件损坏时不影响使用（退回自动发现）。
+    #[tokio::test]
+    #[ignore]
+    async fn corrupt_file_falls_back_to_auto() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(overrides_path(dir.path()), "{ 坏掉的 JSON").unwrap();
+        let ov = load_overrides(dir.path());
+        assert!(!ov.any_set());
+        let tc = resolve_ios().await;
+        println!("[损坏文件] note = {}", tc.note);
+        assert!(tc.simctl, "坏文件不该让 iOS 不可用");
     }
 }

@@ -14,6 +14,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[dev-dependencies]
+# 仅测试用：造临时目录验证「工具路径设置」的读写与容错。
+# 与 kcode-bridge / kcode-domain / kcode-app 同一做法（版本已由 Cargo.lock 锁定）。
+tempfile = "3"
+
 [dependencies]
 # 图片详情转 data URL 用。仅用于本地已校验路径的文件。
 base64 = "0.22"

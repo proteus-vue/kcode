@@ -41,6 +41,7 @@ import type {
   SimulatorFrame,
   SimulatorPlatform,
   SimulatorStatus,
+  ToolOverrides,
 } from '../types/domain';
 import { classifyGesture, type Gesture } from './simulatorGesture';
 
@@ -83,6 +84,155 @@ function stateLabel(state: string, running: boolean): string {
   }
 }
 
+/**
+ * 每个平台对应的「要填什么」。
+ *
+ * 文案必须说清**填哪一层目录**——这是自定义路径最容易错的地方：
+ * Xcode 要填 `.app` 本身（用户看到的那个），Android 要填 SDK 根目录
+ * （不是 platform-tools），这些都不是能猜出来的。
+ */
+const PATH_FIELDS: {
+  key: keyof ToolOverrides;
+  platform: SimulatorPlatform;
+  label: string;
+  placeholder: string;
+  hint: string;
+}[] = [
+  {
+    key: 'androidSdk',
+    platform: 'android',
+    label: 'Android SDK 目录',
+    placeholder: '/Volumes/你的卷/android-sdk',
+    hint: '填 SDK 根目录，其下应有 platform-tools/ 与 emulator/',
+  },
+  {
+    key: 'xcode',
+    platform: 'ios',
+    label: 'Xcode.app',
+    placeholder: '/Volumes/你的卷/applications/Xcode.app',
+    hint: '填 .app 本身（不是 Contents/Developer）',
+  },
+  {
+    key: 'harmonySdk',
+    platform: 'harmony',
+    label: 'HarmonyOS SDK 目录',
+    placeholder: '/Volumes/你的卷/Huawei/Sdk',
+    hint: '其下应有 openharmony/<版本>/toolchains/hdc',
+  },
+  {
+    key: 'miniprogram',
+    platform: 'miniprogram',
+    label: '微信开发者工具',
+    placeholder: '/Volumes/你的卷/applications/wechatwebdevtools.app',
+    hint: '填 .app 本身；改名过的也能填',
+  },
+];
+
+/**
+ * 「自定义工具路径」面板。
+ *
+ * # 为什么做成折叠面板而不是独立设置页
+ *
+ * 需要它的人**正是在这个面板里发现工具找不到的**（或发现检测到的是另一份）。
+ * 放到别处等于让用户在两个界面间来回：先被告知「没找到」，再自己去找设置页，
+ * 再回来点重新检测。
+ *
+ * # 为什么是输入框而不是文件选择器
+ *
+ * 本仓库未引入 Tauri 的 dialog 插件（那是新的运行时依赖与权限声明）。
+ * 输入框 + 自动检测到的路径作为占位提示，对开发者而言足够——
+ * 而这些工具的路径本来就是要从 Finder 复制过来的。
+ */
+function ToolPathsEditor({
+  overrides,
+  onSaved,
+}: {
+  overrides: ToolOverrides;
+  onSaved: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState<ToolOverrides>(overrides);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // 外部（重新探测后）拿到新值时要同步进来：否则用户看到的是旧值，
+  // 而保存会把它写回去——等于悄悄回退。
+  useEffect(() => {
+    setDraft(overrides);
+  }, [overrides]);
+
+  const configured = PATH_FIELDS.filter((f) => (draft[f.key] ?? '') !== '').length;
+
+  const save = useCallback(async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await invoke<ToolOverrides>('simulator_save_tool_paths', { overrides: draft });
+      setSaved(true);
+      // 立刻重新探测：用户能当场看到结果对不对，而不必重启验证。
+      onSaved();
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      setError(extractErrorMessage(e));
+    } finally {
+      setSaving(false);
+    }
+  }, [draft, onSaved]);
+
+  const clearAll = useCallback(() => {
+    setDraft({ androidSdk: null, xcode: null, harmonySdk: null, miniprogram: null });
+  }, []);
+
+  return (
+    <div className="sim-paths">
+      <button className="sim-paths-toggle" onClick={() => setOpen((v) => !v)}>
+        <Icon name="folder" size={12} />
+        <span>自定义工具路径</span>
+        {configured > 0 && <span className="sim-paths-count">已设 {configured}</span>}
+        <span className={`sim-paths-caret ${open ? 'is-open' : ''}`}>
+          <Icon name="chevron" size={11} />
+        </span>
+      </button>
+
+      {open && (
+        <div className="sim-paths-body">
+          <p className="sim-paths-intro">
+            工具装在非默认位置（外置盘、改名）时在这里指定。留空表示自动检测。
+          </p>
+          {PATH_FIELDS.map((f) => (
+            <label key={f.key} className="sim-paths-field">
+              <span className="sim-paths-label">
+                {f.label}
+                {overrides[f.key] && <em className="sim-paths-set">已自定义</em>}
+              </span>
+              <input
+                type="text"
+                spellCheck={false}
+                value={draft[f.key] ?? ''}
+                placeholder={f.placeholder}
+                onChange={(e) =>
+                  setDraft((d) => ({ ...d, [f.key]: e.target.value || null }))
+                }
+              />
+              <span className="sim-paths-hint">{f.hint}</span>
+            </label>
+          ))}
+          {error && <p className="sim-paths-error">{error}</p>}
+          <div className="sim-paths-actions">
+            <button className="sim-paths-save" onClick={() => void save()} disabled={saving}>
+              {saving ? '保存中…' : saved ? '已保存并重新检测' : '保存并重新检测'}
+            </button>
+            <button className="sim-paths-clear" onClick={clearAll} disabled={saving || !configured}>
+              全部清空
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SimulatorPanel({
   status,
   onRefreshStatus,
@@ -90,6 +240,8 @@ export function SimulatorPanel({
   status: SimulatorStatus | null;
   onRefreshStatus: () => void;
 }) {
+  /** 自定义工具路径（兜底设置）。null = 还没读到。 */
+  const [overrides, setOverrides] = useState<ToolOverrides | null>(null);
   /** 当前查看的平台。默认第一个可用的（全部不可用时仍是 android，界面会说明）。 */
   const [platform, setPlatform] = useState<SimulatorPlatform | null>(null);
   /** 当前选中的设备 id（不是 runtimeId——见 DeviceEntry 的说明）。 */
@@ -136,6 +288,24 @@ export function SimulatorPanel({
 
   /** 当前平台的状态（未选平台时为 null）。 */
   const plat: PlatformStatus | null = platform && status ? status[platform] : null;
+
+  /** 读一次自定义工具路径设置（面板打开时）。 */
+  useEffect(() => {
+    let cancelled = false;
+    void invoke<ToolOverrides>('simulator_read_tool_paths')
+      .then((v) => {
+        if (!cancelled) setOverrides(v);
+      })
+      .catch(() => {
+        // 读不到就当作「没设过」：设置读取失败不该让整个面板不可用。
+        if (!cancelled) {
+          setOverrides({ androidSdk: null, xcode: null, harmonySdk: null, miniprogram: null });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   /**
    * 选定初始平台：优先第一个「有运行中设备」的，其次第一个可用的。
@@ -432,6 +602,21 @@ export function SimulatorPanel({
           <Icon name="refresh" size={13} />
         </button>
       </div>
+
+      {/* ── 自定义工具路径（兜底）──
+          放在平台内容之前：它正是为「找不到工具」与「检测到的是另一份」
+          两种情况准备的，而这两种情况都发生在看内容之前。 */}
+      {overrides && (
+        <ToolPathsEditor
+          overrides={overrides}
+          onSaved={() => {
+            void invoke<ToolOverrides>('simulator_read_tool_paths')
+              .then(setOverrides)
+              .catch(() => {});
+            onRefreshStatus();
+          }}
+        />
+      )}
 
       {/* ── 平台不可用：说清缺什么、怎么装 ─────────────────────────── */}
       {!plat?.available && (

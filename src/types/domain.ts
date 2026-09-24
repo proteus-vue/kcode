@@ -624,6 +624,30 @@ export interface SimulatorStatus {
   miniprogram: PlatformStatus;
 }
 
+/**
+ * 开发者工具路径的**自定义设置**（兜底）。
+ *
+ * # 为什么需要它
+ *
+ * 自动发现只能覆盖常见位置与常见命名。实测两类漏网都不是罕见用法：
+ * 把工具装在外置卷（`/Volumes/...`）、以及改过名的 `.app`
+ * （同一台机器上微信开发者工具有 `wechatwebdevtools.app` 与
+ * `微信开发者工具（NWJS）.app` 两种目录名）。
+ *
+ * 界面在「找不到工具」与「工具可用」两种状态下都提供入口：
+ * 后者是为了在装了**多份**时指定用哪一份。
+ */
+export interface ToolOverrides {
+  /** Android SDK **根目录**（其下应有 platform-tools/、emulator/）。 */
+  androidSdk: string | null;
+  /** **Xcode.app 本身**（不是 Contents/Developer——那个由后端推导）。 */
+  xcode: string | null;
+  /** HarmonyOS SDK 目录（其下应有 openharmony/<版本>/toolchains/hdc）。 */
+  harmonySdk: string | null;
+  /** 微信开发者工具 `.app`。 */
+  miniprogram: string | null;
+}
+
 /** 一帧画面及其设备尺寸（用于坐标换算）。 */
 export interface SimulatorFrame {
   /**

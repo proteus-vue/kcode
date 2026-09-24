@@ -3863,6 +3863,73 @@ body {
 }
 .sim-refresh { margin-left: auto; }
 
+/* ── 自定义工具路径（兜底设置）─────────────────────────────────────────
+   折叠面板：默认收起，不占视觉重量——它只在「找不到工具」或
+   「检测到的不是我想要的那份」时才需要被打开。 */
+.sim-paths {
+  border-bottom: 1px solid var(--edge-soft);
+  flex-shrink: 0;
+}
+.sim-paths-toggle {
+  width: 100%;
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 10px;
+  background: transparent; border: 0;
+  color: var(--t3); font-size: 11px; font-family: inherit;
+  cursor: pointer; text-align: left;
+}
+.sim-paths-toggle:hover { color: var(--t1); background: rgba(255,255,255,0.03); }
+/* 已设项数：收起时也能知道「这里现在是自定义的」 */
+.sim-paths-count {
+  font-size: 10px; padding: 1px 5px; border-radius: 999px;
+  color: var(--accent); background: rgba(106,165,255,0.14);
+}
+.sim-paths-caret {
+  margin-left: auto; display: inline-flex;
+  transition: transform 0.15s ease;
+}
+.sim-paths-caret.is-open { transform: rotate(180deg); }
+.sim-paths-body {
+  padding: 2px 10px 10px;
+  display: flex; flex-direction: column; gap: 9px;
+}
+.sim-paths-intro {
+  margin: 0; font-size: 10.5px; line-height: 1.55; color: var(--t4);
+}
+.sim-paths-field { display: flex; flex-direction: column; gap: 3px; }
+.sim-paths-label {
+  font-size: 10.5px; color: var(--t3);
+  display: flex; align-items: center; gap: 5px;
+}
+.sim-paths-set {
+  font-style: normal; font-size: 9.5px; padding: 0 4px; border-radius: 3px;
+  color: var(--ok); background: var(--ok-dim);
+}
+.sim-paths-field input {
+  width: 100%; box-sizing: border-box;
+  padding: 5px 7px; border-radius: 5px;
+  background: rgba(0,0,0,0.28);
+  border: 1px solid var(--edge-soft);
+  color: var(--t1); font-size: 11px;
+  font-family: var(--mono, ui-monospace, monospace);
+}
+.sim-paths-field input:focus { outline: none; border-color: var(--accent); }
+.sim-paths-field input::placeholder { color: var(--t4); }
+.sim-paths-hint { font-size: 9.5px; color: var(--t4); }
+.sim-paths-error {
+  margin: 0; font-size: 10.5px; color: var(--danger); line-height: 1.5;
+}
+.sim-paths-actions { display: flex; gap: 6px; }
+.sim-paths-save, .sim-paths-clear {
+  padding: 4px 10px; border-radius: 5px;
+  font-size: 11px; font-family: inherit; cursor: pointer;
+  background: transparent; border: 1px solid var(--edge-soft); color: var(--t2);
+}
+.sim-paths-save { border-color: rgba(106,165,255,0.45); color: var(--accent); }
+.sim-paths-save:hover:not(:disabled) { background: rgba(106,165,255,0.12); }
+.sim-paths-clear:hover:not(:disabled) { background: rgba(255,255,255,0.05); color: var(--t1); }
+.sim-paths-save:disabled, .sim-paths-clear:disabled { opacity: 0.45; cursor: default; }
+
 /* 画面区：图片按可用空间等比缩放（不裁切——裁切会让坐标换算失效） */
 .sim-screen {
   /* **用 flex 而不是 grid 居中**：`place-items: center` 会让图片成为

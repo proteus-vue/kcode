@@ -802,6 +802,26 @@ async fn simulator_probe() -> Result<simulator::SimulatorStatus, CommandError> {
     Ok(simulator::probe().await)
 }
 
+/// 读取「开发者工具路径」的自定义设置（兜底用）。
+#[tauri::command]
+async fn simulator_read_tool_paths(
+    state: State<'_, AppState>,
+) -> Result<simulator::ToolOverrides, CommandError> {
+    Ok(simulator::load_overrides(&state.paths.app_data))
+}
+
+/// 保存自定义工具路径，并**立即生效**（无需重启）。
+///
+/// 保存后前端会重新探测一次，用户能当场看到结果对不对——填错了却要重启
+/// 才发现，是这类「覆盖设置」最常见的挫败点。
+#[tauri::command]
+async fn simulator_save_tool_paths(
+    state: State<'_, AppState>,
+    overrides: simulator::ToolOverrides,
+) -> Result<simulator::ToolOverrides, CommandError> {
+    simulator::save_overrides(&state.paths.app_data, overrides).map_err(CommandError::from)
+}
+
 /// 启动一个设备。`platform` 取 `android` / `ios`。
 #[tauri::command]
 async fn simulator_start(platform: String, id: String) -> Result<(), CommandError> {
@@ -1112,6 +1132,11 @@ pub fn run() {
                 }
             };
 
+            // 开发者工具路径的自定义设置：启动时读一次并生效。
+            // 读失败不阻塞启动（`load_overrides` 内部退回自动发现）——
+            // 一份坏掉的配置文件不该让应用起不来。
+            simulator::load_overrides(&paths.app_data);
+
             // 设置窗口背景色。
             //
             // 必须用运行时 API：`tauri.conf.json` 里**没有** backgroundColor
@@ -1169,6 +1194,8 @@ pub fn run() {
             attach_local_image,
             read_attachment_image,
             simulator_probe,
+            simulator_read_tool_paths,
+            simulator_save_tool_paths,
             simulator_start,
             simulator_stop,
             simulator_frame,

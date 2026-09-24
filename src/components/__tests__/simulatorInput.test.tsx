@@ -34,6 +34,23 @@ let nextFrame: SimulatorFrame = { dataUrl: 'data:image/png;base64,AAAA', width: 
 /** simulator_probe 的返回值（启动等待设备时用）。 */
 let probeResult: SimulatorStatus | null = null;
 let probeCalls = 0;
+/** 自定义工具路径的后端桩（读写共用一份，模拟真实持久化）。 */
+let toolPaths = { androidSdk: null, xcode: null, harmonySdk: null, miniprogram: null } as {
+  androidSdk: string | null;
+  xcode: string | null;
+  harmonySdk: string | null;
+  miniprogram: string | null;
+};
+let savedPaths: typeof toolPaths[] = [];
+/**
+ * `onRefreshStatus` 的调用次数。
+ *
+ * 真实环境里它触发一次 `simulator_probe`（见 useKcode），而本测试的
+ * mount 传的是桩——所以**不能数 simulator_probe 的次数**（那永远是 0，
+ * 与接线对不对无关）。要验的是「保存后有没有通知上层去重新探测」，
+ * 数这个回调才是对的。
+ */
+let refreshCalls = 0;
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: async (cmd: string, args: Record<string, unknown> = {}) => {
@@ -49,6 +66,14 @@ vi.mock('@tauri-apps/api/core', () => ({
     if (cmd === 'simulator_probe') {
       probeCalls += 1;
       return probeResult;
+    }
+    if (cmd === 'simulator_read_tool_paths') {
+      return { ...toolPaths };
+    }
+    if (cmd === 'simulator_save_tool_paths') {
+      savedPaths.push(args.overrides as typeof toolPaths);
+      toolPaths = args.overrides as typeof toolPaths;
+      return { ...toolPaths };
     }
     return undefined;
   },
@@ -133,11 +158,14 @@ const status: SimulatorStatus = {
 };
 
 beforeEach(() => {
+  toolPaths = { androidSdk: null, xcode: null, harmonySdk: null, miniprogram: null };
+  savedPaths = [];
   calls.length = 0;
   frameCalls = 0;
   probeCalls = 0;
   nextFrame = { dataUrl: 'data:image/png;base64,AAAA', width: 1000, height: 2000 };
   probeResult = null;
+  refreshCalls = 0;
   /**
    * 假定时器 + `shouldAdvanceTime`：真实时间照常流动（`await sleep` 能推进），
    * 但定时器的回调也在 act 之外的时机被触发时会记在受控队列里。
@@ -171,7 +199,14 @@ async function mount() {
   document.body.appendChild(host);
   root = createRoot(host);
   await act(async () => {
-    root!.render(<SimulatorPanel status={status} onRefreshStatus={() => {}} />);
+    root!.render(
+      <SimulatorPanel
+        status={status}
+        onRefreshStatus={() => {
+          refreshCalls += 1;
+        }}
+      />,
+    );
   });
   // 让首帧的 invoke 落地，并把补帧的异步链一并消化掉
   // （不消化会让 setState 落在 act 之外，React 会打警告）
@@ -591,5 +626,121 @@ describe('落点标记', () => {
     expect(host!.querySelector('.sim-drag'), '拖动中应有轨迹').not.toBeNull();
     await pointer('pointerup', 200, 300);
     expect(host!.querySelector('.sim-drag'), '抬手后轨迹应消失').toBeNull();
+  });
+});
+
+/**
+ * 自定义工具路径（兜底设置）。
+ *
+ * 这组守的是「工具装在非默认位置时用户能自救」这条链——
+ * 自动发现会漏（外置卷、改名），而漏了之后必须有个出口。
+ * 三个必守点：
+ *  1. 面板打开时会去读设置（不读就等于入口不存在）；
+ *  2. 保存的参数形状正确（camelCase 字段名，填进去什么就传什么）；
+ *  3. 保存后立刻重新探测（否则用户改完看不到效果，以为没生效）。
+ */
+describe('自定义工具路径', () => {
+  /** 展开折叠面板。 */
+  async function openEditor() {
+    const toggle = host!.querySelector('.sim-paths-toggle') as HTMLButtonElement;
+    expect(toggle, '面板里应有「自定义工具路径」入口').not.toBeNull();
+    await act(async () => {
+      toggle.click();
+    });
+    return toggle;
+  }
+
+  it('面板挂载时读取设置（入口存在且带得出当前值）', async () => {
+    toolPaths = { ...toolPaths, xcode: '/Volumes/data1/applications/Xcode.app' };
+    await mount();
+    expect(
+      calls.some((c) => c.cmd === 'simulator_read_tool_paths'),
+      '应读取一次自定义路径设置',
+    ).toBe(true);
+
+    const toggle = await openEditor();
+    expect(toggle.querySelector('.sim-paths-count')?.textContent).toContain('1');
+    // 值要真的显示在输入框里（不是只在状态里）
+    const xcodeInput = host!.querySelectorAll('.sim-paths-field input')[1] as HTMLInputElement;
+    expect(xcodeInput.value).toBe('/Volumes/data1/applications/Xcode.app');
+  });
+
+  it('保存时按 camelCase 传四个字段，并触发重新探测', async () => {
+    await mount();
+    await openEditor();
+    const before = refreshCalls;
+
+    const inputs = host!.querySelectorAll('.sim-paths-field input') as NodeListOf<HTMLInputElement>;
+    // 只填 Xcode 与小程序两项
+    await act(async () => {
+      const setVal = (el: HTMLInputElement, v: string) => {
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          'value',
+        )!.set!;
+        setter.call(el, v);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      setVal(inputs[1], '/Volumes/x/Xcode.app');
+      setVal(inputs[3], '/Volumes/x/wechatwebdevtools.app');
+    });
+
+    const saveBtn = host!.querySelector('.sim-paths-save') as HTMLButtonElement;
+    await act(async () => {
+      saveBtn.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(savedPaths.length, '应调用一次保存').toBe(1);
+    expect(savedPaths[0]).toEqual({
+      androidSdk: null,
+      xcode: '/Volumes/x/Xcode.app',
+      harmonySdk: null,
+      miniprogram: '/Volumes/x/wechatwebdevtools.app',
+    });
+    expect(refreshCalls, '保存后应通知上层重新探测（用户要当场看到结果）').toBeGreaterThan(before);
+  });
+
+  it('清空输入框传 null（语义是「回到自动检测」，不是空路径）', async () => {
+    toolPaths = { ...toolPaths, androidSdk: '/old/sdk' };
+    await mount();
+    await openEditor();
+
+    const inputs = host!.querySelectorAll('.sim-paths-field input') as NodeListOf<HTMLInputElement>;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(inputs[0], '');
+      inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      (host!.querySelector('.sim-paths-save') as HTMLButtonElement).click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // 空串必须变成 null：传 "" 会让后端 join 出相对路径，且不报错
+    expect(savedPaths[0].androidSdk).toBeNull();
+  });
+
+  it('「全部清空」把四项都置 null 而不只是清显示', async () => {
+    toolPaths = { androidSdk: '/a', xcode: '/b', harmonySdk: '/c', miniprogram: '/d' };
+    await mount();
+    await openEditor();
+
+    await act(async () => {
+      (host!.querySelector('.sim-paths-clear') as HTMLButtonElement).click();
+    });
+    const inputs = host!.querySelectorAll('.sim-paths-field input') as NodeListOf<HTMLInputElement>;
+    for (const el of Array.from(inputs)) {
+      expect(el.value, '清空后输入框应为空').toBe('');
+    }
   });
 });
