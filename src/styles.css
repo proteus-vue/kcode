@@ -3930,6 +3930,19 @@ body {
 .sim-paths-clear:hover:not(:disabled) { background: rgba(255,255,255,0.05); color: var(--t1); }
 .sim-paths-save:disabled, .sim-paths-clear:disabled { opacity: 0.45; cursor: default; }
 
+/* 不可用状态下的可点下一步（目前只有小程序用它启动自动化）。
+   放在原因文案下面：用户先读到「为什么」，再看到「怎么办」。 */
+.sim-empty-action {
+  margin-top: 8px;
+  padding: 5px 14px; border-radius: 6px;
+  background: transparent; border: 1px solid rgba(106,165,255,0.45);
+  color: var(--accent); font-size: 11px; font-family: inherit;
+  cursor: pointer;
+}
+.sim-empty-action:hover:not(:disabled) { background: rgba(106,165,255,0.12); }
+.sim-empty-action:disabled { opacity: 0.5; cursor: default; }
+
+
 /* ── 页面元素列表（小程序）─────────────────────────────────────────────
    小程序不能按坐标点（自动化接口不返回元素位置），所以输入走这个列表。
    放在画面下方：用户先看到画面，再在列表里找到要点的那一项。 */

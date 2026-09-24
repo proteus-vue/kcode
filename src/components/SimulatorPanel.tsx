@@ -612,6 +612,26 @@ export function SimulatorPanel({
     }
   }, [elementMode, loadMpElements]);
 
+  /** 启动小程序的自动化服务（显式动作，见后端命令说明）。 */
+  const startMpAutomation = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke('simulator_miniprogram_start');
+      // 启动后立刻重检：用户要当场看到「现在可用了」
+      const fresh = await invoke<SimulatorStatus>('simulator_probe');
+      // 把新状态交给上层（它对平台选择、设备列表都生效）
+      onRefreshStatus();
+      if (!fresh.miniprogram.available) {
+        setError(fresh.miniprogram.reason ?? '自动化服务仍未就绪');
+      }
+    } catch (e) {
+      setError(extractErrorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [onRefreshStatus]);
+
   /** 各平台的运行中设备数，用于标签上的计数。 */
   const counts = useMemo(() => {
     const out = {} as Record<SimulatorPlatform, number>;
@@ -686,6 +706,17 @@ export function SimulatorPanel({
           </p>
           {plat?.reason && <p className="sim-empty-hint">{plat.reason}</p>}
           {plat?.tool && <p className="sim-empty-tool">工具：{plat.tool}</p>}
+          {/* 小程序：工具在、但自动化没起来 → 给一个**可点的下一步**。
+              只写「请执行某命令」等于让用户离开界面去终端。 */}
+          {platform === 'miniprogram' && plat?.tool && (
+            <button
+              className="sim-empty-action"
+              disabled={busy}
+              onClick={() => void startMpAutomation()}
+            >
+              {busy ? '正在启动…' : '启动自动化'}
+            </button>
+          )}
         </div>
       )}
 

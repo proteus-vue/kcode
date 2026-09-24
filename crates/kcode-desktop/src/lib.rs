@@ -823,6 +823,23 @@ async fn simulator_save_tool_paths(
     simulator::save_overrides(&state.paths.app_data, overrides).map_err(CommandError::from)
 }
 
+/// 启动小程序的自动化服务（若未就绪）。
+///
+/// # 为什么单独一个命令，而不是并进 probe
+///
+/// 启动要跑 `cli auto`，实测数秒到十几秒（IDE 要先编译项目），而 probe 是
+/// **四个平台一起探测**的——把它拖慢十几秒会连带影响 Android/iOS 的刷新。
+/// 而且「检测」里做有副作用的启动在语义上也不干净：用户点「重新检测」
+/// 期待的是看状态，不是让 IDE 换模式。
+///
+/// 所以启动是**显式动作**：界面上给按钮，用户点了才做。
+#[tauri::command]
+async fn simulator_miniprogram_start() -> Result<(), CommandError> {
+    simulator::start_miniprogram_automation()
+        .await
+        .map_err(CommandError::from)
+}
+
 /// 列举小程序当前页的元素（供界面做成可点列表）。
 ///
 /// 小程序**不能按坐标点**（自动化接口不返回元素位置），所以界面给的是
@@ -1216,6 +1233,7 @@ pub fn run() {
             attach_local_image,
             read_attachment_image,
             simulator_probe,
+            simulator_miniprogram_start,
             simulator_miniprogram_elements,
             simulator_miniprogram_tap,
             simulator_read_tool_paths,

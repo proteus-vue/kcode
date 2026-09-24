@@ -934,8 +934,8 @@ pub fn miniprogram_status_full(
             reason: Some(
                 "微信开发者工具已安装，但自动化服务未启动。本应用需要它来取画面与点击——\
                  因为小程序模拟器是开发者工具窗口内的一块渲染区，不是独立进程。\n\
-                 启动方式：打开开发者工具的目标项目后，在本面板点「重新检测」\
-                 （会自动启动），或手动执行 `bash scripts/miniprogram-auto.sh`。"
+                 启动方式：下面点「启动自动化」，或手动执行 \
+                 `bash scripts/miniprogram-auto.sh`。"
                     .to_owned(),
             ),
             tool: Some(tool_label),
@@ -2105,6 +2105,10 @@ async fn shot_miniprogram() -> Result<Vec<u8>, String> {
 ///
 /// 需要两样东西：工具路径（自动发现或手动指定）与项目目录（手动指定或
 /// 从工具日志推断）。任一缺失都给出**可执行的下一步**，而不是笼统失败。
+pub async fn start_miniprogram_automation() -> Result<(), String> {
+    ensure_miniprogram_automation().await
+}
+
 async fn ensure_miniprogram_automation() -> Result<(), String> {
     if crate::miniprogram::is_ready().await {
         return Ok(());
@@ -3712,5 +3716,68 @@ mod e2e_override {
         let tc = resolve_ios().await;
         println!("[损坏文件] note = {}", tc.note);
         assert!(tc.simctl, "坏文件不该让 iOS 不可用");
+    }
+}
+
+#[cfg(test)]
+mod status_shape_tests {
+    //! `miniprogram_status_full` 三态的文案与能力位。
+    //!
+    //! 不依赖外部进程：直接调纯函数，覆盖「工具在但自动化没起」这条
+    //! 用户最常遇到、也最容易写成一句「不可用」的路径。
+    use super::*;
+
+    #[test]
+    fn not_ready_state_gives_actionable_next_step_and_element_mode() {
+        let st = miniprogram_status_full(
+            Path::new("/Applications/wechatwebdevtools.app"),
+            ToolSource::Discovered,
+            None,
+            false,
+        );
+        assert!(!st.available);
+        let reason = st.reason.as_deref().unwrap_or("");
+        assert!(reason.contains("启动自动化"), "必须给出可点的下一步: {reason}");
+        assert!(reason.contains("开发者工具"), "应说明原因与工具的关系: {reason}");
+        // 关键：即使未就绪，能力位也要如实说明「将来是元素级输入」——
+        // 否则界面无从知道该画元素列表还是只读画面
+        assert!(st.can_input, "工具在时输入能力是可用的（只等自动化起来）");
+        assert_eq!(st.input_mode, InputMode::Element, "小程序的输入永远是元素级");
+    }
+
+    #[test]
+    fn ready_state_reports_project_as_device_with_element_mode() {
+        let p = Path::new("/w/my-miniprogram");
+        let st = miniprogram_status_full(
+            Path::new("/Applications/wechatwebdevtools.app"),
+            ToolSource::Discovered,
+            Some(p),
+            true,
+        );
+        assert!(st.available);
+        assert_eq!(st.devices.len(), 1, "当前项目就是一个设备条目");
+        assert_eq!(st.devices[0].id, "/w/my-miniprogram");
+        assert_eq!(st.devices[0].name, "my-miniprogram", "展示名取目录名");
+        assert!(st.devices[0].running);
+        assert_eq!(st.input_mode, InputMode::Element);
+        // 不给启动按钮：设备由开发者工具管理（与鸿蒙同理）
+        assert!(!st.can_launch);
+    }
+
+    #[test]
+    fn ready_without_project_explains_how_to_specify() {
+        // 自动化起来了但项目推断不出 → 不是「不可用」，而是缺一条信息：
+        // 必须说清怎么补上（自定义路径），而不是报一个空原因的失败
+        let st = miniprogram_status_full(
+            Path::new("/Applications/wechatwebdevtools.app"),
+            ToolSource::Discovered,
+            None,
+            true,
+        );
+        assert!(st.available, "自动化就绪就算可用（只是还不知道是哪个项目）");
+        let reason = st.reason.as_deref().unwrap_or("");
+        assert!(reason.contains("项目"), "应说明缺的是项目: {reason}");
+        assert!(reason.contains("自定义"), "应给出补上的入口: {reason}");
+        assert!(st.devices.is_empty());
     }
 }
