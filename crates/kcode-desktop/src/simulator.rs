@@ -2631,7 +2631,7 @@ fn window_owner_for(platform: Platform) -> Option<&'static str> {
 }
 
 /// 启动常驻帧源（若尚未启动）。失败返回 None，由调用方回退到逐帧截图。
-fn ensure_cast(platform: Platform, device_id: &str) -> Option<()> {
+fn ensure_cast(platform: Platform, device_id: &str, aspect: Option<f64>) -> Option<()> {
     if !cfg!(target_os = "macos") {
         return None;
     }
@@ -2682,6 +2682,13 @@ fn ensure_cast(platform: Platform, device_id: &str) -> Option<()> {
             "--width",
             &width.to_string(),
         ])
+        // 设备宽高比**必须传**：窗口自身比例含标题栏，与设备比例不同。
+        // 不传时 helper 会用窗口比例去算设备视图，横向留白被算成 0 ——
+        // 实测那会让 x 偏约 3.4%（1320 宽的设备上约 44px）。
+        .args(match aspect {
+            Some(a) if a > 0.0 => vec!["--device-aspect".to_owned(), format!("{a:.6}")],
+            _ => vec![],
+        })
         .stdout(std::process::Stdio::piped())
         // stderr 用 piped 而不是 null：helper 在那里报告设备画面在窗口中的
         // 位置（KCDEVICE 行），而那正是点击坐标准确的前提。
@@ -2788,8 +2795,8 @@ fn cast_geometry(_platform: Platform, device_id: &str) -> Option<DeviceRect> {
 }
 
 /// 从常驻帧源取最新帧。返回 None 表示「流不可用或还没出帧」，调用方回退。
-fn cast_latest(platform: Platform, device_id: &str) -> Option<Vec<u8>> {
-    ensure_cast(platform, device_id)?;
+fn cast_latest(platform: Platform, device_id: &str, aspect: Option<f64>) -> Option<Vec<u8>> {
+    ensure_cast(platform, device_id, aspect)?;
     let guard = casts();
     let map = guard.as_ref()?;
     let c = map.get(device_id)?;
@@ -2832,7 +2839,17 @@ pub async fn frame(platform: Platform, id: &str, force: bool) -> Result<Captured
     // 优先走**常驻窗口流**（ScreenCaptureKit，实测 29.5fps vs 逐帧截图的 8fps）。
     // 不可用时回退到逐帧截图——两条路都要能工作：
     // 常驻流需要「屏幕录制」权限，用户没给授权时必须仍能看画面。
-    let using_cast = cast_latest(platform, id).filter(|b| !b.is_empty());
+    // 设备的宽高比：窗口帧里定位设备画面要用它（见 ensure_cast 的说明）。
+    // ios_screen_size 有按设备缓存，所以这里只是一次性的成本。
+    let aspect = if cfg!(target_os = "macos") && window_owner_for(platform).is_some() {
+        match ios_screen_size(id).await {
+            Ok((w, h)) if h > 0 => Some(w as f64 / h as f64),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let using_cast = cast_latest(platform, id, aspect).filter(|b| !b.is_empty());
     let bytes = match using_cast.clone() {
         Some(b) => b,
         _ => match platform {
@@ -5305,10 +5322,14 @@ mod window_cast_live {
         }
 
         // 等流启动并出帧（条件等待，不固定 sleep）
+        // 传真实宽高比（与生产同路径）：不传时 helper 算不出横向留白，
+        // 而那正是「点击横向偏移」的来源。
+        let (dw, dh) = ios_screen_size(&dev.id).await.expect("应能取屏幕尺寸");
+        let aspect = Some(dw as f64 / dh as f64);
         let mut got = false;
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            if cast_latest(Platform::Ios, &dev.id).is_some() {
+            if cast_latest(Platform::Ios, &dev.id, aspect).is_some() {
                 got = true;
                 break;
             }
@@ -5343,12 +5364,21 @@ mod window_cast_live {
             gw < 0.999 || gh < 0.999,
             "几何等于整帧（宽高都是 1）——说明没抓到窗口边距，点击会整体偏移"
         );
+        // 纵向**一定**有边距（标题栏）：实测 top≈0.0508。
+        // 这条是「点击纵向偏移」的直接防线——不裁剪时纵向会偏差 5%。
+        assert!(
+            gy > 0.01 && gy < 0.2,
+            "顶部边距（标题栏）应在 1%–20% 之间，实际 {gy} —— 太小说明没识别到标题栏"
+        );
+        // 横向边距取决于窗口与设备比例的关系：窗口更"胖"时设备贴满宽（gx=0），
+        // 更"瘦"时左右留白（gx>0）。**两种都合法**，所以只能断言它不为负。
+        assert!(gx >= 0.0, "左侧边距不应为负，实际 {gx}");
 
         // 取 30 帧，量总耗时
         let t0 = std::time::Instant::now();
         let mut n = 0;
         for _ in 0..30 {
-            if cast_latest(Platform::Ios, &dev.id).is_some() {
+            if cast_latest(Platform::Ios, &dev.id, aspect).is_some() {
                 n += 1;
             }
             tokio::time::sleep(std::time::Duration::from_millis(33)).await;
