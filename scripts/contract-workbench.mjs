@@ -10,14 +10,57 @@
  * 离线、零凭据、隔离 CODEX_HOME。
  */
 import { spawn } from 'node:child_process';
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { withLoopbackNoProxy } from './no-proxy-env.mjs';
 
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(HERE, '..');
+
 const BIN = process.argv[2] ?? 'codex';
-const home = mkdtempSync(join(tmpdir(), 'kcode-wb-home-'));
+// 命令的工作目录可以是临时目录（它只是沙箱的可写目标）。
 const cwd = mkdtempSync(join(tmpdir(), 'kcode-wb-cwd-'));
+
+// ⚠️ **CODEX_HOME 不要放在临时目录下**（Linux 上踩过，2026-09-24）。
+//
+// Linux 上带沙箱的 `command/exec`（含 `tty: true`）需要一个
+// `codex-linux-sandbox` 助手（execve wrapper）。它**不在包的 codex-path 里**
+// （CI 的报错显示该目录已被搜过、无可用候选），而是由 codex 在**运行时创建**
+// 到 CODEX_HOME 并加进 PATH——即告警里说的 "PATH aliases"。
+// 而 codex 明确拒绝在临时目录下创建可执行助手：/tmp 全局可写，在那里放一个
+// 待执行的二进制是典型的提权/符号链接攻击面。CI 上的原始告警：
+//
+//   WARNING: proceeding, even though we could not create PATH aliases:
+//     Refusing to create helper binaries under temporary dir "/tmp"
+//     (codex_home: AbsolutePathBuf("/tmp/kcode-wb-home-XXXX"))
+//
+// 后果不是「降级」而是**整个请求失败**：
+//
+//   failed to spawn command: Unable to spawn codex-linux-sandbox because:
+//   No viable candidates found in PATH ".../codex-path:.../node_modules/.bin:..."
+//
+// 症状的迷惑性在于**同一脚本里不带 tty 的流式调用是正常的**（第 2、3 节都过），
+// 只有 tty 挂——所以看起来像「PTY 有问题」，实际是「沙箱助手没地方生成」。
+// 对照实验（dangerFullAccess 沙箱）一次就把这两者分开了：它 7ms 返回、增量正常。
+//
+// 本脚本原先用 tmpdir() 建 CODEX_HOME，于是 Linux CI 上稳定失败、macOS 上
+// 永远通过（macOS 用 /usr/bin/sandbox-exec，不需要这个助手）。
+//
+// **产品不受影响**：应用用的是 `app_data_dir()`（Linux 上即
+// `~/.local/share/<bundle-id>/kcode-home`），不在临时目录——所以这是
+// **测试环境的保真度问题**：测试用了一个与生产不同的位置，而那个位置
+// 恰好触发上游的安全拒绝。修它同时也让测试更接近生产形态。
+// 见 docs/协议勘误与修正.md §3.34。
+//
+// 故放在仓库的 .tmp/ 下（已 gitignore）：既隔离，又不是临时目录。
+const homeBase = join(ROOT, '.tmp');
+mkdirSync(homeBase, { recursive: true });
+const home = mkdtempSync(join(homeBase, 'kcode-wb-home-'));
+
+const cleanup = () => rmSync(home, { recursive: true, force: true });
+
 mkdirSync(join(cwd, 'sub'));
 writeFileSync(join(cwd, 'a.txt'), 'hello');
 writeFileSync(
@@ -144,24 +187,36 @@ try {
 
   // ── tty 失败时的诊断（仅失败时输出，正常路径不受影响）──────────
   //
-  // 2026-09-24：CI（Linux）上这两条断言失败——0 条增量、exitCode undefined，
-  // 而**同一脚本的非 tty 流式（第 3 节）是通过的**。因此问题精确到「PTY」。
-  // 且 `exitCode=undefined` 加上 25s 的等待，说明请求是**挂到超时**，
-  // 不是快速失败——这本身就是一个值得上报的行为（上游不该静默挂起）。
+  // 2026-09-24：CI（Linux）上这两条断言失败——0 条增量、exitCode undefined。
+  // 已定位：**沙箱助手 `codex-linux-sandbox` 无法创建**，因为它只肯创建到
+  // CODEX_HOME，而当时 CODEX_HOME 在 /tmp 下（codex 拒绝在临时目录放
+  // 可执行助手）。修法是把 CODEX_HOME 移出临时目录（见文件头部说明）。
   //
-  // 这里加一段**对照实验**，让下一轮 CI 一轮就能区分两种原因：
-  //   · 若放开沙箱后 tty 可用 → 是**沙箱**限制了 PTY（Linux sandbox 常见：
-  //     bwrap/landlock 下的 /dev/ptmx 或 /dev/pts 不可用）；
-  //   · 若放开沙箱后仍不可用 → 与沙箱无关，是 Linux 上 PTY 路径本身的问题。
-  //
-  // 在 macOS 上默认沙箱下 tty 是正常工作的，因此这段不会触发、不产生噪音。
+  // 这段诊断保留下来：它一轮就能把「沙箱限制」与「PTY 本身的问题」分开，
+  // 而下次若有别的环境踩到同类问题，靠的就是这几行。
   if (s.deltas.length === 0) {
     console.log('  ── tty 失败诊断（自动触发）──');
-    console.log(`  耗时: ${ttyMs}ms${tty._t ? '（达到 25s 超时）' : ''}`);
-    console.log(`  完整响应: ${JSON.stringify(tty).slice(0, 500)}`);
-    const errTail = s.stderr.split('\n').filter((l) => l.trim()).slice(-10).join('\n');
+    console.log(`  CODEX_HOME: ${home}`);
+    console.log(`  耗时: ${ttyMs}ms`);
+    console.log(`  完整响应: ${JSON.stringify(tty).slice(0, 700)}`);
+    const errTail = s.stderr.split('\n').filter((l) => l.trim()).slice(-6).join('\n');
     console.log(`  app-server stderr 尾部: ${errTail || '（空）'}`);
     console.log(`  环境: platform=${process.platform} arch=${process.arch}`);
+
+    // 助手本身在不在？这一条直接分开「助手缺失」与「其它原因」两类。
+    // 非 Linux 平台本就不需要它（macOS 用 /usr/bin/sandbox-exec）。
+    if (process.platform === 'linux') {
+      const vendorRoot = join(ROOT, 'node_modules', '@openai', `codex-linux-${process.arch === 'arm64' ? 'arm64' : 'x64'}`, 'vendor');
+      const candidates = [
+        join(vendorRoot, 'x86_64-unknown-linux-musl', 'codex-path', 'codex-linux-sandbox'),
+        join(vendorRoot, 'aarch64-unknown-linux-musl', 'codex-path', 'codex-linux-sandbox'),
+        join(ROOT, 'node_modules', '.bin', 'codex-linux-sandbox'),
+        join(home, 'codex-linux-sandbox'),
+      ];
+      for (const c of candidates) {
+        console.log(`  助手候选 ${c}: ${existsSync(c) ? '存在 ✓' : '缺失'}`);
+      }
+    }
 
     s.deltas.length = 0;
     const openStart = Date.now();
@@ -171,9 +226,7 @@ try {
       sandboxPolicy: { type: 'dangerFullAccess' },
     });
     console.log(`  对照（dangerFullAccess 沙箱）: 增量 ${s.deltas.length} 条，`
-      + `exitCode=${ttyOpen.result?.exitCode}，耗时 ${Date.now() - openStart}ms`
-      + `${ttyOpen._t ? '（超时）' : ''}`);
-    console.log(`  对照 stderr: ${s.stderr.split('\n').filter((l) => l.trim()).slice(-6).join(' | ') || '（空）'}`);
+      + `exitCode=${ttyOpen.result?.exitCode}，耗时 ${Date.now() - openStart}ms`);
     console.log('  ── 诊断结束 ──');
   }
 
@@ -190,4 +243,7 @@ try {
 
 console.log(`\n${'='.repeat(56)}`);
 console.log(`结果: ${pass}/${pass + fail} 通过`);
+// CODEX_HOME 现在建在仓库里（不在临时目录，见文件头说明），所以必须显式清理，
+// 否则每跑一次就留下一个含助手二进制与状态文件的目录。
+cleanup();
 process.exit(fail === 0 ? 0 : 1);
