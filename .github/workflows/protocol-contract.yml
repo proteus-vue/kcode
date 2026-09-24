@@ -193,12 +193,29 @@ jobs:
       # 这更像资源/超时（OOM、磁盘耗尽）而不是代码错误，但这是推断不是实证。
       # 因此每轮都打一次 CPU/内存/磁盘基线：下一轮要么证实要么否证，
       # 而不是继续靠猜。
+      #
+      # **但基线必须能被读到才算数**（2026-09-24 修正）。原先这一步骤只
+      # `echo` 进步骤日志——而完整日志读不到：artifact 需登录（实测 401/404）、
+      # job summary 对未登录访问者不渲染。于是它等于没做：失败时人手上有
+      # 日志尾部，却没有「这台机器有多少内存、还剩多少磁盘」（见 §3.31）。
+      #
+      # 所以把决定性的几个数字压成**一行**（注解有配额，实测 23 条/check-run，
+      # 一行就是一份预算），落盘给失败摘要步骤转成注解，同时进 job summary。
       - name: 资源基线（判断失败是代码问题还是环境问题）
         run: |
           echo "── CPU ──"; nproc
           echo "── 内存 ──"; free -h
           echo "── 磁盘 ──"; df -h / /tmp 2>/dev/null || df -h /
           echo "── 工作区可用空间 ──"; df -h . | tail -1
+
+          line=$(printf '内存 total %s / avail %s ／ 磁盘 / 可用 %s ／ 工作区可用 %s' \
+            "$(free -h | awk '/^Mem:/{print $2}')" \
+            "$(free -h | awk '/^Mem:/{print $7}')" \
+            "$(df -h / | awk 'NR==2{print $4}')" \
+            "$(df -h . | awk 'NR==2{print $4}')")
+          echo "$line" > /tmp/resource-baseline.txt
+          echo "资源基线：$line"   # 日志里也留一份
+          echo "资源基线：$line" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 单元测试 · 核心三 crate（纯逻辑，无外部依赖）
         run: |
@@ -225,6 +242,16 @@ jobs:
             echo "::error::日志文件缺失：$LOG（步骤在写入前就失败了）"
             exit 0
           fi
+          # **资源判据放在最前面**：注解配额是从前往后吃的，超出的部分被
+          # 静默丢弃（§3.29 踩过）。这一行是「OOM 还是代码错误」的唯一判据，
+          # 比任何日志行都关键，所以先发它，日志摘要排后面。
+          # 基线（测试前）与现场（失败时）都给：只看其中一个会误判——
+          # 「机器本来就小」与「跑测试时被吃光」是两种处置。
+          base=$(cat /tmp/resource-baseline.txt 2>/dev/null || echo '未采集（基线步骤未执行）')
+          printf '::error::资源：%s ／ 失败时 mem avail %s, disk / avail %s\n' \
+            "$base" \
+            "$(free -h | awk '/^Mem:/{print $7}')" \
+            "$(df -h / | awk 'NR==2{print $4}')"
           # 全文进 summary（前 80 行足够覆盖编译错误）
           {
             echo '### 单元测试失败详情（前 80 行）'
@@ -235,10 +262,13 @@ jobs:
           # 注解放摘要脚本挑出的关键行
           bash scripts/ci-summarize-failures.sh "$LOG" | head -8
 
-      # 日志作为 artifact 上传：**这是唯一不依赖 admin 权限、也不受注解
-      # 配额限制的读取通道**。前几轮反复出现「CI 红了但看不到为什么」——
-      # 注解有上限（实测 23 条）、job summary 对未登录访问者不渲染、
-      # 完整日志下载要 admin（本项目开发机没有）。artifact 匿名可下载。
+      # 日志上传为 artifact，保留 7 天。
+      #
+      # **注意：这不是一条「匿名可读」的通道。** 上一轮我按推断写下「artifact
+      # 匿名可下载」，2026-09-24 实测否证：API 取是 401，走网页重定向取是 404
+      # （§3.31）。它只能靠带登录态的浏览器会话用。因此**凡决定性信息仍必须
+      # 走注解**——三条通道里只有注解真的通，而它配额最小（实测 23 条）。
+      # 上传保留的理由：拿到登录态的人（或仓库 admin）仍可取全文。
       - name: 上传测试日志（失败时）
         if: failure()
         uses: actions/upload-artifact@v4
@@ -261,7 +291,16 @@ jobs:
 
       - name: 集成测试失败摘要（仅失败时执行）
         if: failure()
-        run: bash scripts/ci-summarize-failures.sh /tmp/rust-integration.log
+        run: |
+          # 更早的步骤失败时，集成测试**根本没跑**，而 `if: failure()` 仍会
+          # 触发这一步——此时摘要脚本会报「找不到日志文件」，那是一条**假信号**：
+          # 它占掉一条注解配额，而字面意思像是集成测试自己坏了（2026-09-23
+          # 那轮就有人这么误读过，见 §3.31）。所以先确认日志存在。
+          if [[ ! -f /tmp/rust-integration.log ]]; then
+            echo "集成测试未执行（更早的步骤已失败，日志未生成）——跳过摘要" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          bash scripts/ci-summarize-failures.sh /tmp/rust-integration.log
 
       # 沙箱前提自检。集成测试失败的现场是「模型发出了命令调用、轮次正常收尾，
       # 但命令 Item 根本没产生」——这指向**命令执行通道本身**而不是命令语法
@@ -282,6 +321,22 @@ jobs:
           # `set +e`：诊断命令任何一条非零退出都不该终止脚本
           # （踩过：`set -e` 下 `out=$(cmd)` 遇非零立即退出，后面探针没跑）
           set +e
+
+          # 同前一步：集成测试没跑时这一步不该跑。否则它会用 8+ 条注解汇报
+          # 「沙箱正常」，而失败原因与沙箱无关——2026-09-23 那轮的 20 条注解里
+          # 有近一半是这么被吃掉的（真正的失败点在 desktop 单元测试那一步，
+          # 探针结论对它没有任何解释力）。见 §3.31。
+          if [[ ! -f /tmp/rust-integration.log ]]; then
+            echo "集成测试未执行——跳过沙箱探针（与本次失败无关）" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # 资源判据排最前（配额从前往后吃）：格式与「失败摘要」那步一致
+          base=$(cat /tmp/resource-baseline.txt 2>/dev/null || echo '未采集（基线步骤未执行）')
+          printf '::error::资源：%s ／ 失败时 mem avail %s, disk / avail %s\n' \
+            "$base" \
+            "$(free -h | awk '/^Mem:/{print $7}')" \
+            "$(df -h / | awk 'NR==2{print $4}')"
 
           BIN=$(find node_modules/@openai -path '*vendor*/bin/codex' -type f 2>/dev/null | head -1)
 

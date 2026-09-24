@@ -65,14 +65,24 @@ fi
 # 让「下一步该修代码还是查环境」当场可判，不必再猜一轮。
 echo "::error::未找到失败用例行——可能是编译失败或环境问题，下面是日志中的错误与尾部："
 
-if grep -qE "^\s*(Compiling|Building|Checking) " "$LOG" && ! grep -qE "^(error|error\[)" "$LOG"; then
+# 日志规模本身就是判据。进程被 SIGKILL 打断时，**缓冲区里的输出会一起丢**，
+# 于是日志会「干净地」停在中途：没有 error 行、没有 FAILED 行，只剩一个
+# 非零退出码（本项目遇到的正是 exit 101 + 零 error 行）。这种情况下，
+# 「输出丢了」与「真的没有错误」只能靠规模区分——正常编译一份 tauri 依赖树
+# 远不止几十 KB（§3.31）。
+echo "::error::  日志规模：$(wc -l < "$LOG") 行 / $(wc -c < "$LOG") 字节"
+
+if grep -qE "^\s*(Compiling|Building|Checking) " "$LOG" && ! grep -qE "^\s*error" "$LOG"; then
   last=$(grep -vE "^\s*$" "$LOG" | tail -1)
   echo "::error::⇒ 判据：日志停在编译中途，且无任何 error 行 → 倾向**资源/超时打断**，而非代码错误"
   echo "::error::  日志最后一行：${last}"
-  echo "::error::  请对照同 run 的「资源基线」步骤（nproc / free / df）判断是内存还是磁盘"
+  echo "::error::  内存/磁盘数字见本步骤上面那条「资源」注解（基线 + 失败现场）"
 fi
 
-grep -nE "^(error|warning: unused|thread .* panicked)" "$LOG" | head -12 | while IFS= read -r line; do
+# 行首的 `^error` 会漏掉**缩进**的错误行（rustc 的 `  error[E0433]: ...` 常带
+# 前导空格，本项目自己造样例日志时就因此误判成「无 error 行 ⇒ 资源问题」）。
+# 一律用 `^\s*error`。
+grep -nE "^\s*(error|warning: unused|thread .* panicked)" "$LOG" | head -12 | while IFS= read -r line; do
   echo "::error::  $line"
 done
 
@@ -80,6 +90,16 @@ done
 grep -nE "error\[E[0-9]+\]|No space left|Killed|out of memory|signal: 9" "$LOG" | head -6 | while IFS= read -r line; do
   echo "::error::  线索：$line"
 done
+
+# 严格匹配全部落空时的**宽松兜底**。上面几条都建立在「失败信息是编译器按
+# 规范格式打出来的」这个假设上，而「exit 101 + 零 error 行」的现场恰恰说明
+# 该假设可能不成立。宽松匹配会命中无关词（标识符、测试名、告警文案），
+# 所以只在严格匹配全空时启用，且只取**尾部 3 行**——尾部最接近失败现场。
+if ! grep -qE "^\s*error|error\[E[0-9]+\]|No space left|Killed|out of memory|signal: 9" "$LOG"; then
+  grep -inE "error|killed|abort|no space|out of memory|signal" "$LOG" | tail -3 | while IFS= read -r line; do
+    echo "::error::  宽松匹配（仅供参考）：$line"
+  done
+fi
 
 echo "::error::---- 日志尾部（最后 12 行）----"
 tail -12 "$LOG" | while IFS= read -r line; do
