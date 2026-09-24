@@ -287,7 +287,7 @@ if [[ "$RC" == "0" ]]; then
   echo "  1. git diff 是否只含预期的改动"
   echo "  2. 审计导出是否记录了两处决策（bash scripts/verify-no-egress.sh 亦可复跑）"
 else
-  echo "✗ 真实模型验收未全部通过（退出码 $RC）" >&2
+  echo "✗ 真实模型验收未全部通过（退出码 ${RC}）" >&2
   echo "  部分失败常见原因：模型不支持该工具、网络不通、配额不足。" >&2
   echo "  请查看上方逐场景输出。" >&2
 fi

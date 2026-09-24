@@ -144,7 +144,7 @@ if nc -z 127.0.0.1 "$PORT" 2>/dev/null; then
   exit 0
 fi
 
-echo "· 启动自动化（端口 $PORT）…"
+echo "· 启动自动化（端口 ${PORT}）…"
 # 超时给足：IDE 要先编译项目，实测数秒到十几秒
 if ! timeout 60 "$CLI" auto --project "$PROJECT" --auto-port "$PORT" --trust-project; then
   echo "✗ 启动失败。常见原因：" >&2
