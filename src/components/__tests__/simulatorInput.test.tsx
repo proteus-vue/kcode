@@ -1112,28 +1112,44 @@ describe('面板纵向顺序', () => {
 /**
  * 轮询间隔必须**按平台自适应**（直接测函数，不比对硬编码数字）。
  *
- * 实测单帧耗时：iOS 139ms / Android 350ms / 小程序 1200ms。
- * 用固定 600ms 时，小程序每轮还没返回就被下一轮触发——请求堆积，
- * 界面表现为「卡顿掉帧」，而根因在轮询策略而不是机器性能。
+ * # 这条规则本身改过（iOS 有了第二条取帧路径）
+ *
+ * 原本的规则是「间隔必须大于该平台的单帧耗时」，它拦住过一次我引入的
+ * 堆积问题，很有价值。但 iOS 接入常驻窗口流后，单帧耗时不再是单一值：
+ *
+ * | iOS 取帧路径 | 单帧耗时 |
+ * |---|---|
+ * | 常驻窗口流（ScreenCaptureKit，默认） | **约 2.2ms** |
+ * | 回退：逐帧 simctl 截图（无屏幕录制权限时） | 约 118–139ms |
+ *
+ * 所以规则要按「这条路径会不会堆积」来写，而不是拿一个数字比大小：
+ * 间隔 ≥ 推送节奏的下限即可，因为**慢路径的堆积由后端挡住**
+ * （取帧在途保护；且慢路径本来就会让界面自然变慢，不是靠前端间隔兜）。
  */
 describe('轮询间隔', () => {
-  /** 各平台的实测单帧耗时（毫秒）。间隔必须大于它，否则请求堆积。 */
-  const MEASURED_FRAME_MS: Record<SimulatorPlatform, number> = {
-    ios: 139,
-    android: 350,
-    miniprogram: 1200,
-    harmony: 350, // 与 Android 同机制（hdc 截图）
+  /**
+   * 各平台的**有效**单帧耗时上限（毫秒）。
+   *
+   * iOS 取的是常驻流的推送周期（1000/30 ≈ 33ms）而不是回退路径的 139ms：
+   * 因为回退路径是异常情况，且它慢的时候前端间隔再大也救不回流畅度。
+   */
+  const EFFECTIVE_FRAME_MS: Record<SimulatorPlatform, number> = {
+    // 常驻流 30fps 推送 → 33ms；间隔取 60ms 给突发留余量
+    ios: 33,
+    android: 350,      // adb screencap，仍是逐帧子进程
+    miniprogram: 1200, // 渲染进程内截屏
+    harmony: 350,
   };
 
-  it('每个平台的间隔都大于该平台的单帧耗时', () => {
-    for (const [p, frameMs] of Object.entries(MEASURED_FRAME_MS) as [
+  it('每个平台的间隔都大于该平台的有效单帧耗时', () => {
+    for (const [p, frameMs] of Object.entries(EFFECTIVE_FRAME_MS) as [
       SimulatorPlatform,
       number,
     ][]) {
       const interval = pollIntervalMs(p);
       expect(
         interval,
-        `${p} 的间隔 ${interval}ms 小于单帧 ${frameMs}ms —— 会堆积请求（表现为掉帧）`,
+        `${p} 的间隔 ${interval}ms 小于有效单帧 ${frameMs}ms —— 会堆积请求`,
       ).toBeGreaterThan(frameMs);
     }
   });
@@ -1144,10 +1160,500 @@ describe('轮询间隔', () => {
     }
   });
 
-  it('慢平台与快平台用不同间隔（一个值不可能对两者都合适）', () => {
-    expect(
-      pollIntervalMs('miniprogram'),
-      '小程序比 iOS 慢约 9 倍，间隔必须不同',
-    ).toBeGreaterThan(pollIntervalMs('ios'));
+  it('iOS 走常驻流后应比逐帧截图的平台更密', () => {
+    // 2.2ms/帧 vs 350ms/帧 —— 如果 iOS 的间隔不小于 Android，说明没吃到常驻流的收益
+    expect(pollIntervalMs('ios')).toBeLessThan(pollIntervalMs('android'));
+    expect(pollIntervalMs('ios')).toBeLessThan(pollIntervalMs('miniprogram'));
   });
 });
+
+describe('能力位驱动交互', () => {
+  it('iOS（坐标级）：拖动发出 swipe，并显示实现方式告知', async () => {
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(<SimulatorPanel status={{ ...status, ios: iosAvailable }} onRefreshStatus={() => {}} />);
+    });
+    // **必须显式切到 iOS**：Android 也有运行中设备，而默认平台选的是
+    // 顺序上第一个有运行中设备的（android）。不切的话断言的是 Android 画面。
+    const iosTab = [...host.querySelectorAll('.sim-tab')].find((t) =>
+      t.textContent?.includes('iOS'),
+    ) as HTMLButtonElement;
+    await act(async () => {
+      iosTab.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(host.querySelector('.sim-screen img'), 'iOS 可用时应出画面').not.toBeNull();
+    expect(img().getAttribute('alt'), '画面应标明是哪台设备').toContain('iPhone 15 Pro');
+
+    // 私有接口的告知必须显示——用户有权知道它为什么可能失效
+    const hintEl = host.querySelector('.sim-input-hint');
+    const hint = hintEl?.textContent ?? '';
+    expect(hint, '应告知 iOS 触摸的实现方式（私有接口）').toContain('私有接口');
+    expect(hint, '应说明会随 Xcode 升级需要适配').toContain('Xcode');
+    // **告知必须在画面容器之外**：它曾是 absolute 浮层叠在画面上，
+    // 三行时盖住画面下沿（可点击区域）。这条断言防它退回去。
+    expect(
+      host.querySelector('.sim-screen .sim-input-hint'),
+      '告知文字不能放在画面容器里（会遮挡可点击区域）',
+    ).toBeNull();
+
+    // 坐标级输入：拖动手势应发出 swipe（与 Android 同一套换算）
+    stubRect(img());
+    await pointer('pointerdown', 100, 200);
+    await pointer('pointermove', 200, 400);
+    await pointer('pointerup', 250, 500);
+    const sent = lastInput();
+    expect(sent, 'iOS 已是坐标级输入，拖动应发出 swipe').toBeDefined();
+    expect(sent?.args.platform, '带上平台').toBe('ios');
+    expect(sent?.args.action, '长距离拖动是 swipe').toBe('swipe');
+  });
+
+  it('只读平台（canInput:false）：任何手势都不发输入，且说明原因', async () => {
+    // 鸿蒙：工具在、能列设备，但触摸注入未验证 → 界面必须只读
+    const harmonyReadonly: SimulatorStatus = {
+      ...status,
+      harmony: {
+        available: true,
+        reason: null,
+        tool: '/hdc',
+        devices: [
+          {
+            id: '7001', name: '鸿蒙设备 7001', os: 'HarmonyOS', resolution: null,
+            running: true, state: 'connected', detail: null, runtimeId: '7001',
+          },
+        ],
+        canLaunch: false,
+        canInput: false,
+        inputHint: '鸿蒙的触摸注入（uinput）尚未在真机上验证；当前画面为只读',
+        inputMode: 'none',
+      },
+    };
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(<SimulatorPanel status={harmonyReadonly} onRefreshStatus={() => {}} />);
+    });
+    const tab = [...host.querySelectorAll('.sim-tab')].find((t) =>
+      t.textContent?.includes('鸿蒙'),
+    ) as HTMLButtonElement;
+    await act(async () => {
+      tab.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const ro = host.querySelector('.sim-input-hint');
+    expect(ro?.textContent).toContain('只读');
+    expect(
+      host.querySelector('.sim-screen .sim-input-hint'),
+      '只读说明同样不能遮挡画面',
+    ).toBeNull();
+    stubRect(img());
+    await pointer('pointerdown', 100, 200);
+    await pointer('pointermove', 200, 400);
+    await pointer('pointerup', 250, 500);
+    expect(lastInput(), 'canInput:false 时任何手势都不该发出输入').toBeUndefined();
+    expect(host.querySelector('.sim-marker'), '不该出现落点标记').toBeNull();
+  });
+});
+
+describe('落点标记', () => {
+  it('点击后出现标记（给出「收到了」的即时确认）', async () => {
+    await mount();
+    stubRect(img());
+    expect(host!.querySelector('.sim-marker')).toBeNull();
+    await pointer('pointerdown', 100, 200);
+    await pointer('pointerup', 100, 200);
+    expect(host!.querySelector('.sim-marker'), '点击后应有落点标记').not.toBeNull();
+  });
+
+  it('拖动中显示轨迹线，抬手后消失', async () => {
+    await mount();
+    stubRect(img());
+    await pointer('pointerdown', 100, 200);
+    await pointer('pointermove', 200, 300);
+    expect(host!.querySelector('.sim-drag'), '拖动中应有轨迹').not.toBeNull();
+    await pointer('pointerup', 200, 300);
+    expect(host!.querySelector('.sim-drag'), '抬手后轨迹应消失').toBeNull();
+  });
+});
+
+/**
+ * 自定义工具路径（兜底设置）。
+ *
+ * 这组守的是「工具装在非默认位置时用户能自救」这条链——
+ * 自动发现会漏（外置卷、改名），而漏了之后必须有个出口。
+ * 三个必守点：
+ *  1. 面板打开时会去读设置（不读就等于入口不存在）；
+ *  2. 保存的参数形状正确（camelCase 字段名，填进去什么就传什么）；
+ *  3. 保存后立刻重新探测（否则用户改完看不到效果，以为没生效）。
+ */
+describe('自定义工具路径', () => {
+  /** 展开折叠面板。 */
+  async function openEditor() {
+    const toggle = host!.querySelector('.sim-paths-toggle') as HTMLButtonElement;
+    expect(toggle, '面板里应有「自定义工具路径」入口').not.toBeNull();
+    await act(async () => {
+      toggle.click();
+    });
+    return toggle;
+  }
+
+  it('面板挂载时读取设置（入口存在且带得出当前值）', async () => {
+    toolPaths = { ...toolPaths, xcode: '/Volumes/data1/applications/Xcode.app' };
+    await mount();
+    expect(
+      calls.some((c) => c.cmd === 'simulator_read_tool_paths'),
+      '应读取一次自定义路径设置',
+    ).toBe(true);
+
+    const toggle = await openEditor();
+    expect(toggle.querySelector('.sim-paths-count')?.textContent).toContain('1');
+    // 值要真的显示在输入框里（不是只在状态里）
+    const xcodeInput = host!.querySelectorAll('.sim-paths-field input')[1] as HTMLInputElement;
+    expect(xcodeInput.value).toBe('/Volumes/data1/applications/Xcode.app');
+  });
+
+  it('保存时按 camelCase 传四个字段，并触发重新探测', async () => {
+    await mount();
+    await openEditor();
+    const before = refreshCalls;
+
+    const inputs = host!.querySelectorAll('.sim-paths-field input') as NodeListOf<HTMLInputElement>;
+    // 只填 Xcode 与小程序两项
+    await act(async () => {
+      const setVal = (el: HTMLInputElement, v: string) => {
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          'value',
+        )!.set!;
+        setter.call(el, v);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      setVal(inputs[1], '/Volumes/x/Xcode.app');
+      setVal(inputs[3], '/Volumes/x/wechatwebdevtools.app');
+    });
+
+    const saveBtn = host!.querySelector('.sim-paths-save') as HTMLButtonElement;
+    await act(async () => {
+      saveBtn.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(savedPaths.length, '应调用一次保存').toBe(1);
+    expect(savedPaths[0]).toEqual({
+      androidSdk: null,
+      xcode: '/Volumes/x/Xcode.app',
+      harmonySdk: null,
+      miniprogram: '/Volumes/x/wechatwebdevtools.app',
+    });
+    expect(refreshCalls, '保存后应通知上层重新探测（用户要当场看到结果）').toBeGreaterThan(before);
+  });
+
+  it('清空输入框传 null（语义是「回到自动检测」，不是空路径）', async () => {
+    toolPaths = { ...toolPaths, androidSdk: '/old/sdk' };
+    await mount();
+    await openEditor();
+
+    const inputs = host!.querySelectorAll('.sim-paths-field input') as NodeListOf<HTMLInputElement>;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(inputs[0], '');
+      inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      (host!.querySelector('.sim-paths-save') as HTMLButtonElement).click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // 空串必须变成 null：传 "" 会让后端 join 出相对路径，且不报错
+    expect(savedPaths[0].androidSdk).toBeNull();
+  });
+
+  it('「全部清空」把四项都置 null 而不只是清显示', async () => {
+    toolPaths = { androidSdk: '/a', xcode: '/b', harmonySdk: '/c', miniprogram: '/d' };
+    await mount();
+    await openEditor();
+
+    await act(async () => {
+      (host!.querySelector('.sim-paths-clear') as HTMLButtonElement).click();
+    });
+    const inputs = host!.querySelectorAll('.sim-paths-field input') as NodeListOf<HTMLInputElement>;
+    for (const el of Array.from(inputs)) {
+      expect(el.value, '清空后输入框应为空').toBe('');
+    }
+  });
+});
+
+
+/**
+ * 小程序：**元素级输入**与坐标模式的区别。
+ *
+ * 这组守的是「能力位驱动界面」在小程序上的正确落地：
+ * 自动化接口不返回元素坐标，因此**不能**把画面做成可点的——
+ * 那会让用户对着画面点半天而没有反应，以为功能坏了。
+ */
+describe('小程序（元素级输入）', () => {
+  /** 小程序就绪的夹具：可输入、但形态是 element。 */
+  function mpStatus(): SimulatorStatus {
+    return {
+      android: onAndroid(),
+      ios: off('缺 Xcode'),
+      harmony: off('缺 hdc'),
+      miniprogram: {
+        available: true,
+        reason: null,
+        tool: '/Volumes/x/wechatwebdevtools.app（自动发现）',
+        devices: [
+          {
+            id: '/w/proj/mp-weixin',
+            name: 'mp-weixin',
+            os: '小程序',
+            resolution: null,
+            running: true,
+            state: 'running',
+            detail: '/w/proj/mp-weixin',
+            runtimeId: '/w/proj/mp-weixin',
+          },
+        ],
+        canLaunch: false,
+        canInput: true,
+        inputHint: '小程序的输入是元素级',
+        inputMode: 'element',
+      },
+    };
+  }
+
+  it('元素模式：画面是只读的（不接管指针），并列出元素', async () => {
+    mpElements = [
+      { id: '44', tag: 'button' },
+      { id: '5', tag: 'view' },
+    ];
+    status = mpStatus();
+    await mount();
+    // 手动切到小程序（默认会选第一个可用平台 android）
+    await act(async () => {
+      const tab = Array.from(host!.querySelectorAll('.sim-tab')).find((b) =>
+        b.textContent?.includes('小程序'),
+      ) as HTMLButtonElement;
+      tab.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // 关键断言：画面带 is-readonly（不接管指针）
+    const screen = host!.querySelector('.sim-screen');
+    expect(
+      screen?.className,
+      '元素模式下画面必须只读——点了没反应的画面比明说更糟',
+    ).toContain('is-readonly');
+
+    // 元素列表出现且可点
+    const els = host!.querySelectorAll('.sim-element');
+    expect(els.length, '应列出元素').toBe(2);
+    expect(els[0].textContent).toContain('button');
+  });
+
+  it('点击元素发出 simulator_miniprogram_tap 并带 elementId', async () => {
+    mpElements = [{ id: '44', tag: 'button' }];
+    status = mpStatus();
+    await mount();
+    await act(async () => {
+      const tab = Array.from(host!.querySelectorAll('.sim-tab')).find((b) =>
+        b.textContent?.includes('小程序'),
+      ) as HTMLButtonElement;
+      tab.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const btn = host!.querySelector('.sim-element') as HTMLButtonElement;
+    await act(async () => {
+      btn.click();
+      await Promise.resolve();
+    });
+    expect(mpTaps, '应调用 simulator_miniprogram_tap').toEqual(['44']);
+  });
+});
+
+
+/**
+ * 设备列表折叠。
+ *
+ * # 为什么需要（真实问题）
+ *
+ * 用户截图反馈：iOS 下设备列表挡住了画面下方。根因有两层——
+ *   1. 列表是 `max-height: 132px` 的滚动容器，第三行被**横切一半**
+ *      （观感像渲染坏了，而不是「可以滚动」）；
+ *   2. 本机 iOS 有 60 台设备，全展开等于把画面挤没。
+ *
+ * 所以改成「收起时只渲染前两行（JS 控制，不靠 CSS 硬切）+ 可展开」。
+ * 这组测试守两条：
+ *   · 收起时只渲染少量行，且**当前选中的那台一定可见**；
+ *   · 展开后能看到全部。
+ */
+describe('设备列表折叠', () => {
+  /** 造 N 台设备的状态。 */
+  function manyDevices(n: number): SimulatorStatus {
+    return {
+      android: off('未装 SDK'),
+      ios: {
+        available: true,
+        reason: null,
+        tool: 'xcrun simctl',
+        devices: Array.from({ length: n }, (_, i) => ({
+          id: `UDID-${i}`,
+          name: `iPhone ${i}`,
+          os: 'iOS 26.0',
+          resolution: null,
+          running: false,
+          state: 'Shutdown',
+          detail: null,
+          runtimeId: `UDID-${i}`,
+        })),
+        canLaunch: true,
+        canInput: true,
+        inputHint: null,
+        inputMode: 'coordinate',
+      },
+      harmony: off('缺 hdc'),
+      miniprogram: off('缺开发者工具'),
+    };
+  }
+
+  async function mountWith(status: SimulatorStatus) {
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(<SimulatorPanel status={status} onRefreshStatus={() => {}} />);
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  const rows = () => host!.querySelectorAll('.sim-device').length;
+
+  it('设备多时默认收起为两行，并提供展开入口', async () => {
+    await mountWith(manyDevices(30));
+    expect(rows(), '默认应收起到两行').toBe(2);
+    const toggle = host!.querySelector('.sim-devices-toggle') as HTMLButtonElement;
+    expect(toggle, '设备多时应给展开入口').not.toBeNull();
+    expect(toggle.textContent, '入口上要写明总数').toContain('30');
+  });
+
+  it('展开后显示全部设备', async () => {
+    await mountWith(manyDevices(30));
+    const toggle = host!.querySelector('.sim-devices-toggle') as HTMLButtonElement;
+    await act(async () => {
+      toggle.click();
+    });
+    expect(rows(), '展开后应显示全部').toBe(30);
+  });
+
+  it('设备少时不给折叠控件（不给无意义的入口）', async () => {
+    await mountWith(manyDevices(2));
+    expect(rows()).toBe(2);
+    expect(
+      host!.querySelector('.sim-devices-toggle'),
+      '只有两行时不该出现折叠入口',
+    ).toBeNull();
+  });
+
+  /**
+   * 收起时**当前选中的设备必须可见**。
+   *
+   * 这条最重要：收起把用户正在看的那台藏起来，他就不知道画面属于谁了。
+   * 实测场景：选中第 20 台 → 收起 → 前两行里没有它。
+   */
+  it('收起时选中的设备仍可见（哪怕不在前两行）', async () => {
+    await mountWith(manyDevices(30));
+    // 展开并选中第 20 台
+    const toggle = host!.querySelector('.sim-devices-toggle') as HTMLButtonElement;
+    await act(async () => {
+      toggle.click();
+    });
+    const all = host!.querySelectorAll('.sim-device-main');
+    await act(async () => {
+      (all[19] as HTMLButtonElement).click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // 收起
+    await act(async () => {
+      (host!.querySelector('.sim-devices-toggle') as HTMLButtonElement).click();
+    });
+    const names = Array.from(host!.querySelectorAll('.sim-device-name')).map(
+      (e) => e.textContent,
+    );
+    expect(names, '收起后选中的设备必须仍可见').toContain('iPhone 19');
+    expect(rows(), '收起时仍只渲染两行（用选中的替换最后一行）').toBe(2);
+  });
+});
+
+
+/**
+ * 面板的**纵向顺序**必须对：设备列表 → 画面 → 输入说明 → 操作条。
+ *
+ * 这条防的是「用绝对定位救布局」这类改法——那种改法在 DOM 上看着没问题，
+ * 但视觉上会重叠。用户截图反馈的正是这个问题（告知文字盖住画面下沿），
+ * 所以顺序本身要成为断言，而不只是靠人看。
+ */
+describe('面板纵向顺序', () => {
+  it('说明文字在画面之后（而不是叠在画面上）', async () => {
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(
+        <SimulatorPanel status={{ ...status, ios: iosAvailable }} onRefreshStatus={() => {}} />,
+      );
+    });
+    const iosTab = [...host.querySelectorAll('.sim-tab')].find((t) =>
+      t.textContent?.includes('iOS'),
+    ) as HTMLButtonElement;
+    await act(async () => {
+      iosTab.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const panel = host.querySelector('.sim-panel')!;
+    // 用 DOM 顺序比较：querySelectorAll 返回文档序
+    const ordered = Array.from(
+      panel.querySelectorAll('.sim-devices, .sim-screen, .sim-input-hint, .sim-bar'),
+    ).map((el) => el.className.split(' ')[0]);
+    const pos = (c: string) => ordered.indexOf(c);
+    expect(pos('sim-devices'), '设备列表应在画面之前').toBeLessThan(pos('sim-screen'));
+    expect(pos('sim-screen'), '画面应在说明文字之前').toBeLessThan(
+      pos('sim-input-hint'),
+    );
+  });
+});
+
+

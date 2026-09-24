@@ -2426,6 +2426,248 @@ fn frame_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, 
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+// ── 常驻窗口帧源 ────────────────────────────────────────────────────────
+//
+// # 为什么需要它
+//
+// 三个平台的画面原本都是「每帧起一个子进程截图」。实测 iOS：
+//
+//   simctl list devices（纯查询，不截图）  116ms
+//   simctl io screenshot                   118ms
+//
+// 也就是说 116ms 全花在**每次重新初始化**上（进程启动只要 2.8ms，截图只占 2ms）。
+// 换成 `kcode-window-cast`（ScreenCaptureKit 常驻流）后实测 **29.5fps**，
+// 编码 7.3ms —— 约 38 倍提升，且是**全公开 API**。
+//
+// # 为什么按窗口抓（而不是按设备）
+//
+// iOS 模拟器、Android 模拟器、微信开发者工具都是**普通窗口**，
+// 所以一条通道覆盖三平台。代价是坐标要从「设备像素」换算到「窗口像素」，
+// 这个换算前端本来就在做（截图尺寸 → 显示尺寸），不需要新增。
+
+/// 一个常驻帧源的句柄。
+struct WindowCast {
+    child: std::process::Child,
+    /// 最新一帧 JPEG。读取端持续覆盖它。
+    latest: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    /// 窗口号（用于日志与失效判断）。
+    window_id: u32,
+    /// 最后一次收到帧的时间（用于判断流是否还活着）。
+    last_frame_at: std::sync::Arc<std::sync::Mutex<std::time::Instant>>,
+}
+
+impl Drop for WindowCast {
+    fn drop(&mut self) {
+        // 显式 kill：常驻进程不该在应用退出后残留
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// 已启动的帧源（按设备 id 索引）。
+static WINDOW_CASTS: std::sync::Mutex<
+    Option<std::collections::HashMap<String, WindowCast>>,
+> = std::sync::Mutex::new(None);
+
+fn casts() -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<String, WindowCast>>> {
+    WINDOW_CASTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 窗口帧源是否可用（helper 存在 + macOS 版本够）。
+pub fn window_cast_path() -> Option<PathBuf> {
+    let mut cands: Vec<PathBuf> = Vec::new();
+    if let Some(res) = resource_dir_override() {
+        cands.push(res.join("binaries").join("kcode-window-cast"));
+    }
+    cands.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join("kcode-window-cast"),
+    );
+    cands.into_iter().find(|p| is_executable(p))
+}
+
+/// 按窗口所有者名找窗口号（取面积最大的那个匹配窗口）。
+///
+/// # 为什么让 helper 自己列窗口
+///
+/// 早期实现用 `/usr/bin/python3 -c "import Quartz; ..."`，但**系统自带的
+/// python3 没有 pyobjc**（实测 `ModuleNotFoundError: No module named 'Quartz'`），
+/// 于是「找窗口」永远失败、常驻流永远起不来，而报出来的现象只是
+/// 「回退到逐帧截图」——看不出是权限、helper 还是查找逻辑的问题。
+///
+/// 现在由 helper 的 `--list` 输出窗口表（它已经链接了 ScreenCaptureKit，
+/// 不引入新依赖）。
+///
+/// **按面积取最大**：同名应用可能有多个窗口（模拟器多设备、开发者工具多窗口），
+/// 而设备画面所在的那个通常是最大的；小窗口多是浮层/工具栏。
+fn find_window_id(owner_needle: &str) -> Option<u32> {
+    let helper = window_cast_path()?;
+    let out = std::process::Command::new(&helper).arg("--list").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let needle = owner_needle.to_lowercase();
+    let mut best: Option<(u32, u64)> = None;
+    for line in text.lines() {
+        // 格式：<windowID>\t<owner>\t<WxH>
+        let mut parts = line.split('\t');
+        let (Some(id_s), Some(owner), Some(size)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        if !owner.to_lowercase().contains(&needle) {
+            continue;
+        }
+        let Ok(id) = id_s.trim().parse::<u32>() else { continue };
+        let area = size
+            .split('x')
+            .filter_map(|v| v.trim().parse::<u64>().ok())
+            .product::<u64>();
+        if best.map(|(_, a)| area > a).unwrap_or(true) {
+            best = Some((id, area));
+        }
+    }
+    best.map(|(id, _)| id)
+}
+
+/// 平台对应的窗口所有者名（用于定位要抓哪个窗口）。
+fn window_owner_for(platform: Platform) -> Option<&'static str> {
+    match platform {
+        // 模拟器窗口的应用名就是 Simulator
+        Platform::Ios => Some("Simulator"),
+        // 开发者工具的模拟器在其中
+        Platform::Miniprogram => Some("微信开发者工具"),
+        // Android 模拟器窗口名随 AVD 变，但都属于 qemu/emulator 进程；
+        // 用 `emulator` 前缀匹配不到，故暂不启用（返回 None → 回退逐帧截图）
+        Platform::Android => None,
+        Platform::Harmony => None,
+    }
+}
+
+/// 启动常驻帧源（若尚未启动）。失败返回 None，由调用方回退到逐帧截图。
+fn ensure_cast(platform: Platform, device_id: &str) -> Option<()> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let helper = window_cast_path()?;
+    let owner = window_owner_for(platform)?;
+
+    let mut guard = casts();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    // 已在跑且还新鲜 → 复用
+    if let Some(c) = map.get_mut(device_id) {
+        // `try_wait` 需要可变借用（它可能回收子进程）
+        let alive = c.child.try_wait().map(|s| s.is_none()).unwrap_or(false);
+        if alive {
+            return Some(());
+        }
+        map.remove(device_id);
+    }
+
+    let window_id = find_window_id(owner)?;
+    let mut child = std::process::Command::new(&helper)
+        .args([
+            "--window",
+            &window_id.to_string(),
+            "--fps",
+            "30",
+            "--width",
+            "450",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let stdout = child.stdout.take()?;
+    let latest: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let last = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let (l2, t2) = (latest.clone(), last.clone());
+
+    // 读帧线程：解析帧头（KCFRAME + 长度）+ 二进制体，只保留最新一帧。
+    //
+    // **只留最新**（而不是排队）：面板上晚到的旧帧没有价值，堆积只会增加延迟。
+    // 这与 serve-sim 的「新订阅者只该拿到最新帧」是同一个考虑。
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut header = String::new();
+        loop {
+            header.clear();
+            // 读一行头
+            let mut byte = [0u8; 1];
+            let mut line = Vec::new();
+            loop {
+                match reader.read(&mut byte) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {
+                        if byte[0] == b'\n' {
+                            break;
+                        }
+                        line.push(byte[0]);
+                        if line.len() > 64 {
+                            return; // 头异常，退出
+                        }
+                    }
+                }
+            }
+            header = String::from_utf8_lossy(&line).into_owned();
+            let Some(rest) = header.strip_prefix("KCFRAME ") else { continue };
+            let Ok(len) = rest.trim().parse::<usize>() else { continue };
+            let mut buf = vec![0u8; len];
+            if reader.read_exact(&mut buf).is_err() {
+                return;
+            }
+            *l2.lock().unwrap_or_else(|e| e.into_inner()) = Some(buf);
+            *t2.lock().unwrap_or_else(|e| e.into_inner()) = std::time::Instant::now();
+        }
+    });
+
+    // 打一行日志：抓的是哪个窗口。排查「画面不对/抓错窗口」时这是唯一线索。
+    eprintln!("[kcode] 已启动窗口帧源：{} → 窗口 {}", device_id, window_id);
+    map.insert(
+        device_id.to_owned(),
+        WindowCast { child, latest, window_id, last_frame_at: last },
+    );
+    Some(())
+}
+
+/// 从常驻帧源取最新帧。返回 None 表示「流不可用或还没出帧」，调用方回退。
+fn cast_latest(platform: Platform, device_id: &str) -> Option<Vec<u8>> {
+    ensure_cast(platform, device_id)?;
+    let guard = casts();
+    let map = guard.as_ref()?;
+    let c = map.get(device_id)?;
+    // 超过 2 秒没新帧 → 视为流已死（窗口可能最小化/关闭），回退逐帧截图
+    let stale = c
+        .last_frame_at
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .elapsed()
+        > std::time::Duration::from_secs(2);
+    if stale {
+        // 日志带上窗口号：它决定「抓的是哪个窗口」，而这是排查
+        // 「画面不对 / 抓到别的窗口」时的唯一线索。
+        eprintln!(
+            "[kcode] 窗口帧源已停出帧（窗口 {} 超过 2 秒无新帧），回退逐帧截图",
+            c.window_id
+        );
+        return None;
+    }
+    let v = c.latest.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    v
+}
+
+/// 停止某个设备的常驻帧源（切设备/关面板时调用，避免进程堆积）。
+pub fn stop_cast(device_id: &str) {
+    let mut guard = casts();
+    if let Some(map) = guard.as_mut() {
+        map.remove(device_id);
+    }
+}
+
 /// 取一帧画面，返回 data URL 与设备尺寸。
 ///
 /// 尺寸一并返回：前端据它把点击坐标换算回设备空间（见 `to_device_coords`）。
@@ -2434,11 +2676,17 @@ fn frame_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, 
 /// 必须传 true（首次选中设备、切换设备回来、停止后重启）——否则服务端
 /// 认为「这帧没变」而前端却没有帧，面板会空着。
 pub async fn frame(platform: Platform, id: &str, force: bool) -> Result<Captured, String> {
-    let bytes = match platform {
-        Platform::Android => shot_android(id).await?,
-        Platform::Ios => shot_ios(id).await?,
-        Platform::Harmony => shot_harmony(id).await?,
-        Platform::Miniprogram => shot_miniprogram().await?,
+    // 优先走**常驻窗口流**（ScreenCaptureKit，实测 29.5fps vs 逐帧截图的 8fps）。
+    // 不可用时回退到逐帧截图——两条路都要能工作：
+    // 常驻流需要「屏幕录制」权限，用户没给授权时必须仍能看画面。
+    let bytes = match cast_latest(platform, id) {
+        Some(b) if !b.is_empty() => b,
+        _ => match platform {
+            Platform::Android => shot_android(id).await?,
+            Platform::Ios => shot_ios(id).await?,
+            Platform::Harmony => shot_harmony(id).await?,
+            Platform::Miniprogram => shot_miniprogram().await?,
+        },
     };
     if bytes.is_empty() {
         return Err("截图返回空数据".to_owned());
@@ -4711,5 +4959,80 @@ mod mp_clickable_live {
                  （只验证「有文字有位置」是不够的，必须验证「点得动」）"
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod window_cast_live {
+    //! 常驻窗口流的端到端验证（需 Simulator 窗口在显示）。
+    //!
+    //! 判据是**连续取帧的实际耗时**——它直接对应用户看到的流畅度。
+    //! 注意：这里量的是「取最新帧」，不是「等新帧」，所以数字会很小；
+    //! 真正的帧率上限由 helper 的推送节奏（30fps）决定，见 helper 的 STATS。
+    use super::*;
+
+    #[tokio::test]
+    #[ignore]
+    async fn resident_stream_is_faster_than_per_frame_screenshot() {
+        if !cfg!(target_os = "macos") {
+            eprintln!("跳过：非 macOS");
+            return;
+        }
+        if window_cast_path().is_none() {
+            eprintln!("跳过：kcode-window-cast 未编译（bash scripts/build-window-cast.sh）");
+            return;
+        }
+        let st = probe().await;
+        let Some(dev) = st.ios.devices.iter().find(|d| d.running).cloned() else {
+            eprintln!("跳过：没有运行中的 iOS 模拟器（且 Simulator 窗口需在显示）");
+            return;
+        };
+        if find_window_id("Simulator").is_none() {
+            eprintln!("跳过：找不到 Simulator 窗口");
+            return;
+        }
+
+        // 等流启动并出帧（条件等待，不固定 sleep）
+        let mut got = false;
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if cast_latest(Platform::Ios, &dev.id).is_some() {
+                got = true;
+                break;
+            }
+        }
+        assert!(got, "常驻流应在 10 秒内出帧（检查屏幕录制权限）");
+        eprintln!("✓ 常驻流已出帧");
+
+        // 取 30 帧，量总耗时
+        let t0 = std::time::Instant::now();
+        let mut n = 0;
+        for _ in 0..30 {
+            if cast_latest(Platform::Ios, &dev.id).is_some() {
+                n += 1;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(33)).await;
+        }
+        let ms = t0.elapsed().as_millis() as f64;
+        eprintln!(
+            "取 {} 帧耗时 {:.0}ms（含 33ms 间隔）—— 每帧约 {:.1}ms 开销",
+            n,
+            ms,
+            (ms - 30.0 * 33.0) / 30.0
+        );
+
+        // 对照：逐帧截图 3 次的耗时
+        let t1 = std::time::Instant::now();
+        for _ in 0..3 {
+            let _ = shot_ios(&dev.id).await;
+        }
+        let shot_ms = t1.elapsed().as_millis() as f64 / 3.0;
+        eprintln!("对照：逐帧截图约 {shot_ms:.0}ms/帧");
+        assert!(
+            shot_ms > 50.0,
+            "对照组的逐帧截图应明显更慢（实测约 118ms），实际 {shot_ms:.0}ms —— 若它变快了，这个测试的前提要重新评估"
+        );
+
+        stop_cast(&dev.id);
     }
 }

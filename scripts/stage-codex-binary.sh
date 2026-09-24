@@ -104,6 +104,15 @@ if ! bash "$ROOT/scripts/build-sim-hid.sh"; then
   echo "⚠ kcode-sim-hid 未就绪：打包产物里 iOS 模拟器将只读（可看画面、不能点）" >&2
 fi
 
+# 窗口帧源（ScreenCaptureKit 常驻流）。它决定**画面流畅度**：
+# 逐帧截图约 8fps，常驻流实测 29.5fps。同样失败不中止打包。
+#
+# 它需要「屏幕录制」权限（首次运行系统会弹窗），所以即使打进去，
+# 未授权的机器上会自动回退逐帧截图——两条路都要能用。
+if ! bash "$ROOT/scripts/build-window-cast.sh"; then
+  echo "⚠ kcode-window-cast 未就绪：iOS/Android 画面将退回逐帧截图（约 8fps）" >&2
+fi
+
 # 记录来源版本，便于排查「包里的 codex 是哪个版本」
 if [[ -f "$ROOT/codex.lock.json" ]]; then
   cp "$ROOT/codex.lock.json" "$STAGE/codex.lock.json"
@@ -116,4 +125,9 @@ if [[ -x "$STAGE/kcode-sim-hid" ]]; then
   echo "  · 含 kcode-sim-hid（iOS 触摸注入，走 Apple 私有接口）"
 else
   echo "  · 无 kcode-sim-hid：iOS 模拟器将只读"
+fi
+if [[ -x "$STAGE/kcode-window-cast" ]]; then
+  echo "  · 含 kcode-window-cast（常驻窗口帧源，ScreenCaptureKit）"
+else
+  echo "  · 无 kcode-window-cast：画面走逐帧截图（约 8fps）"
 fi

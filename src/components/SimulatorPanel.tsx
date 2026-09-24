@@ -70,7 +70,12 @@ export function pollIntervalMs(platform: SimulatorPlatform): number {
     case 'miniprogram':
       return 1400; // 实测 1011–1200ms，留余量
     case 'ios':
-      return 500;  // 实测 139ms
+      // 走常驻窗口流（ScreenCaptureKit）时取最新帧只要约 2.2ms，
+      // 但**上限是 30fps 的推送节奏**，所以 60ms（≈16fps）留足余量又不浪费。
+      // 若常驻流不可用（没给屏幕录制权限）会自动回退逐帧截图（118ms/帧），
+      // 那种情况下这个间隔偏密——但代价只是多发几次请求，而 UI 不会卡
+      // （请求由 600ms 的在途保护挡住，见 grab 的 grabbing 标志）。
+      return 60;
     default:
       return 600;  // Android 实测 350ms
   }
