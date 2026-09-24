@@ -30,6 +30,8 @@ kcode-bridge = { path = "../kcode-bridge" }
 # CSP frame-ancestors 拒绝，做不到「内置浏览器」。
 tauri = { version = "2", features = ["unstable"] }
 # process：模拟器命令需要超时控制（adb 在设备 offline 时会一直阻塞）。
-tokio = { version = "1", features = ["sync", "time", "rt", "macros", "process"] }
+# net + io-util：小程序的自动化服务是 WebSocket（见 miniprogram.rs），
+# 需要 TCP 与读写扩展。
+tokio = { version = "1", features = ["sync", "time", "rt", "macros", "process", "net", "io-util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

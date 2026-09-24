@@ -30,7 +30,7 @@
 | **L3** | React 前端：**液态玻璃三栏 UI**、审批弹窗、Diff 审阅、流式输出、Markdown、模型选择 | ✅ |
 
 <!-- test-stats:begin -->
-合计 **332 项 Rust 测试 + 579 项前端测试 + 56 项协议契约断言**——
+合计 **341 项 Rust 测试 + 581 项前端测试 + 56 项协议契约断言**——
 数字由 `scripts/test-stats.mjs` 实际运行统计，明细见 [`docs/test-stats.md`](docs/test-stats.md)。
 <!-- test-stats:end -->
 

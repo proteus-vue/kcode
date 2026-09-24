@@ -3930,6 +3930,49 @@ body {
 .sim-paths-clear:hover:not(:disabled) { background: rgba(255,255,255,0.05); color: var(--t1); }
 .sim-paths-save:disabled, .sim-paths-clear:disabled { opacity: 0.45; cursor: default; }
 
+/* ── 页面元素列表（小程序）─────────────────────────────────────────────
+   小程序不能按坐标点（自动化接口不返回元素位置），所以输入走这个列表。
+   放在画面下方：用户先看到画面，再在列表里找到要点的那一项。 */
+.sim-elements {
+  margin-top: 8px;
+  border-top: 1px solid var(--edge-soft);
+  padding-top: 6px;
+  max-height: 190px;
+  display: flex; flex-direction: column;
+}
+.sim-elements-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 2px 4px;
+}
+.sim-elements-title {
+  font-size: 10.5px; color: var(--t3);
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sim-elements-empty {
+  margin: 0; padding: 4px 2px;
+  font-size: 10.5px; line-height: 1.55; color: var(--t4);
+}
+.sim-elements-list {
+  overflow-y: auto; display: flex; flex-wrap: wrap; gap: 4px;
+  padding: 2px 2px 4px;
+}
+.sim-element {
+  display: inline-flex; align-items: baseline; gap: 4px;
+  padding: 3px 7px; border-radius: 5px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--edge-soft);
+  color: var(--t2); font-size: 10.5px; font-family: inherit;
+  cursor: pointer;
+}
+.sim-element:hover:not(:disabled) {
+  background: rgba(106,165,255,0.14); border-color: rgba(106,165,255,0.45); color: var(--t1);
+}
+.sim-element:disabled { opacity: 0.5; cursor: default; }
+.sim-element-tag { color: var(--accent); }
+.sim-element-id { color: var(--t4); font-size: 9.5px; }
+
+
 /* 画面区：图片按可用空间等比缩放（不裁切——裁切会让坐标换算失效） */
 .sim-screen {
   /* **用 flex 而不是 grid 居中**：`place-items: center` 会让图片成为

@@ -12,6 +12,7 @@
 
 pub mod browser;
 pub mod fileaccess;
+pub mod miniprogram;
 pub mod simulator;
 
 use kcode_app::{AgentService, AppEvent, ServiceConfig};
@@ -822,6 +823,27 @@ async fn simulator_save_tool_paths(
     simulator::save_overrides(&state.paths.app_data, overrides).map_err(CommandError::from)
 }
 
+/// 列举小程序当前页的元素（供界面做成可点列表）。
+///
+/// 小程序**不能按坐标点**（自动化接口不返回元素位置），所以界面给的是
+/// 元素列表而不是可点画面。这个命令就是那个列表的数据源。
+#[tauri::command]
+async fn simulator_miniprogram_elements(
+) -> Result<serde_json::Value, CommandError> {
+    let (route, elements) = simulator::miniprogram_elements()
+        .await
+        .map_err(CommandError::from)?;
+    Ok(serde_json::json!({ "route": route, "elements": elements }))
+}
+
+/// 点击小程序的一个元素。
+#[tauri::command]
+async fn simulator_miniprogram_tap(element_id: String) -> Result<(), CommandError> {
+    simulator::miniprogram_tap(&element_id)
+        .await
+        .map_err(CommandError::from)
+}
+
 /// 启动一个设备。`platform` 取 `android` / `ios`。
 #[tauri::command]
 async fn simulator_start(platform: String, id: String) -> Result<(), CommandError> {
@@ -1194,6 +1216,8 @@ pub fn run() {
             attach_local_image,
             read_attachment_image,
             simulator_probe,
+            simulator_miniprogram_elements,
+            simulator_miniprogram_tap,
             simulator_read_tool_paths,
             simulator_save_tool_paths,
             simulator_start,

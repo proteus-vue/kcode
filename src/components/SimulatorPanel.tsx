@@ -42,6 +42,7 @@ import type {
   SimulatorPlatform,
   SimulatorStatus,
   ToolOverrides,
+  MpElement,
 } from '../types/domain';
 import { classifyGesture, type Gesture } from './simulatorGesture';
 
@@ -551,6 +552,66 @@ export function SimulatorPanel({
     }
   }, [platform, device, onRefreshStatus]);
 
+  // 画面是否接管指针：**只在坐标模式**下才是。
+  // 元素模式（小程序）点画面没有意义——自动化接口不返回元素位置，
+  // 我们无法把一次点击映射到某个元素上。接管了只会让用户白点。
+  // 用 device?.running 而不是下面才定义的 running 局部量（声明顺序所限）。
+  const deviceRunning = device?.running ?? false;
+  const interactive = plat?.inputMode === 'coordinate' && deviceRunning && !!frame;
+  /** 元素模式（小程序）：画面只读，输入走下方的元素列表。 */
+  const elementMode = plat?.inputMode === 'element' && deviceRunning;
+
+  /** 小程序当前页的可点元素（元素模式下才加载）。 */
+  const [mpElements, setMpElements] = useState<MpElement[]>([]);
+  const [mpRoute, setMpRoute] = useState<string>('');
+  const [mpLoading, setMpLoading] = useState(false);
+
+  /** 拉取小程序的元素列表。 */
+  const loadMpElements = useCallback(async () => {
+    if (!platform) return;
+    setMpLoading(true);
+    try {
+      const r = await invoke<{ route: string; elements: MpElement[] }>(
+        'simulator_miniprogram_elements',
+      );
+      setMpRoute(r.route);
+      setMpElements(r.elements);
+      setError(null);
+    } catch (e) {
+      setError(extractErrorMessage(e));
+      setMpElements([]);
+    } finally {
+      setMpLoading(false);
+    }
+  }, [platform]);
+
+  /** 点一个元素，然后刷新列表与画面（页面可能跳转）。 */
+  const tapMpElement = useCallback(
+    async (id: string) => {
+      setInputBusy(true);
+      try {
+        await invoke('simulator_miniprogram_tap', { elementId: id });
+        // 点击可能触发跳转/状态变化 → 等一下再同时刷画面与元素
+        await new Promise((r) => setTimeout(r, 300));
+        await loadMpElements();
+      } catch (e) {
+        setError(extractErrorMessage(e));
+      } finally {
+        setInputBusy(false);
+      }
+    },
+    [loadMpElements],
+  );
+
+  // 进入元素模式时加载一次；离开时清空（避免把上一个平台的数据留着）
+  useEffect(() => {
+    if (elementMode) void loadMpElements();
+    else {
+      setMpElements([]);
+      setMpRoute('');
+    }
+  }, [elementMode, loadMpElements]);
+
   /** 各平台的运行中设备数，用于标签上的计数。 */
   const counts = useMemo(() => {
     const out = {} as Record<SimulatorPlatform, number>;
@@ -571,8 +632,6 @@ export function SimulatorPanel({
 
   const running = device?.running ?? false;
   // 画面是否可交互：平台支持触摸 + 设备在跑 + 手上有帧
-  const interactive = (plat?.canInput ?? false) && running && !!frame;
-
   return (
     <div className="sim-panel">
       {/* ── 平台选择 ────────────────────────────────────────────────
@@ -772,6 +831,51 @@ export function SimulatorPanel({
 
               {/* 只读提示：贴在画面底部，说明**为什么**点不动。
                   不写这句的话用户会以为是自己点错了位置。 */}
+              {/* ── 元素列表（仅元素模式：小程序）─────────────────────
+                  为什么不是可点画面：自动化接口**不返回元素坐标**
+                  （Page.getElements 只给 elementId 与 tagName），
+                  所以我们无法把一次画面点击映射到某个元素上。
+                  给一个点了没反应的画面，比明说「请点下面的元素」更糟。 */}
+              {elementMode && (
+                <div className="sim-elements">
+                  <div className="sim-elements-head">
+                    <span className="sim-elements-title">
+                      页面元素{mpRoute ? ` · ${mpRoute}` : ''}
+                    </span>
+                    <button
+                      className="sim-icon-btn"
+                      title="刷新元素列表"
+                      disabled={mpLoading}
+                      onClick={() => void loadMpElements()}
+                    >
+                      <Icon name="refresh" size={12} />
+                    </button>
+                  </div>
+                  {mpLoading && mpElements.length === 0 && (
+                    <p className="sim-elements-empty">正在读取页面元素…</p>
+                  )}
+                  {!mpLoading && mpElements.length === 0 && (
+                    <p className="sim-elements-empty">
+                      当前页没有可点元素（或页面尚未渲染完成）。
+                    </p>
+                  )}
+                  <div className="sim-elements-list">
+                    {mpElements.map((el) => (
+                      <button
+                        key={el.id}
+                        className="sim-element"
+                        disabled={inputBusy}
+                        onClick={() => void tapMpElement(el.id)}
+                        title={`elementId=${el.id}`}
+                      >
+                        <span className="sim-element-tag">{el.tag}</span>
+                        <span className="sim-element-id">#{el.id}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {!interactive && plat.inputHint && (
                 <span className="sim-readonly-hint">{plat.inputHint}</span>
               )}

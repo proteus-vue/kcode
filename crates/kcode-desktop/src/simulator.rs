@@ -144,6 +144,30 @@ pub struct DeviceEntry {
     pub runtime_id: Option<String>,
 }
 
+/// 触摸输入的**形态**。
+///
+/// # 为什么必须区分，而不是一个 `can_input: bool`
+///
+/// 三个平台的输入能力**形态不同**，而界面的画法完全不同：
+///
+/// - Android：按坐标点/滑（`adb shell input tap x y`）→ 可点画面；
+/// - 小程序：**只能按元素点**（`Element.tap` 需要 elementId，服务端不返回元素
+///   位置）→ 元素列表，点画面没有意义；
+/// - iOS / 鸿蒙：不能输入 → 只读。
+///
+/// 用布尔量表达会把小程序显示成「可点画面」，而用户点了不会有任何反应
+/// ——在他看来说明「这个功能是坏的」。实际是**平台能力形态不同**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InputMode {
+    /// 不支持任何输入。
+    None,
+    /// 按坐标：可点画面任意位置、可滑动。
+    Coordinate,
+    /// 按元素：只能点列出的元素，不能按坐标。
+    Element,
+}
+
 /// 一个平台的能力与设备清单。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -174,6 +198,8 @@ pub struct PlatformStatus {
     /// 鸿蒙是「我们还没验证」。混成一句「不支持触摸」等于把我们的待办
     /// 说成平台的限制。
     pub input_hint: Option<String>,
+    /// 输入形态（见 [`InputMode`]）。界面据此决定画可点画面还是元素列表。
+    pub input_mode: InputMode,
 }
 
 impl PlatformStatus {
@@ -187,6 +213,7 @@ impl PlatformStatus {
             can_launch: false,
             can_input: false,
             input_hint: None,
+            input_mode: InputMode::None,
         }
     }
 }
@@ -745,6 +772,7 @@ pub fn ios_status(developer_dir: &str, simctl_found: bool) -> PlatformStatus {
             // 要写触摸得引入 WebDriverAgent / idb 之类的额外常驻服务，
             // 那是另一个量级的工作，所以 iOS 侧的画面先做成只读。
             can_input: false,
+            input_mode: InputMode::None,
             input_hint: Some(
                 "iOS 模拟器画面为只读：simctl 不提供触摸注入，需额外部署 WebDriverAgent 才能点击"
                     .to_owned(),
@@ -815,6 +843,7 @@ pub fn harmony_status(hdc_found: bool, targets: &[String], tool: Option<&str>) -
         devices,
         can_launch: false,
         can_input: false,
+        input_mode: InputMode::None,
         input_hint: Some(
             "鸿蒙的触摸注入（uinput）尚未在真机上验证；当前画面为只读，验证通过后即可开启"
                 .to_owned(),
@@ -876,6 +905,90 @@ pub fn miniprogram_status_with(
         }
     });
     st
+}
+
+/// 小程序状态的完整形态：工具 + 项目 + 自动化就绪度。
+///
+/// # 三态如实区分（这是本函数存在的理由）
+///
+/// 1. **没装工具** → 给下载指引；
+/// 2. **装了工具、但自动化未就绪**（未启动或端口未开）→ 说明怎么启动；
+/// 3. **就绪** → 可用，并给出当前项目路径。
+///
+/// 合成一句「不可用」会把三种截然不同的下一步动作糊在一起：
+/// 第一种要装东西，第二种要开开关，第三种什么都不用做。
+pub fn miniprogram_status_full(
+    tool: &Path,
+    source: ToolSource,
+    project: Option<&Path>,
+    ready: bool,
+) -> PlatformStatus {
+    let tool_label = match source {
+        ToolSource::Override => format!("{}（手动指定）", tool.display()),
+        _ => format!("{}（自动发现）", tool.display()),
+    };
+
+    if !ready {
+        return PlatformStatus {
+            available: false,
+            reason: Some(
+                "微信开发者工具已安装，但自动化服务未启动。本应用需要它来取画面与点击——\
+                 因为小程序模拟器是开发者工具窗口内的一块渲染区，不是独立进程。\n\
+                 启动方式：打开开发者工具的目标项目后，在本面板点「重新检测」\
+                 （会自动启动），或手动执行 `bash scripts/miniprogram-auto.sh`。"
+                    .to_owned(),
+            ),
+            tool: Some(tool_label),
+            devices: Vec::new(),
+            can_launch: false,
+            // **能做元素级点击**（实测：Element.tap 可用），但不能按坐标。
+            can_input: true,
+            input_mode: InputMode::Element,
+            input_hint: Some(
+                "小程序的输入是**元素级**：只能点下方列出的元素，不能点画面任意位置\
+                 （自动化接口不返回元素坐标）。"
+                    .to_owned(),
+            ),
+        };
+    }
+
+    // 就绪：把当前项目做成一个「设备」条目——它就是被模拟的那个小程序。
+    let devices = project.map_or_else(Vec::new, |p| {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.display().to_string());
+        vec![DeviceEntry {
+            id: p.display().to_string(),
+            name,
+            os: Some("小程序".to_owned()),
+            resolution: None,
+            running: true,
+            state: "running".to_owned(),
+            detail: Some(p.display().to_string()),
+            runtime_id: Some(p.display().to_string()),
+        }]
+    });
+
+    PlatformStatus {
+        available: true,
+        reason: project.is_none().then(|| {
+            "自动化服务已就绪，但未能确定当前打开的项目。\
+             可在「自定义工具路径 → 小程序项目」里直接指定项目目录。"
+                .to_owned()
+        }),
+        tool: Some(tool_label),
+        devices,
+        // 启动/关闭由开发者工具管理，不给按钮（与鸿蒙同理）
+        can_launch: false,
+        can_input: true,
+        input_mode: InputMode::Element,
+        input_hint: Some(
+            "小程序的输入是**元素级**：只能点下方列出的元素，不能点画面任意位置\
+             （自动化接口不返回元素坐标）。"
+                .to_owned(),
+        ),
+    }
 }
 
 /// 把界面坐标换算成设备坐标。/// 把界面坐标换算成设备坐标。
@@ -1024,6 +1137,12 @@ pub struct ToolOverrides {
     pub harmony_sdk: Option<String>,
     /// 微信开发者工具 `.app`。
     pub miniprogram: Option<String>,
+    /// **小程序项目目录**（其下应有 `project.config.json`）。
+    ///
+    /// 与工具路径分开：工具是「用哪个程序」，项目是「模拟哪个小程序」。
+    /// 不指定时会尝试从开发者工具的日志里推断当前打开的项目——那条路
+    /// 是便利而非保证（日志格式随版本可能变），所以必须能手动兜底。
+    pub miniprogram_project: Option<String>,
 }
 
 impl ToolOverrides {
@@ -1039,6 +1158,7 @@ impl ToolOverrides {
         self.xcode = clean(self.xcode);
         self.harmony_sdk = clean(self.harmony_sdk);
         self.miniprogram = clean(self.miniprogram);
+        self.miniprogram_project = clean(self.miniprogram_project);
         self
     }
 
@@ -1048,6 +1168,7 @@ impl ToolOverrides {
             || self.xcode.is_some()
             || self.harmony_sdk.is_some()
             || self.miniprogram.is_some()
+            || self.miniprogram_project.is_some()
     }
 }
 
@@ -1519,7 +1640,7 @@ pub async fn probe() -> SimulatorStatus {
         android: probe_android().await,
         ios: probe_ios().await,
         harmony: probe_harmony().await,
-        miniprogram: probe_miniprogram(),
+        miniprogram: probe_miniprogram().await,
     }
 }
 
@@ -1644,6 +1765,7 @@ async fn probe_android() -> PlatformStatus {
         devices: build_android_entries(&avds, &obs, &getprops),
         can_launch: true,
         can_input: true,
+        input_mode: InputMode::Coordinate,
         input_hint: None,
     }
 }
@@ -1791,30 +1913,51 @@ async fn probe_harmony() -> PlatformStatus {
 ///
 /// 查找顺序：约定位置 → **应用目录扫描**（覆盖外置卷与改名，见
 /// `matches_miniprogram_app`）→ 手动指定（在 `probe` 里优先于本函数）。
-fn probe_miniprogram() -> PlatformStatus {
+async fn probe_miniprogram() -> PlatformStatus {
     let ov = overrides();
-    // 手动指定优先，且**指定了就以它为准**（不回退）——填错了要能看出来。
-    if let Some(p) = ov.miniprogram.as_deref() {
+    let (tool, source) = if let Some(p) = ov.miniprogram.as_deref() {
         let path = PathBuf::from(p);
-        if path.is_dir() {
-            return miniprogram_status_with(true, Some(&path), ToolSource::Override);
+        if !path.is_dir() {
+            return PlatformStatus::unavailable(format!(
+                "指定的微信开发者工具不存在：{p}\n请指向 .app 本身（例如 \
+                 /Volumes/你的卷/applications/wechatwebdevtools.app）。"
+            ));
         }
-        return PlatformStatus::unavailable(format!(
-            "指定的微信开发者工具不存在：{p}\n请指向 .app 本身（例如 \
-             /Volumes/你的卷/applications/wechatwebdevtools.app）。"
-        ));
-    }
-    probe_miniprogram_discover()
+        (path, ToolSource::Override)
+    } else {
+        match discover_miniprogram_tool() {
+            Some(p) => (p.clone(), ToolSource::Discovered),
+            None => return miniprogram_status(false),
+        }
+    };
+
+    // 项目目录：手动指定优先，否则从工具日志推断。
+    // 取不到项目不报错——工具本身可用这件事要如实说，而「还没打开项目」
+    // 是用户下一步能自己解决的状态，不是错误。
+    let project = ov
+        .miniprogram_project
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|p| p.join("project.config.json").is_file())
+        .or_else(crate::miniprogram::discover_project);
+
+    let ready = crate::miniprogram::is_ready().await;
+    miniprogram_status_full(&tool, source, project.as_deref(), ready)
 }
 
-/// 小程序的自动发现（不含手动指定）。
-fn probe_miniprogram_discover() -> PlatformStatus {
-    // 约定位置（快速路径）→ 应用目录扫描（含外置卷）。
-    //
-    // ⚠️ 扫描用**文件名匹配**，不读 bundle id：读 Info.plist 要为每个候选
-    // 起一次 `defaults`（约 20ms × 候选数），而这里只需判断「是不是微信那份」。
-    // 名字匹配的边界由 `matches_miniprogram_app` 的文档说明——它会放行
-    // `微信开发者工具（NWJS）.app`，但不会误认支付宝/京东的开发者工具。
+/// 自动发现微信开发者工具的 `.app`。
+///
+/// # 顺序：**正在运行的实例优先**，然后才是约定位置与扫描
+///
+/// 本机装了两份开发者工具（`applications/` 与 `work/office-applications/`），
+/// 各自有独立的用户数据目录与端口。若按目录顺序挑，很可能挑到**没在运行**
+/// 的那份——而接下来用它去连自动化端口、读它的数据目录，全都会失败，
+/// 报错却指向「端口未监听」「项目未找到」，与真正的根因（挑错了副本）
+/// 隔了一层。实测在 `scripts/miniprogram-auto.sh` 上先踩了一次。
+fn discover_miniprogram_tool() -> Option<PathBuf> {
+    if let Some(p) = running_miniprogram_app() {
+        return Some(p);
+    }
     let mut cands: Vec<PathBuf> = vec![
         PathBuf::from("/Applications/wechatwebdevtools.app"),
         PathBuf::from("/Applications/微信开发者工具.app"),
@@ -1825,12 +1968,35 @@ fn probe_miniprogram_discover() -> PlatformStatus {
         cands.push(home.join("Applications/微信开发者工具.app"));
     }
     if let Some(p) = cands.into_iter().find(|p| p.exists()) {
-        return miniprogram_status_with(true, Some(&p), ToolSource::Discovered);
+        return Some(p);
     }
-    if let Some(p) = find_app(matches_miniprogram_app, |p| p.is_dir()) {
-        return miniprogram_status_with(true, Some(&p), ToolSource::Discovered);
+    find_app(matches_miniprogram_app, |p| p.is_dir())
+}
+
+/// 找出**正在运行**的那份开发者工具 `.app`（靠进程命令行判断）。
+///
+/// 用 `ps` 而不是「读它写了哪个端口文件」：后者是缓存、会滞后
+/// （实测工具重启后端口记录没更新）。进程命令行是事实。
+fn running_miniprogram_app() -> Option<PathBuf> {
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-axo", "command="])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let Some(idx) = line.find("wechatwebdevtools.app/Contents/MacOS/") else { continue };
+        let prefix = line[..idx].trim();
+        // 命令行可能以空格分段，取最后一个以 / 开头的片段作为路径前缀
+        let base = prefix.rsplit(' ').next().unwrap_or(prefix).trim();
+        if !base.starts_with('/') {
+            continue;
+        }
+        let app = PathBuf::from(format!("{base}wechatwebdevtools.app"));
+        if app.is_dir() {
+            return Some(app);
+        }
     }
-    miniprogram_status(false)
+    None
 }
 
 /// 启动一个 AVD（**不等待启动完成**：冷启动十几秒，界面应立刻拿到反馈）。/// 启动一个 AVD（**不等待启动完成**：冷启动十几秒，界面应立刻拿到反馈）。
@@ -1838,10 +2004,13 @@ pub async fn start(platform: Platform, id: &str) -> Result<(), String> {
     match platform {
         Platform::Android => start_android(id).await,
         Platform::Ios => start_ios(id).await,
-        Platform::Harmony | Platform::Miniprogram => Err(format!(
+        Platform::Harmony => Err(format!(
             "{}没有可供本应用调用的启动入口。",
             platform.label()
         )),
+        // 小程序的「启动」语义不同：设备（模拟器）由开发者工具管理，
+        // 但**自动化服务**要单独拉起——那正是这里做的事。
+        Platform::Miniprogram => ensure_miniprogram_automation().await,
     }
 }
 
@@ -1922,6 +2091,74 @@ pub async fn stop(platform: Platform, id: &str) -> Result<(), String> {
     }
 }
 
+/// 截图（小程序）：走自动化 WebSocket。
+async fn shot_miniprogram() -> Result<Vec<u8>, String> {
+    let mut s = crate::miniprogram::Session::connect(crate::miniprogram::AUTO_PORT)
+        .await
+        .map_err(|e| {
+            format!("{e}\n提示：小程序需要开发者工具开着目标项目，且自动化服务已启动。")
+        })?;
+    s.screenshot().await
+}
+
+/// 拉起小程序自动化服务（若尚未就绪）。
+///
+/// 需要两样东西：工具路径（自动发现或手动指定）与项目目录（手动指定或
+/// 从工具日志推断）。任一缺失都给出**可执行的下一步**，而不是笼统失败。
+async fn ensure_miniprogram_automation() -> Result<(), String> {
+    if crate::miniprogram::is_ready().await {
+        return Ok(());
+    }
+    let ov = overrides();
+    let tool = match ov.miniprogram.as_deref().map(PathBuf::from) {
+        Some(p) if p.is_dir() => p,
+        _ => discover_miniprogram_tool().ok_or(
+            "未找到微信开发者工具。可在「自定义工具路径 → 微信开发者工具」里指定 .app 路径。",
+        )?,
+    };
+    let project = ov
+        .miniprogram_project
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|p| p.join("project.config.json").is_file())
+        .or_else(crate::miniprogram::discover_project)
+        .ok_or(
+            "未能确定小程序项目目录。请在开发者工具里打开目标项目，\
+             或在「自定义工具路径 → 小程序项目」里指定（其下应有 project.config.json）。",
+        )?;
+
+    let cli = tool.join("Contents").join("MacOS").join("cli");
+    if !cli.is_file() {
+        return Err(format!(
+            "开发者工具里没有 cli 命令：{}\n该路径可能不是完整的 .app。",
+            cli.display()
+        ));
+    }
+    crate::miniprogram::ensure_automation(&cli, &project).await
+}
+
+/// 列举小程序当前页的元素（供界面做成可点列表）。
+pub async fn miniprogram_elements() -> Result<(String, Vec<crate::miniprogram::Element>), String> {
+    let mut s = crate::miniprogram::Session::connect(crate::miniprogram::AUTO_PORT)
+        .await
+        .map_err(|e| format!("{e}\n提示：请先在面板上点「重新检测」以启动自动化服务。"))?;
+    let (pid, route) = s.current_page().await?;
+    // 只列这两类：view 是所有布局的容器（数量多、可点），button 是可点控件。
+    // 不列 text/image 之类的纯展示元素——它们点了没有意义，只会让列表变长。
+    let mut all = s.elements(&pid, "button").await.unwrap_or_default();
+    all.extend(s.elements(&pid, "view").await.unwrap_or_default());
+    Ok((route, all))
+}
+
+/// 点击小程序的某个元素。
+pub async fn miniprogram_tap(element_id: &str) -> Result<(), String> {
+    let mut s = crate::miniprogram::Session::connect(crate::miniprogram::AUTO_PORT)
+        .await
+        .map_err(|e| format!("{e}\n提示：请先在面板上点「重新检测」以启动自动化服务。"))?;
+    let (pid, _) = s.current_page().await?;
+    s.tap(&pid, element_id).await
+}
+
 /// 一帧画面的抓取结果。
 #[derive(Debug, Clone)]
 pub struct Captured {
@@ -1962,11 +2199,7 @@ pub async fn frame(platform: Platform, id: &str, force: bool) -> Result<Captured
         Platform::Android => shot_android(id).await?,
         Platform::Ios => shot_ios(id).await?,
         Platform::Harmony => shot_harmony(id).await?,
-        Platform::Miniprogram => {
-            return Err(
-                "小程序取画面尚未接入（需要开发者工具开启服务端口后建立自动化会话）".to_owned(),
-            )
-        }
+        Platform::Miniprogram => shot_miniprogram().await?,
     };
     if bytes.is_empty() {
         return Err("截图返回空数据".to_owned());
@@ -3096,6 +3329,7 @@ mod tests {
             xcode: Some(String::new()),
             harmony_sdk: Some("/x/sdk".to_owned()),
             miniprogram: None,
+            miniprogram_project: None,
         }
         .normalized();
         assert!(ov.android_sdk.is_none(), "空白应归一为 None");
@@ -3111,6 +3345,7 @@ mod tests {
             xcode: None,
             harmony_sdk: None,
             miniprogram: None,
+            miniprogram_project: None,
         }
         .normalized();
         assert!(!ov.any_set(), "全空时 any_set 必须为 false（界面据此不显示「已自定义」）");
@@ -3143,6 +3378,7 @@ mod tests {
             xcode: Some("/Volumes/data1/applications/Xcode.app".to_owned()),
             harmony_sdk: None,
             miniprogram: Some("/Volumes/data1/applications/wechatwebdevtools.app".to_owned()),
+            miniprogram_project: None,
         };
         save_overrides(dir.path(), ov.clone()).unwrap();
         // 重新读出来应一致（且 current 已生效）
@@ -3360,21 +3596,41 @@ mod live_tests {
         );
     }
 
-    /// 小程序的探测**必须给出原因**：没装给安装指引，装了也要说明为什么
-    /// 还不能取画面。空原因的「不可用」等于让用户自己猜。
+    /// 小程序的探测**必须给出原因与下一步**。
+    ///
+    /// # 这条断言随能力变化改写（2026-09-24）
+    ///
+    /// 原先断言的是「**永远不可用**」——那时取画面确实未接入。接入之后
+    /// 它就开始失败，而失败信息是「不应报告为可用」——一条**过期的断言
+    /// 在阻止正确的行为**。
+    ///
+    /// 改写成守住**不变的部分**：无论可用与否，都不能给空原因。
+    /// 可用时要说清输入形态（元素级，不是坐标）；不可用时要说清怎么办。
+    /// 那才是这个测试真正该守的东西。
     #[tokio::test]
-    async fn miniprogram_unavailable_always_explains() {
+    async fn miniprogram_always_explains_its_state() {
         let st = probe().await;
-        assert!(
-            !st.miniprogram.available,
-            "小程序取画面尚未接入，不应报告为可用"
-        );
-        let reason = st.miniprogram.reason.as_deref().unwrap_or("");
-        assert!(!reason.is_empty(), "不可用必须带原因与下一步");
-        assert!(
-            reason.contains("开发者工具"),
-            "原因里应点名微信开发者工具（用户据此知道要装/开什么）: {reason}"
-        );
+        if st.miniprogram.available {
+            // 可用：必须说清输入是元素级——否则界面按坐标模式画，
+            // 用户点画面不会有任何反应
+            assert_eq!(
+                st.miniprogram.input_mode,
+                InputMode::Element,
+                "小程序可用时输入形态必须是元素级（自动化接口不返回坐标）"
+            );
+            assert!(
+                st.miniprogram.input_hint.is_some(),
+                "必须说明输入是元素级而不是坐标"
+            );
+        } else {
+            // 不可用：必须给原因与下一步（安装指引或启动自动化）
+            let reason = st.miniprogram.reason.as_deref().unwrap_or("");
+            assert!(!reason.is_empty(), "不可用必须带原因与下一步");
+            assert!(
+                reason.contains("开发者工具"),
+                "原因里应点名微信开发者工具（用户据此知道要装/开什么）: {reason}"
+            );
+        }
     }
 
 

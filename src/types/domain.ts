@@ -614,6 +614,25 @@ export interface PlatformStatus {
   canInput: boolean;
   /** `canInput` 为 false 时的原因（iOS 是平台限制，鸿蒙是我们未验证）。 */
   inputHint: string | null;
+  /**
+   * 输入形态。
+   *
+   * - `none`：不能输入（iOS / 鸿蒙）；
+   * - `coordinate`：按坐标——可点画面任意位置、可滑动（Android）；
+   * - `element`：**只能点元素**，不能按坐标（小程序：自动化接口不返回元素位置）。
+   *
+   * 界面据此决定画可点画面还是元素列表。用一个布尔量表达会把小程序
+   * 显示成「可点画面」，而用户点了不会有任何反应——那看起来像功能坏了，
+   * 实际是平台能力形态不同。
+   */
+  inputMode: 'none' | 'coordinate' | 'element';
+}
+
+/** 小程序当前页的一个可点元素。 */
+export interface MpElement {
+  id: string;
+  /** 标签名（`view` / `button` 等），用于在列表里做可读标签。 */
+  tag: string;
 }
 
 /** 四平台的整体状态。**四个平台都要显示**，不可用也要列出（附原因）。 */

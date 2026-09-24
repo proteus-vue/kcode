@@ -51,6 +51,10 @@ let savedPaths: typeof toolPaths[] = [];
  * 数这个回调才是对的。
  */
 let refreshCalls = 0;
+/** 小程序元素：测试可替换。 */
+let mpElements: { id: string; tag: string }[] = [];
+/** 记录点击过的元素 id。 */
+let mpTaps: string[] = [];
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: async (cmd: string, args: Record<string, unknown> = {}) => {
@@ -66,6 +70,13 @@ vi.mock('@tauri-apps/api/core', () => ({
     if (cmd === 'simulator_probe') {
       probeCalls += 1;
       return probeResult;
+    }
+    if (cmd === 'simulator_miniprogram_elements') {
+      return { route: '/pages/index', elements: mpElements };
+    }
+    if (cmd === 'simulator_miniprogram_tap') {
+      mpTaps.push(args.elementId as string);
+      return undefined;
     }
     if (cmd === 'simulator_read_tool_paths') {
       return { ...toolPaths };
@@ -107,6 +118,7 @@ function off(reason: string): PlatformStatus {
     canLaunch: false,
     canInput: false,
     inputHint: null,
+    inputMode: 'none',
   };
 }
 
@@ -120,6 +132,7 @@ function onAndroid(devices: DeviceEntry[] = [androidDevice()]): PlatformStatus {
     canLaunch: true,
     canInput: true,
     inputHint: null,
+    inputMode: 'coordinate',
   };
 }
 
@@ -148,16 +161,29 @@ const iosAvailable: PlatformStatus = {
   canLaunch: true,
   canInput: false,
   inputHint: 'iOS 模拟器画面为只读：simctl 不提供触摸注入',
+  inputMode: 'none',
 };
 
-const status: SimulatorStatus = {
+/**
+ * 当前测试的探测结果。
+ *
+ * 用 `let` 而不是 `const`：小程序那组需要把 `inputMode` 换成 `element`
+ * 来验证「元素模式不接管画面」。**每个 it 里改了它就必须在 afterEach 里
+ * 恢复**——否则后续测试拿到的平台集合会与本意不符，且表现为难以定位的
+ * 连锁失败（实测踩过：一个测试改了全局夹具，另一个无关测试跟着红）。
+ */
+/** 默认探测结果（每个测试开始时恢复到这个）。 */
+const defaultStatus = (): SimulatorStatus => ({
   android: onAndroid(),
-  ios: { available: false, reason: '未安装完整 Xcode' , tool: null, devices: [], canLaunch: false, canInput: false, inputHint: null },
+  ios: { available: false, reason: '未安装完整 Xcode', tool: null, devices: [], canLaunch: false, canInput: false, inputHint: null, inputMode: 'none' },
   harmony: off('未找到 hdc（鸿蒙设备连接器）'),
   miniprogram: off('未找到微信开发者工具'),
-};
+});
+
+let status: SimulatorStatus = defaultStatus();
 
 beforeEach(() => {
+  status = defaultStatus();
   toolPaths = { androidSdk: null, xcode: null, harmonySdk: null, miniprogram: null };
   savedPaths = [];
   calls.length = 0;
@@ -166,6 +192,8 @@ beforeEach(() => {
   nextFrame = { dataUrl: 'data:image/png;base64,AAAA', width: 1000, height: 2000 };
   probeResult = null;
   refreshCalls = 0;
+  mpElements = [];
+  mpTaps = [];
   /**
    * 假定时器 + `shouldAdvanceTime`：真实时间照常流动（`await sleep` 能推进），
    * 但定时器的回调也在 act 之外的时机被触发时会记在受控队列里。
@@ -177,6 +205,9 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  // 恢复被单个测试改过的全局夹具（见 `status` 的说明）：
+  // 不恢复会让后续测试拿到的平台集合与本意不符，表现为难以定位的连锁失败。
+  status = defaultStatus();
   vi.useRealTimers();
   // **卸载必须在 act 内**：组件里有 600ms 轮询与「等设备就绪」的 2s 循环，
   // 不卸载的话它们的 setState 会落在 act 之外（每次测试几十条 act 警告，
@@ -549,6 +580,7 @@ describe('多平台：设备清单区分型号与系统', () => {
         canLaunch: false,
         canInput: false,
         inputHint: '鸿蒙的触摸注入尚未在真机上验证',
+        inputMode: 'none',
       },
       miniprogram: off('缺开发者工具'),
     };
@@ -742,5 +774,99 @@ describe('自定义工具路径', () => {
     for (const el of Array.from(inputs)) {
       expect(el.value, '清空后输入框应为空').toBe('');
     }
+  });
+});
+
+
+/**
+ * 小程序：**元素级输入**与坐标模式的区别。
+ *
+ * 这组守的是「能力位驱动界面」在小程序上的正确落地：
+ * 自动化接口不返回元素坐标，因此**不能**把画面做成可点的——
+ * 那会让用户对着画面点半天而没有反应，以为功能坏了。
+ */
+describe('小程序（元素级输入）', () => {
+  /** 小程序就绪的夹具：可输入、但形态是 element。 */
+  function mpStatus(): SimulatorStatus {
+    return {
+      android: onAndroid(),
+      ios: off('缺 Xcode'),
+      harmony: off('缺 hdc'),
+      miniprogram: {
+        available: true,
+        reason: null,
+        tool: '/Volumes/x/wechatwebdevtools.app（自动发现）',
+        devices: [
+          {
+            id: '/w/proj/mp-weixin',
+            name: 'mp-weixin',
+            os: '小程序',
+            resolution: null,
+            running: true,
+            state: 'running',
+            detail: '/w/proj/mp-weixin',
+            runtimeId: '/w/proj/mp-weixin',
+          },
+        ],
+        canLaunch: false,
+        canInput: true,
+        inputHint: '小程序的输入是元素级',
+        inputMode: 'element',
+      },
+    };
+  }
+
+  it('元素模式：画面是只读的（不接管指针），并列出元素', async () => {
+    mpElements = [
+      { id: '44', tag: 'button' },
+      { id: '5', tag: 'view' },
+    ];
+    status = mpStatus();
+    await mount();
+    // 手动切到小程序（默认会选第一个可用平台 android）
+    await act(async () => {
+      const tab = Array.from(host!.querySelectorAll('.sim-tab')).find((b) =>
+        b.textContent?.includes('小程序'),
+      ) as HTMLButtonElement;
+      tab.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // 关键断言：画面带 is-readonly（不接管指针）
+    const screen = host!.querySelector('.sim-screen');
+    expect(
+      screen?.className,
+      '元素模式下画面必须只读——点了没反应的画面比明说更糟',
+    ).toContain('is-readonly');
+
+    // 元素列表出现且可点
+    const els = host!.querySelectorAll('.sim-element');
+    expect(els.length, '应列出元素').toBe(2);
+    expect(els[0].textContent).toContain('button');
+  });
+
+  it('点击元素发出 simulator_miniprogram_tap 并带 elementId', async () => {
+    mpElements = [{ id: '44', tag: 'button' }];
+    status = mpStatus();
+    await mount();
+    await act(async () => {
+      const tab = Array.from(host!.querySelectorAll('.sim-tab')).find((b) =>
+        b.textContent?.includes('小程序'),
+      ) as HTMLButtonElement;
+      tab.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const btn = host!.querySelector('.sim-element') as HTMLButtonElement;
+    await act(async () => {
+      btn.click();
+      await Promise.resolve();
+    });
+    expect(mpTaps, '应调用 simulator_miniprogram_tap').toEqual(['44']);
   });
 });
