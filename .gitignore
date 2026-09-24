@@ -34,5 +34,14 @@ logs/
 # Tauri 打包用的暂存二进制（由 scripts/stage-codex-binary.sh 生成，225MB，不入库）
 crates/kcode-desktop/binaries/
 
+# Tauri 按**编译目标**生成的 schema，文件名随宿主/目标平台变化。
+# 只有 desktop-schema.json 被 capabilities/default.json 引用（供编辑器补全），
+# 其余是副产品：本机交叉编译一次就会多出 linux-schema.json 一类的副本
+# （实测会生成一份与 desktop-schema.json 完全相同的 116KB 文件）。
+# 忽略它们，避免这类"看似合理、实则无引用"的文件被顺手提交。
+# macOS-schema.json 是早期提交留下的（仍被跟踪，此处不影响它）。
+crates/kcode-desktop/gen/schemas/*-schema.json
+!crates/kcode-desktop/gen/schemas/desktop-schema.json
+
 # ZCode 工具自动生成的忽略规则（非本项目文件）
 .zcodeignore
