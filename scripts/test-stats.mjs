@@ -184,12 +184,25 @@ function contractStats() {
       .map((l) => l.match(/^\s*✗\s+(.+)$/))
       .filter(Boolean)
       .map((mm) => mm[1].trim());
+    // **契约脚本的输出默认是被吞掉的**：本脚本用 spawnSync 捕获它的 stdout，
+    // 只打印自己的 `· 运行 X …`。于是脚本内置的诊断（例如
+    // contract-workbench 的 tty 对照实验）写进了内存却到不了日志——
+    // CI #68 就是这样：诊断代码跑了、输出却无人看见（勘误 §3.34）。
+    // 所以失败时把诊断块（有则取之）或输出尾部一并带出来。
+    const lines = text.split('\n');
+    const diagFrom = lines.findIndex((l) => /── .*失败诊断/.test(l));
+    const diagTo = lines.findIndex((l) => /── 诊断结束/.test(l));
+    const diagnostics = diagFrom >= 0
+      ? lines.slice(diagFrom, (diagTo >= diagFrom ? diagTo : diagFrom + 12) + 1)
+          .filter((l) => l.trim())
+      : lines.filter((l) => l.trim()).slice(-6);
     out.push({
       ...c,
       passed: Number(m[1]),
       total: Number(m[2]),
       status: r.status,
       failedAssertions,
+      diagnostics,
     });
   }
   return out;
@@ -291,6 +304,8 @@ if (rust.failed > 0 || web.failed > 0 || contracts.some((c) => c.status !== 0)) 
     // 逐条点名失败的断言：契约脚本的断言名本身就是「哪条协议行为不符」，
     // 只给退出码的话 CI 上还要再跑一轮才能定位。
     for (const name of c.failedAssertions ?? []) console.error(`    ✗ ${name}`);
+    // 诊断块紧跟在断言名之后，落在 workflow 摘要步的连读窗口内。
+    for (const line of c.diagnostics ?? []) console.error(`    ${line}`);
   }
   // 点名到用例：只有计数的话，CI 红了也无从下手
   for (const name of rust.failedTests) console.error(`    ✗ ${name}`);
