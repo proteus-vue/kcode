@@ -130,6 +130,53 @@ const PATH_FIELDS: {
 ];
 
 /**
+ * 输入说明。
+ *
+ * # 为什么默认只显示一行
+ *
+ * iOS 的告知有 3 行（约 50px）——放在正常流里会实打实地挤占画面高度，
+ * 而画面是用户点开这个面板的目的。但完全藏起来又违背「用户有权知道
+ * 触摸走的是私有接口」。
+ *
+ * 折中：**首行常显**（它包含最关键的「私有接口」），细节按需展开。
+ * 首行是这句话的主干，不是省略号式的断章取义。
+ */
+function InputHint({ text, disclosure }: { text: string; disclosure: boolean }) {
+  const [open, setOpen] = useState(false);
+  const lines = text.split('\n');
+  const head = lines[0];
+  const rest = lines.slice(1);
+  const hasMore = rest.length > 0;
+
+  if (!hasMore) {
+    return (
+      <p className={`sim-input-hint ${disclosure ? 'is-disclosure' : ''}`}>{text}</p>
+    );
+  }
+  return (
+    <div className={`sim-input-hint ${disclosure ? 'is-disclosure' : ''}`}>
+      <button
+        className="sim-input-hint-head"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        <span className="sim-input-hint-text">{head}</span>
+        <span className={`sim-input-hint-caret ${open ? 'is-open' : ''}`}>
+          <Icon name="chevron" size={10} />
+        </span>
+      </button>
+      {open && (
+        <div className="sim-input-hint-body">
+          {rest.map((l, i) => (
+            <p key={i}>{l}</p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * 「自定义工具路径」面板。
  *
  * # 为什么做成折叠面板而不是独立设置页
@@ -322,6 +369,12 @@ export function SimulatorPanel({
     const firstUsable = PLATFORMS.find((p) => status[p.key].available);
     setPlatform((withRunning ?? firstUsable ?? PLATFORMS[0]).key);
   }, [status, platform]);
+
+  // 换平台时收起设备列表：展开态是「我要在这堆里挑一台」的临时意图，
+  // 而换平台后设备集合完全不同，保持展开只会挤掉画面。
+  useEffect(() => {
+    setDevicesExpanded(false);
+  }, [platform]);
 
   /** 选定初始设备：运行中的优先（那是能出画面的那台）。 */
   useEffect(() => {
@@ -561,6 +614,20 @@ export function SimulatorPanel({
   /** 元素模式（小程序）：画面只读，输入走下方的元素列表。 */
   const elementMode = plat?.inputMode === 'element' && deviceRunning;
 
+  /**
+   * 设备列表是否展开。
+   *
+   * # 为什么需要它
+   *
+   * 默认收起到两行：多数平台只有一两台设备，展开八行会把画面挤没；
+   * 而 iOS 上本机就有 60 台——全展开等于把画面完全遮住（用户点开这个面板
+   * 是来看画面的，不是来看清单的）。
+   *
+   * 收起时不隐藏**当前选中的那台**：它一定可见，否则用户不知道自己
+   * 在看哪个设备。见下面的 visibleDevices。
+   */
+  const [devicesExpanded, setDevicesExpanded] = useState(false);
+
   /** 小程序当前页的可点元素（元素模式下才加载）。 */
   const [mpElements, setMpElements] = useState<MpElement[]>([]);
   const [mpRoute, setMpRoute] = useState<string>('');
@@ -631,6 +698,26 @@ export function SimulatorPanel({
       setBusy(false);
     }
   }, [onRefreshStatus]);
+
+  /**
+   * 收起时要显示哪些设备。
+   *
+   * 规则：**当前选中的那台一定在内**——收起时把它藏起来，用户就不知道自己
+   * 在看哪个设备了。其余按原顺序补齐到前 N 台。
+   *
+   * 这里的"前 N 台"用行数而不是像素：设备行高固定（两行文本），
+   * 而按像素算需要读 DOM（会在渲染前拿不到值）。
+   */
+  const COLLAPSED_ROWS = 2;
+  const visibleDevices = useMemo(() => {
+    const all = plat?.devices ?? [];
+    if (devicesExpanded || all.length <= COLLAPSED_ROWS) return all;
+    const head = all.slice(0, COLLAPSED_ROWS);
+    if (head.some((d) => d.id === deviceId)) return head;
+    const current = all.find((d) => d.id === deviceId);
+    // 当前设备不在前几台：用它替换最后一个，而不是追加（保持行数稳定）
+    return current ? [...head.slice(0, COLLAPSED_ROWS - 1), current] : head;
+  }, [plat, devicesExpanded, deviceId]);
 
   /** 各平台的运行中设备数，用于标签上的计数。 */
   const counts = useMemo(() => {
@@ -722,7 +809,9 @@ export function SimulatorPanel({
 
       {plat?.available && (
         <>
-          {/* ── 设备列表：型号 + 系统 + 分辨率 ───────────────────── */}
+          {/* ── 设备列表：型号 + 系统 + 分辨率 ─────────────────────
+              设备多时可折叠：iOS 本机就有 60 台，全展开会把画面完全遮住。
+              收起时**当前选中的那台一定可见**（见 visibleDevices）。 */}
           <div className="sim-devices">
             {plat.devices.length === 0 && (
               <p className="sim-devices-empty">
@@ -732,7 +821,26 @@ export function SimulatorPanel({
                 {plat.tool && <span className="sim-tool-hint">工具：{plat.tool}</span>}
               </p>
             )}
-            {plat.devices.map((d) => (
+            {plat.devices.length > COLLAPSED_ROWS && (
+              <button
+                className="sim-devices-toggle"
+                onClick={() => setDevicesExpanded((v) => !v)}
+                aria-expanded={devicesExpanded}
+              >
+                <Icon name="chevron" size={11} />
+                <span>
+                  {devicesExpanded
+                    ? '收起设备列表'
+                    : `展开全部 ${plat.devices.length} 台设备`}
+                </span>
+                {!devicesExpanded && (
+                  <span className="sim-devices-count">
+                    已显示 {visibleDevices.length}/{plat.devices.length}
+                  </span>
+                )}
+              </button>
+            )}
+            {visibleDevices.map((d) => (
               <div
                 key={d.id}
                 className={`sim-device ${d.id === deviceId ? 'is-active' : ''} ${
@@ -907,20 +1015,6 @@ export function SimulatorPanel({
                 </div>
               )}
 
-              {/* 输入说明：**只要设置了就显示**，不只在不可用时。
-                  两种语义共用一个字段，但对用户都重要：
-                    · 「为什么不能输入」（鸿蒙未验证 / iOS 缺 helper）；
-                    · 「输入是怎么实现的」（iOS 走私有接口——使用前该知道，
-                      因为它会随 Xcode 升级而失效）。 */}
-              {plat.inputHint && (
-                <span
-                  className={`sim-readonly-hint ${
-                    interactive ? 'is-disclosure' : ''
-                  }`}
-                >
-                  {plat.inputHint}
-                </span>
-              )}
             </div>
           ) : (
             <div className="sim-empty">
@@ -942,6 +1036,16 @@ export function SimulatorPanel({
                     : '首次取帧可能需要几秒。'}
               </p>
             </div>
+          )}
+
+          {/* ── 输入说明 ────────────────────────────────────────────
+              放在画面**下方**，不叠在画面上。
+              原先它是 `position: absolute; bottom` 的浮层——只有一行、且仅在
+              只读时出现时无所谓；iOS 接上触摸后它变成三行且常显，于是**盖住了
+              画面的下沿**，而那正是可点击区域（用户看不到那部分内容）。
+              说明文字不该侵占操作区。 */}
+          {plat.inputHint && (
+            <InputHint text={plat.inputHint} disclosure={interactive} />
           )}
 
           {/* ── 硬件键：只有能输入才有意义 ────────────────────────── */}

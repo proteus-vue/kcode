@@ -641,9 +641,16 @@ describe('能力位驱动交互', () => {
     expect(img().getAttribute('alt'), '画面应标明是哪台设备').toContain('iPhone 15 Pro');
 
     // 私有接口的告知必须显示——用户有权知道它为什么可能失效
-    const hint = host.querySelector('.sim-readonly-hint')?.textContent ?? '';
+    const hintEl = host.querySelector('.sim-input-hint');
+    const hint = hintEl?.textContent ?? '';
     expect(hint, '应告知 iOS 触摸的实现方式（私有接口）').toContain('私有接口');
     expect(hint, '应说明会随 Xcode 升级需要适配').toContain('Xcode');
+    // **告知必须在画面容器之外**：它曾是 absolute 浮层叠在画面上，
+    // 三行时盖住画面下沿（可点击区域）。这条断言防它退回去。
+    expect(
+      host.querySelector('.sim-screen .sim-input-hint'),
+      '告知文字不能放在画面容器里（会遮挡可点击区域）',
+    ).toBeNull();
 
     // 坐标级输入：拖动手势应发出 swipe（与 Android 同一套换算）
     stubRect(img());
@@ -693,7 +700,12 @@ describe('能力位驱动交互', () => {
       await Promise.resolve();
     });
 
-    expect(host.querySelector('.sim-readonly-hint')?.textContent).toContain('只读');
+    const ro = host.querySelector('.sim-input-hint');
+    expect(ro?.textContent).toContain('只读');
+    expect(
+      host.querySelector('.sim-screen .sim-input-hint'),
+      '只读说明同样不能遮挡画面',
+    ).toBeNull();
     stubRect(img());
     await pointer('pointerdown', 100, 200);
     await pointer('pointermove', 200, 400);
@@ -931,5 +943,165 @@ describe('小程序（元素级输入）', () => {
       await Promise.resolve();
     });
     expect(mpTaps, '应调用 simulator_miniprogram_tap').toEqual(['44']);
+  });
+});
+
+
+/**
+ * 设备列表折叠。
+ *
+ * # 为什么需要（真实问题）
+ *
+ * 用户截图反馈：iOS 下设备列表挡住了画面下方。根因有两层——
+ *   1. 列表是 `max-height: 132px` 的滚动容器，第三行被**横切一半**
+ *      （观感像渲染坏了，而不是「可以滚动」）；
+ *   2. 本机 iOS 有 60 台设备，全展开等于把画面挤没。
+ *
+ * 所以改成「收起时只渲染前两行（JS 控制，不靠 CSS 硬切）+ 可展开」。
+ * 这组测试守两条：
+ *   · 收起时只渲染少量行，且**当前选中的那台一定可见**；
+ *   · 展开后能看到全部。
+ */
+describe('设备列表折叠', () => {
+  /** 造 N 台设备的状态。 */
+  function manyDevices(n: number): SimulatorStatus {
+    return {
+      android: off('未装 SDK'),
+      ios: {
+        available: true,
+        reason: null,
+        tool: 'xcrun simctl',
+        devices: Array.from({ length: n }, (_, i) => ({
+          id: `UDID-${i}`,
+          name: `iPhone ${i}`,
+          os: 'iOS 26.0',
+          resolution: null,
+          running: false,
+          state: 'Shutdown',
+          detail: null,
+          runtimeId: `UDID-${i}`,
+        })),
+        canLaunch: true,
+        canInput: true,
+        inputHint: null,
+        inputMode: 'coordinate',
+      },
+      harmony: off('缺 hdc'),
+      miniprogram: off('缺开发者工具'),
+    };
+  }
+
+  async function mountWith(status: SimulatorStatus) {
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(<SimulatorPanel status={status} onRefreshStatus={() => {}} />);
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  const rows = () => host!.querySelectorAll('.sim-device').length;
+
+  it('设备多时默认收起为两行，并提供展开入口', async () => {
+    await mountWith(manyDevices(30));
+    expect(rows(), '默认应收起到两行').toBe(2);
+    const toggle = host!.querySelector('.sim-devices-toggle') as HTMLButtonElement;
+    expect(toggle, '设备多时应给展开入口').not.toBeNull();
+    expect(toggle.textContent, '入口上要写明总数').toContain('30');
+  });
+
+  it('展开后显示全部设备', async () => {
+    await mountWith(manyDevices(30));
+    const toggle = host!.querySelector('.sim-devices-toggle') as HTMLButtonElement;
+    await act(async () => {
+      toggle.click();
+    });
+    expect(rows(), '展开后应显示全部').toBe(30);
+  });
+
+  it('设备少时不给折叠控件（不给无意义的入口）', async () => {
+    await mountWith(manyDevices(2));
+    expect(rows()).toBe(2);
+    expect(
+      host!.querySelector('.sim-devices-toggle'),
+      '只有两行时不该出现折叠入口',
+    ).toBeNull();
+  });
+
+  /**
+   * 收起时**当前选中的设备必须可见**。
+   *
+   * 这条最重要：收起把用户正在看的那台藏起来，他就不知道画面属于谁了。
+   * 实测场景：选中第 20 台 → 收起 → 前两行里没有它。
+   */
+  it('收起时选中的设备仍可见（哪怕不在前两行）', async () => {
+    await mountWith(manyDevices(30));
+    // 展开并选中第 20 台
+    const toggle = host!.querySelector('.sim-devices-toggle') as HTMLButtonElement;
+    await act(async () => {
+      toggle.click();
+    });
+    const all = host!.querySelectorAll('.sim-device-main');
+    await act(async () => {
+      (all[19] as HTMLButtonElement).click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // 收起
+    await act(async () => {
+      (host!.querySelector('.sim-devices-toggle') as HTMLButtonElement).click();
+    });
+    const names = Array.from(host!.querySelectorAll('.sim-device-name')).map(
+      (e) => e.textContent,
+    );
+    expect(names, '收起后选中的设备必须仍可见').toContain('iPhone 19');
+    expect(rows(), '收起时仍只渲染两行（用选中的替换最后一行）').toBe(2);
+  });
+});
+
+
+/**
+ * 面板的**纵向顺序**必须对：设备列表 → 画面 → 输入说明 → 操作条。
+ *
+ * 这条防的是「用绝对定位救布局」这类改法——那种改法在 DOM 上看着没问题，
+ * 但视觉上会重叠。用户截图反馈的正是这个问题（告知文字盖住画面下沿），
+ * 所以顺序本身要成为断言，而不只是靠人看。
+ */
+describe('面板纵向顺序', () => {
+  it('说明文字在画面之后（而不是叠在画面上）', async () => {
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(
+        <SimulatorPanel status={{ ...status, ios: iosAvailable }} onRefreshStatus={() => {}} />,
+      );
+    });
+    const iosTab = [...host.querySelectorAll('.sim-tab')].find((t) =>
+      t.textContent?.includes('iOS'),
+    ) as HTMLButtonElement;
+    await act(async () => {
+      iosTab.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const panel = host.querySelector('.sim-panel')!;
+    // 用 DOM 顺序比较：querySelectorAll 返回文档序
+    const ordered = Array.from(
+      panel.querySelectorAll('.sim-devices, .sim-screen, .sim-input-hint, .sim-bar'),
+    ).map((el) => el.className.split(' ')[0]);
+    const pos = (c: string) => ordered.indexOf(c);
+    expect(pos('sim-devices'), '设备列表应在画面之前').toBeLessThan(pos('sim-screen'));
+    expect(pos('sim-screen'), '画面应在说明文字之前').toBeLessThan(
+      pos('sim-input-hint'),
+    );
   });
 });

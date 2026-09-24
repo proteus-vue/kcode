@@ -4019,23 +4019,37 @@ body {
 /* 只读画面（iOS / 未验证的平台）：把「不可交互」表达清楚。
    降低不透明度会让人以为画面有问题，所以只改光标与一道细边框。 */
 .sim-screen.is-readonly img { cursor: default; }
-.sim-readonly-hint {
-  position: absolute; left: 12px; right: 12px; bottom: 12px;
-  font-size: 10.5px; line-height: 1.5;
-  padding: 5px 8px; border-radius: var(--r-xs);
-  /* 画面是深色的设备截图，提示用半透明底衬保证可读 */
-  background: rgba(12,14,18,0.82); color: var(--t3);
-  backdrop-filter: blur(4px);
-  pointer-events: none;
+/* 输入说明：**在画面下方**，不叠在画面上。
+   原先它是 absolute 浮层（bottom: 12px）——一行时不显眼，而 iOS 接上触摸后
+   它变成三行且常显，就盖住了画面下沿（可点击区域）。 */
+.sim-input-hint {
+  margin: 0;
+  padding: 5px 12px 3px;
+  font-size: 10.5px; line-height: 1.55;
+  color: var(--t3);
+  flex-shrink: 0;
 }
+/* 告知态（可输入但仍需说明实现方式，如 iOS 走私有接口）：
+   更低调——它不阻塞操作，只是告知。 */
+.sim-input-hint.is-disclosure { color: var(--t4); font-size: 10px; }
 
-/* 风险告知态（可输入但仍需说明实现方式，如 iOS 走私有接口）：
-   比只读提示更低调——它不阻塞操作，只是告知。 */
-.sim-readonly-hint.is-disclosure {
-  color: var(--t4);
-  font-size: 10px;
-  line-height: 1.5;
-  white-space: pre-line;
+/* 首行常显 + 可展开细节：3 行告知放在流里会实打实挤占画面高度 */
+.sim-input-hint-head {
+  display: flex; align-items: flex-start; gap: 4px;
+  width: 100%; padding: 0;
+  background: transparent; border: 0;
+  color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.sim-input-hint-head:hover .sim-input-hint-text { color: var(--t1); }
+.sim-input-hint-text { flex: 1; min-width: 0; }
+.sim-input-hint-caret {
+  flex-shrink: 0; display: inline-flex; margin-top: 2px;
+  transition: transform 0.15s ease;
+}
+.sim-input-hint-caret.is-open { transform: rotate(180deg); }
+.sim-input-hint-body { padding: 2px 0 0 2px; }
+.sim-input-hint-body p {
+  margin: 0; padding: 0; font-size: inherit; color: inherit; line-height: 1.5;
 }
 
 /* 落点标记：点击后立刻出现的确认。
@@ -4086,10 +4100,24 @@ body {
 .sim-devices {
   display: flex; flex-direction: column;
   gap: 1px; padding: 4px;
-  max-height: 132px; overflow-y: auto;
+  /* 展开时可滚动（iOS 本机 60 台）。收起时由 JS 只渲染前两行，
+     所以这里的高度是「上限」而不是「显示两行」的手段——
+     原先用 max-height 硬切，结果是第三行被**横切一半**（观感像渲染坏了）。 */
+  max-height: 40vh; overflow-y: auto;
   flex-shrink: 0;
   border-bottom: 1px solid var(--edge-soft);
 }
+/* 折叠开关：设备多时才出现（少于一屏时不给无意义的控件） */
+.sim-devices-toggle {
+  display: flex; align-items: center; gap: 5px;
+  width: 100%; padding: 3px 6px;
+  background: transparent; border: 0;
+  color: var(--t4); font-size: 10.5px; font-family: inherit;
+  cursor: pointer; text-align: left;
+}
+.sim-devices-toggle:hover { color: var(--t1); }
+.sim-devices-toggle svg { flex-shrink: 0; }
+.sim-devices-count { margin-left: auto; font-size: 9.5px; color: var(--t4); }
 .sim-devices-empty {
   margin: 0; padding: 10px 8px;
   font-size: 11px; line-height: 1.55; color: var(--t4);
