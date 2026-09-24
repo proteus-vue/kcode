@@ -2280,57 +2280,99 @@ pub async fn miniprogram_elements() -> Result<PageElements, String> {
     let (pid, route) = s.current_page().await?;
     let viewport = s.viewport().await?;
 
-    // 取 view 与 button：前者是布局容器（可点区域常是它），后者是可点控件。
-    // text 元素不单独取——它们的文字会被父 view 的 innerText 汇总包含，
-    // 单独列出来只会产生一堆与父级重叠的热区。
-    let mut all = s.elements(&pid, "view").await.unwrap_or_default();
-    all.extend(s.elements(&pid, "button").await.unwrap_or_default());
+    // ⚠️ 用 `*` 而不是逐个列举标签。
+    //
+    // 用户的反馈是「自定义组件这种识别不出来可点击」。实测确认：
+    // 在 `/pages/components` 里 `view` 与 `button` 各 0 个，而 `*` 拿到
+    // `scroll-view` + **`component`**（自定义组件的标签名就叫 component）。
+    // 也就是说：只要项目的界面由自定义组件搭成，逐个列标签就会**整页看不到**
+    // 任何可点项——而界面只会显示「0 个」，看起来像这个页面本来就没什么可点。
+    //
+    // `*` 一次拿全，再交给 `pick_clickable` 按「有文字 + 非容器」筛。
+    // 注意 `*` 也会带出 `wx:for` / `wx:if` 这类模板辅助节点（实测存在），
+    // 它们同样由过滤规则处理（无文字或无尺寸）。
+    let all = s.elements(&pid, "*").await.unwrap_or_default();
 
     Ok(PageElements { route, viewport, elements: pick_clickable(all) })
 }
 
-/// 从所有元素里挑出**值得做成热区**的那些。
+/// 从所有元素里挑出**既可点、又能看懂**的那些。
 ///
-/// # 为什么要挑，不能全画
+/// # 三条硬约束（全部来自实测，不是推测）
 ///
-/// 页面上绝大多数元素是**容器**：实测首页有 390×1975 的根 view（整页）、
-/// 390×850 的分组 view。它们的 `innerText` 是**所有子元素文字的拼接**
-/// （根 view 的文本长达 400+ 字）。若把它们也画成热区，会覆盖内部所有
-/// 真实可点项——用户点哪儿都命中容器，热区等于失效。
+/// **① 优先原生节点，丢掉自定义组件宿主。**
 ///
-/// # 规则（纯函数，见测试）
+/// 实测（`/pages/index`，94 个元素）：
 ///
-/// 1. 丢掉没有文字的（无法作为标签，且多为装饰）；
-/// 2. 按**面积升序**处理，小的（更具体的）先入选；
-/// 3. 一个元素若**几乎包含**了已入选的元素，它就是容器 → 丢弃。
-///    （方向很重要：我第一版写成「自己是否被覆盖」，那是反的——
-///    大容器自己的「被覆盖率」很低，于是全都留下了。）
+/// | 类型 | 数量 | `Element.tap` |
+/// |---|---|---|
+/// | 原生节点（`view`，无 `is`） | 34 | ✅ 生效 |
+/// | 自定义组件宿主（`component is="proteus/p-view/index"`，带 `nodeId`） | 60 | ❌ **返回 `{}` 但画面不变** |
 ///
-/// 按面积排序而不是直接做包含矩阵：包含判断是 O(n²) 且要处理
-/// 部分重叠；排序后只需与已入选项比较，逻辑更简单也够快（n≈50）。
-fn pick_clickable(mut all: Vec<crate::miniprogram::Element>) -> Vec<crate::miniprogram::Element> {
-    all.retain(|e| {
-        let t = e.text.trim();
-        // 空文字不要；超长的多半是容器（子元素文字拼接），也不要
-        !t.is_empty() && t.chars().count() <= 40
-    });
-    all.sort_by(|a, b| {
+/// 自定义组件的宿主节点是**包装层**：它在元素树里有 id、能取到文字与位置，
+/// 但 `tap` 不会触发组件内部的点击处理。**这解释了用户反馈的
+/// 「自定义组件这种识别不出来可点击」**——列表里带文字的多是这类宿主，
+/// 点上去全都无声无效。
+///
+/// **② 丢掉模板辅助节点。**
+///
+/// `wx:for` / `wx:for-item` / `wx:if` 也会出现在 `*` 的结果里，但它们
+/// **尺寸为 0×0、文字为空**（实测）。它们是编译期产物，不是页面上的东西。
+///
+/// **③ 必须有尺寸与文字。**
+///
+/// 尺寸为 0 的元素点不到（点上去坐标无意义）；没文字的元素无法作为标签，
+/// 用户看不出它是什么。
+///
+/// 过滤顺序按「成本从低到高」：先按标签与尺寸丢（纯字符串/数值判断），
+/// 再做包含关系（O(n²)，n≈100）。这样大部分元素在第一轮就被排除了。
+pub fn pick_clickable(all: Vec<crate::miniprogram::Element>) -> Vec<crate::miniprogram::Element> {
+    let mut kept: Vec<crate::miniprogram::Element> = all
+        .into_iter()
+        .filter(|e| {
+            // ① 自定义组件宿主：tap 不生效
+            if e.is_component() {
+                return false;
+            }
+            // ② 模板辅助节点
+            if is_template_node(&e.tag) {
+                return false;
+            }
+            // ③ 尺寸与文字
+            if e.width <= 0.0 || e.height <= 0.0 {
+                return false;
+            }
+            let t = e.text.trim();
+            !t.is_empty() && t.chars().count() <= 40
+        })
+        .collect();
+
+    // 按面积升序：小的（更具体的）先入选
+    kept.sort_by(|a, b| {
         let aa = a.width * a.height;
         let bb = b.width * b.height;
         aa.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let mut kept: Vec<crate::miniprogram::Element> = Vec::new();
-    for e in all {
-        // 已入选的小元素几乎都在 e 里 → e 是它们的容器，丢掉
-        let is_container = kept.iter().any(|k| overlap_ratio(k, &e) > 0.9);
+    // 包含关系：大元素若几乎包含了已入选的小元素，它就是容器
+    let mut out: Vec<crate::miniprogram::Element> = Vec::new();
+    for e in kept {
+        let is_container = out.iter().any(|k| overlap_ratio(k, &e) > 0.9);
         if !is_container {
-            kept.push(e);
+            out.push(e);
         }
     }
-    // 输出按页面纵向顺序：列表顺序与用户在屏幕上看到的顺序一致
-    kept.sort_by(|a, b| a.top.partial_cmp(&b.top).unwrap_or(std::cmp::Ordering::Equal));
-    kept
+    // 按纵向顺序输出：列表顺序 = 屏幕顺序
+    out.sort_by(|a, b| a.top.partial_cmp(&b.top).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+/// 是否为模板辅助节点（编译期产物，页面上的 0×0 占位）。
+///
+/// 实测这些会出现在 `*` 的结果里：`wx:for`、`wx:for-item`、`wx:if`。
+/// 它们不是页面内容，点击它们也没有意义。
+fn is_template_node(tag: &str) -> bool {
+    tag.starts_with("wx:")
 }
 
 /// `a` 有多少比例落在 `b` 内（0..1）。用于判断「b 是否包含 a」。
@@ -3461,6 +3503,7 @@ mod tests {
         let mk = |id: &str, tag: &str, text: &str, l: f64, t: f64, w: f64, h: f64| Element {
             id: id.into(), tag: tag.into(), text: text.into(),
             left: l, top: t, width: w, height: h,
+            is: None, node_id: None,
         };
         let all = vec![
             // 整页根容器（文字是全部子元素的拼接）
@@ -3495,6 +3538,65 @@ mod tests {
         assert!(tops.windows(2).all(|w| w[0] <= w[1]), "应按 top 升序: {tops:?}");
     }
 
+    /// **自定义组件宿主的 tap 不生效**——这是用户反馈的直接原因。
+    ///
+    /// 实测（`/pages/index`）：94 个元素里 60 个是自定义组件宿主
+    /// （`component is="proteus/p-view/index"`），它们的 `Element.tap`
+    /// 返回 `{}` 但**画面完全不变**；而原生节点（`view`）的 tap 生效。
+    ///
+    /// 所以过滤必须丢掉宿主节点——否则列表里那些带文字的项点上去全都无效，
+    /// 而用户看到的是「点了没反应」，无从判断是哪里坏了。
+    #[test]
+    fn pick_clickable_drops_component_hosts_and_template_nodes() {
+        use crate::miniprogram::Element;
+        let native = |id: &str, tag: &str, text: &str, t: f64| Element {
+            id: id.into(), tag: tag.into(), text: text.into(),
+            left: 0.0, top: t, width: 100.0, height: 30.0,
+            is: None, node_id: None,
+        };
+        let host = |id: &str, t: f64| Element {
+            id: id.into(), tag: "component".into(),
+            text: "组件库79 个语义组件".into(),
+            left: 0.0, top: t, width: 100.0, height: 30.0,
+            is: Some("proteus/p-view/index".into()),
+            node_id: Some("406".into()),
+        };
+        let tmpl = |id: &str, tag: &str| Element {
+            id: id.into(), tag: tag.into(), text: String::new(),
+            left: 0.0, top: 0.0, width: 0.0, height: 0.0,
+            is: None, node_id: None,
+        };
+
+        let all = vec![
+            host("1", 100.0),                    // 自定义组件宿主（tap 无效）
+            native("2", "view", "组件库", 120.0), // 原生节点（可点）
+            native("3", "view", "能力总览", 200.0),
+            tmpl("4", "wx:for"),                 // 模板辅助节点
+            tmpl("5", "wx:for-item"),
+            tmpl("6", "wx:if"),
+            // 0 尺寸的原生节点：点不到，也丢掉
+            Element {
+                id: "7".into(), tag: "view".into(), text: "零尺寸".into(),
+                left: 0.0, top: 0.0, width: 0.0, height: 0.0,
+                is: None, node_id: None,
+            },
+        ];
+        let kept = pick_clickable(all);
+        let texts: Vec<&str> = kept.iter().map(|e| e.text.as_str()).collect();
+        assert!(texts.contains(&"组件库"), "原生节点应保留: {texts:?}");
+        assert!(texts.contains(&"能力总览"), "原生节点应保留: {texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.contains("79 个语义组件")),
+            "自定义组件宿主必须丢掉（tap 无效）: {texts:?}"
+        );
+        assert!(!texts.contains(&"零尺寸"), "0 尺寸元素点不到，应丢掉");
+        assert!(
+            !kept.iter().any(|e| e.is_component()),
+            "结果里不能有任何组件宿主"
+        );
+        assert_eq!(kept.len(), 2, "只应剩两个原生节点: {texts:?}");
+    }
+
     /// 重叠判断：`a` 落在 `b` 内的比例（容器过滤的判据）。
     #[test]
     fn overlap_ratio_measures_containment() {
@@ -3502,6 +3604,7 @@ mod tests {
         let mk = |l: f64, t: f64, w: f64, h: f64| Element {
             id: "x".into(), tag: "view".into(), text: "t".into(),
             left: l, top: t, width: w, height: h,
+            is: None, node_id: None,
         };
         // 完全包含
         assert!((overlap_ratio(&mk(10.0, 10.0, 20.0, 20.0), &mk(0.0, 0.0, 100.0, 100.0)) - 1.0).abs() < 1e-9);
@@ -4548,5 +4651,65 @@ mod mp_nav_live {
         let p = crate::miniprogram::active_auto_port().await;
         eprintln!("探测到的自动化端口 = {p}");
         assert!(crate::miniprogram::auto_port_candidates().contains(&p));
+    }
+}
+
+#[cfg(test)]
+mod mp_clickable_live {
+    //! **判据级**验证：过滤出来的元素，`tap` 是否真的让画面变化。
+    //!
+    //! 这是本轮修复的核心断言。之前只验证「拿到了文字与位置」，
+    //! 而**位置对 ≠ 点得动**——实测自定义组件宿主有完整的文字与位置，
+    //! 但 tap 返回成功却毫无效果（用户看到的正是这个）。
+    use super::*;
+
+    async fn screenshot() -> Option<Vec<u8>> {
+        let port = crate::miniprogram::active_auto_port().await;
+        let mut s = crate::miniprogram::Session::connect(port).await.ok()?;
+        s.screenshot().await.ok()
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn picked_elements_are_actually_tappable() {
+        if !crate::miniprogram::is_ready().await {
+            eprintln!("跳过：自动化服务未就绪");
+            return;
+        }
+        let page = miniprogram_elements().await.expect("应能取元素");
+        eprintln!("可点元素 {} 个（已过滤组件宿主与模板节点）", page.elements.len());
+        assert!(!page.elements.is_empty(), "应有可点元素");
+        assert!(
+            page.elements.iter().all(|e| !e.is_component()),
+            "结果里不该有自定义组件宿主（它们的 tap 无效）"
+        );
+        assert!(
+            page.elements.iter().all(|e| !e.tag.starts_with("wx:")),
+            "结果里不该有模板辅助节点"
+        );
+
+        // 逐个试前几个，直到有一个能改变画面
+        let before = screenshot().await.expect("应能截图");
+        let mut worked = None;
+        for el in page.elements.iter().take(6) {
+            let port = crate::miniprogram::active_auto_port().await;
+            let Ok(mut s) = crate::miniprogram::Session::connect(port).await else { continue };
+            let Ok((pid, _)) = s.current_page().await else { continue };
+            let _ = s.tap(&pid, &el.id).await;
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            if let Some(after) = screenshot().await {
+                if after != before {
+                    worked = Some(el.clone());
+                    break;
+                }
+            }
+        }
+        match worked {
+            Some(el) => eprintln!("✓ 「{}」的 tap 真的改变了画面", el.text),
+            None => panic!(
+                "过滤后的前 6 个元素 tap 都没生效——说明过滤规则仍有问题\
+                 （只验证「有文字有位置」是不够的，必须验证「点得动」）"
+            ),
+        }
     }
 }

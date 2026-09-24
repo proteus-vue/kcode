@@ -189,7 +189,17 @@ impl Session {
             let text = self.element_text(page_id, &id).await.unwrap_or_default();
             let (left, top, width, height) =
                 self.element_offset(page_id, &id).await.unwrap_or((0.0, 0.0, 0.0, 0.0));
-            out.push(Element { id, tag, text, left, top, width, height });
+            out.push(Element {
+                id,
+                tag,
+                text,
+                left,
+                top,
+                width,
+                height,
+                is: e.get("is").and_then(Value::as_str).map(str::to_owned),
+                node_id: e.get("nodeId").map(value_to_string).filter(|s| !s.is_empty()),
+            });
         }
         Ok(out)
     }
@@ -432,6 +442,21 @@ pub struct Element {
     pub top: f64,
     pub width: f64,
     pub height: f64,
+    /// 自定义组件的标签名（`is` 字段，如 `proteus/p-view/index`）。
+    ///
+    /// 有它说明这是**自定义组件的宿主节点**——实测这类节点的
+    /// `Element.tap` 返回成功但**不触发组件内部逻辑**（画面不变）。
+    /// 所以过滤时会丢掉它们，改用其内部的原生节点。
+    pub is: Option<String>,
+    /// `nodeId`（自定义组件才会有）。
+    pub node_id: Option<String>,
+}
+
+impl Element {
+    /// 是否为自定义组件宿主（`tap` 不生效的那一类）。
+    pub fn is_component(&self) -> bool {
+        self.is.is_some() || self.node_id.is_some()
+    }
 }
 
 /// 小程序视口信息（用于把元素坐标换算成截图上的比例位置）。

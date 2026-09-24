@@ -47,8 +47,34 @@ import type {
 } from '../types/domain';
 import { classifyGesture, type Gesture } from './simulatorGesture';
 
-/** 轮询间隔。实测单帧 350ms，取 600ms 留出余量避免请求堆积。 */
-const POLL_MS = 600;
+/**
+ * 轮询间隔（按平台自适应）。
+ *
+ * # 为什么不能固定 600ms
+ *
+ * 实测单帧耗时差异很大：
+ *
+ * | 平台 | 单帧 | 说明 |
+ * |---|---|---|
+ * | iOS（simctl） | ~139ms | 子进程截图 |
+ * | Android（adb） | ~350ms | 子进程 screencap |
+ * | 小程序（WebSocket） | **~1200ms** | 要等渲染进程截屏 |
+ *
+ * 用固定 600ms 时，小程序每轮还没返回就被下一轮触发——请求堆积、界面更卡，
+ * 而用户看到的是「掉帧」。间隔比单帧耗时略长，才能形成稳定节奏。
+ *
+ * 上限也给了：太快没意义（画面来不及变），太慢会让人觉得卡死。
+ */
+export function pollIntervalMs(platform: SimulatorPlatform): number {
+  switch (platform) {
+    case 'miniprogram':
+      return 1400; // 实测 1011–1200ms，留余量
+    case 'ios':
+      return 500;  // 实测 139ms
+    default:
+      return 600;  // Android 实测 350ms
+  }
+}
 
 /** 落点标记的显示时长——够看清、又不至于停留到干扰下一次操作。 */
 const MARKER_MS = 420;
@@ -449,7 +475,7 @@ export function SimulatorPanel({
     const t = setInterval(() => {
       // 页面不可见时跳过：省掉 1.3MB/s 的无效搬运
       if (polling.current && !document.hidden) void grab();
-    }, POLL_MS);
+    }, pollIntervalMs(platform));
     const onVis = () => {
       if (!document.hidden) void grab();
     };

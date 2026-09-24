@@ -18,11 +18,12 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { SimulatorPanel } from '../SimulatorPanel';
+import { SimulatorPanel, pollIntervalMs } from '../SimulatorPanel';
 import type {
   DeviceEntry,
   PlatformStatus,
   SimulatorFrame,
+  SimulatorPlatform,
   SimulatorStatus,
 } from '../../types/domain';
 
@@ -198,7 +199,8 @@ beforeEach(() => {
    * 假定时器 + `shouldAdvanceTime`：真实时间照常流动（`await sleep` 能推进），
    * 但定时器的回调也在 act 之外的时机被触发时会记在受控队列里。
    *
-   * 不用假定时器的话，组件的 600ms 轮询与 2s「等就绪」循环会在断言间隙
+   * 不用假定时器的话，组件的轮询（Android 600ms / 小程序 1400ms，见
+   * pollIntervalMs）与 2s「等就绪」循环会在断言间隙
    * 触发 setState，每次测试产出几十条 act 警告——**噪音足以淹没真正的失败**。
    */
   vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -209,7 +211,7 @@ afterEach(async () => {
   // 不恢复会让后续测试拿到的平台集合与本意不符，表现为难以定位的连锁失败。
   status = defaultStatus();
   vi.useRealTimers();
-  // **卸载必须在 act 内**：组件里有 600ms 轮询与「等设备就绪」的 2s 循环，
+  // **卸载必须在 act 内**：组件里有轮询（间隔按平台自适应）与「等设备就绪」的 2s 循环，
   // 不卸载的话它们的 setState 会落在 act 之外（每次测试几十条 act 警告，
   // 足以淹没真正的失败信息）。卸载触发清理函数 → 停掉定时器。
   if (root) {
@@ -393,7 +395,7 @@ describe('坐标夹紧', () => {
 });
 
 describe('输入后立刻补帧', () => {
-  it('每次输入后都追加一次取帧（不等 600ms 轮询）', async () => {
+  it('每次输入后都追加一次取帧（不等下一次轮询）', async () => {
     await mount();
     stubRect(img());
     const before = frameCalls;
@@ -434,7 +436,7 @@ describe('内容未变时跳过重绘（卡顿的主要来源）', () => {
 });
 
 describe('轮询节奏（依赖链错了会变成「帧一到就再取一帧」）', () => {
-  it('两秒内取帧次数符合 600ms 间隔，而不是每帧都取', async () => {
+  it('两秒内取帧次数符合轮询间隔，而不是每帧都取', async () => {
     // 回归测试：`grab` 曾依赖 `frame` 状态 → 轮询 effect 依赖 `grab`
     // → **每收到一帧就重建定时器**，退化成「帧一到立刻再取一帧」，
     // 间隔从 600ms 掉到取帧耗时（约 350ms），持续满载。
@@ -1103,5 +1105,49 @@ describe('面板纵向顺序', () => {
     expect(pos('sim-screen'), '画面应在说明文字之前').toBeLessThan(
       pos('sim-input-hint'),
     );
+  });
+});
+
+
+/**
+ * 轮询间隔必须**按平台自适应**（直接测函数，不比对硬编码数字）。
+ *
+ * 实测单帧耗时：iOS 139ms / Android 350ms / 小程序 1200ms。
+ * 用固定 600ms 时，小程序每轮还没返回就被下一轮触发——请求堆积，
+ * 界面表现为「卡顿掉帧」，而根因在轮询策略而不是机器性能。
+ */
+describe('轮询间隔', () => {
+  /** 各平台的实测单帧耗时（毫秒）。间隔必须大于它，否则请求堆积。 */
+  const MEASURED_FRAME_MS: Record<SimulatorPlatform, number> = {
+    ios: 139,
+    android: 350,
+    miniprogram: 1200,
+    harmony: 350, // 与 Android 同机制（hdc 截图）
+  };
+
+  it('每个平台的间隔都大于该平台的单帧耗时', () => {
+    for (const [p, frameMs] of Object.entries(MEASURED_FRAME_MS) as [
+      SimulatorPlatform,
+      number,
+    ][]) {
+      const interval = pollIntervalMs(p);
+      expect(
+        interval,
+        `${p} 的间隔 ${interval}ms 小于单帧 ${frameMs}ms —— 会堆积请求（表现为掉帧）`,
+      ).toBeGreaterThan(frameMs);
+    }
+  });
+
+  it('间隔有上限（太慢会让人觉得界面卡死）', () => {
+    for (const p of ['ios', 'android', 'miniprogram'] as SimulatorPlatform[]) {
+      expect(pollIntervalMs(p), `${p} 的间隔不该超过 2 秒`).toBeLessThanOrEqual(2000);
+    }
+  });
+
+  it('慢平台与快平台用不同间隔（一个值不可能对两者都合适）', () => {
+    expect(
+      pollIntervalMs('miniprogram'),
+      '小程序比 iOS 慢约 9 倍，间隔必须不同',
+    ).toBeGreaterThan(pollIntervalMs('ios'));
   });
 });
