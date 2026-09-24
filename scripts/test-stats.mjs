@@ -171,8 +171,26 @@ function contractStats() {
     if (r.error) fail(`${c.file} 无法执行：${r.error.message}`);
     const text = `${r.stdout ?? ''}\n${r.stderr ?? ''}`;
     const m = text.match(/结果:\s*(\d+)\/(\d+)\s*通过/);
-    if (!m) fail(`${c.file} 未输出可解析的结果行（退出码 ${r.status}）`);
-    out.push({ ...c, passed: Number(m[1]), total: Number(m[2]), status: r.status });
+    if (!m) {
+      // 契约脚本没打出结果行（多为崩溃/超时）。此时**尾部是唯一线索**，
+      // 必须带上——只报退出码等于不可行动的失败报告（勘误 §3.23）。
+      const tail = text.split('\n').filter((l) => l.trim()).slice(-10).join('\n');
+      fail(`${c.file} 未输出可解析的结果行（退出码 ${r.status}）：\n${tail}`);
+    }
+    // 失败的断言名也留下来：契约脚本用 `✓/✗ <断言名>` 逐条打，
+    // 只汇总成「退出码 1」会让人不知道断的是哪一条，得再跑一轮才定位。
+    const failedAssertions = text
+      .split('\n')
+      .map((l) => l.match(/^\s*✗\s+(.+)$/))
+      .filter(Boolean)
+      .map((mm) => mm[1].trim());
+    out.push({
+      ...c,
+      passed: Number(m[1]),
+      total: Number(m[2]),
+      status: r.status,
+      failedAssertions,
+    });
   }
   return out;
 }
@@ -267,7 +285,13 @@ if (rust.failed > 0 || web.failed > 0 || contracts.some((c) => c.status !== 0)) 
   console.error('\n✗ 存在失败的测试，不生成统计（数字必须都是跑通的）');
   if (rust.failed > 0) console.error(`  Rust 失败 ${rust.failed} 项`);
   if (web.failed > 0) console.error(`  前端失败 ${web.failed} 项`);
-  for (const c of contracts) if (c.status !== 0) console.error(`  ${c.file} 退出码 ${c.status}`);
+  for (const c of contracts) {
+    if (c.status === 0) continue;
+    console.error(`  ${c.file} 退出码 ${c.status}（${c.passed}/${c.total} 通过）`);
+    // 逐条点名失败的断言：契约脚本的断言名本身就是「哪条协议行为不符」，
+    // 只给退出码的话 CI 上还要再跑一轮才能定位。
+    for (const name of c.failedAssertions ?? []) console.error(`    ✗ ${name}`);
+  }
   // 点名到用例：只有计数的话，CI 红了也无从下手
   for (const name of rust.failedTests) console.error(`    ✗ ${name}`);
   process.exit(2);

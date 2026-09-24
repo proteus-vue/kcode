@@ -459,18 +459,23 @@ jobs:
             echo "::error::日志缺失：$LOG"
             exit 0
           fi
-          # 脚本自己已用 `✗` 前缀给出可行动的原因（含失败用例名与编译错误尾部）。
-          # 只取 `✗` 行——它是脚本对「为什么失败」的**定性结论**，
-          # 比日志尾部精确得多（尾部多半是编译进度或无关噪音）。
-          # 注意：`✗` 可能带缩进（如「    ✗ <失败用例名>」），故用 `^ *✗`。
-          hits=$(grep -cE "^ *✗" "$LOG" || true)
-          if [[ "$hits" -eq 0 ]]; then
+          # 脚本的失败结论以 `✗` 开头，但**紧随其后的细节行不带 ✗**：
+          #
+          #   ✗ 存在失败的测试，不生成统计（数字必须都是跑通的）
+          #     Rust 失败 1 项
+          #     contract-settings.mjs 退出码 1
+          #
+          # 早先只 grep `✗` 行，恰好把这些关键细节全滤掉了——CI #66 的注解
+          # 里只剩一句「存在失败的测试」，**看不出是哪一类失败**，等于白跑一轮。
+          # 所以：用 awk 从第一行 `✗` 开始**连读 10 行**，而不是只取匹配行。
+          awk '/^ *✗/ {hit=1} hit {print; n++} n>=10 {exit}' "$LOG" \
+            | grep -vE "^\s*$" | while IFS= read -r l; do
+            echo "::error::  $l"
+          done
+          # 兜底：若一句 ✗ 都没有（脚本异常退出），打日志尾部
+          if ! grep -qE "^ *✗" "$LOG"; then
             echo "::error::未见 ✗ 判定行（脚本可能异常退出），日志尾部如下："
-            tail -10 "$LOG" | grep -vE "^\s*$" | while IFS= read -r l; do
-              echo "::error::  $l"
-            done
-          else
-            grep -E "^ *✗" "$LOG" | head -10 | while IFS= read -r l; do
+            tail -12 "$LOG" | grep -vE "^\s*$" | while IFS= read -r l; do
               echo "::error::  $l"
             done
           fi
