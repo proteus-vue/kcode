@@ -43,6 +43,7 @@ import type {
   SimulatorStatus,
   ToolOverrides,
   MpElement,
+  MpViewport,
 } from '../types/domain';
 import { classifyGesture, type Gesture } from './simulatorGesture';
 
@@ -630,6 +631,16 @@ export function SimulatorPanel({
 
   /** 小程序当前页的可点元素（元素模式下才加载）。 */
   const [mpElements, setMpElements] = useState<MpElement[]>([]);
+  const [mpViewport, setMpViewport] = useState<MpViewport | null>(null);
+  /**
+   * 图片在画面容器内的**渲染位置**（用于把热区对齐到图片上）。
+   *
+   * 图片是 flex 居中的，尺寸随容器变（`max-width/max-height` 等比缩放），
+   * 所以必须实测它的矩形，不能假设它铺满容器——否则热区会整体偏移，
+   * 而这种错位在界面上只是「点不准」，很难归因。
+   * 现有代码算落点标记时也用同一套（`img.left - box.left`）。
+   */
+  const [imgBox, setImgBox] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [mpRoute, setMpRoute] = useState<string>('');
   const [mpLoading, setMpLoading] = useState(false);
 
@@ -638,10 +649,13 @@ export function SimulatorPanel({
     if (!platform) return;
     setMpLoading(true);
     try {
-      const r = await invoke<{ route: string; elements: MpElement[] }>(
-        'simulator_miniprogram_elements',
-      );
+      const r = await invoke<{
+        route: string;
+        viewport: MpViewport;
+        elements: MpElement[];
+      }>('simulator_miniprogram_elements');
       setMpRoute(r.route);
+      setMpViewport(r.viewport);
       setMpElements(r.elements);
       setError(null);
     } catch (e) {
@@ -670,12 +684,46 @@ export function SimulatorPanel({
     [loadMpElements],
   );
 
+  /**
+   * 测量图片相对容器的位置。
+   *
+   * 用 `ResizeObserver` 而不是只在 resize 事件里测：容器尺寸会因为
+   * 右栏拖宽、设备列表展开/收起而变，而那些**不触发 window.resize**。
+   * 依赖旧的测量值会让热区在新尺寸下错位。
+   */
+  useEffect(() => {
+    const box = imgRef.current?.parentElement;
+    const img = imgRef.current;
+    if (!box || !img) return;
+    const measure = () => {
+      const i = img.getBoundingClientRect();
+      const b = box.getBoundingClientRect();
+      if (i.width <= 0 || i.height <= 0) return;
+      setImgBox({ x: i.left - b.left, y: i.top - b.top, w: i.width, h: i.height });
+    };
+    measure();
+    // 图片自身尺寸不定时（首帧还没解码完）getBoundingClientRect 会给 0，
+    // 那一次测量会被丢弃 —— 所以**必须同时监听图片的 load**，
+    // 否则首帧之后热区要等下一次尺寸变化才出现（表现为「刚打开没有热区」）。
+    img.addEventListener('load', measure);
+    const ro = new ResizeObserver(measure);
+    ro.observe(box);
+    ro.observe(img);
+    return () => {
+      img.removeEventListener('load', measure);
+      ro.disconnect();
+    };
+    // 依赖 frame：每次新帧都可能改变图片尺寸（旋转屏幕等）。
+    // 依赖 elementMode：退出元素模式时不必再测。
+  }, [frame, elementMode]);
+
   // 进入元素模式时加载一次；离开时清空（避免把上一个平台的数据留着）
   useEffect(() => {
     if (elementMode) void loadMpElements();
     else {
       setMpElements([]);
       setMpRoute('');
+      setMpViewport(null);
     }
   }, [elementMode, loadMpElements]);
 
@@ -970,6 +1018,53 @@ export function SimulatorPanel({
 
               {/* 只读提示：贴在画面底部，说明**为什么**点不动。
                   不写这句的话用户会以为是自己点错了位置。 */}
+              {/* ── 热区层（仅元素模式：小程序）───────────────────────
+                  把元素按位置叠在截图上，用户**直接点画面里的东西**。
+                  这是这一版的核心改动：之前只给「button #5」这样的清单，
+                  用户根本不知道哪个对应页面上哪个按钮（原话：体验太差了）。
+
+                  坐标换算：元素是 CSS px（视口坐标系），截图覆盖整屏。
+                  实测两者**等比例**（截图 640×1386 设备px vs 视口 390×844 CSS，
+                  1.641 vs 1.642），所以直接用百分比即可，无需乘像素比。
+                  页面原点与屏幕原点重合（用 17 个文字行做逐行暗度分析拟合，
+                  截距约 3px，可忽略）。
+
+                  热区没有任何视觉装饰（只有悬停时才描边 + 显示文字）：
+                  常驻描边会糊住画面，而用户要的是看清画面本身。 */}
+              {elementMode && imgBox && mpViewport && (
+                <div
+                  className="sim-hotspots"
+                  style={{
+                    left: imgBox.x,
+                    top: imgBox.y,
+                    width: imgBox.w,
+                    height: imgBox.h,
+                  }}
+                >
+                  {mpElements.map((el) => (
+                    <button
+                      key={el.id}
+                      className="sim-hotspot"
+                      style={{
+                        left: `${(el.left / mpViewport.width) * 100}%`,
+                        top: `${(el.top / mpViewport.screenHeight) * 100}%`,
+                        width: `${(el.width / mpViewport.width) * 100}%`,
+                        height: `${(el.height / mpViewport.screenHeight) * 100}%`,
+                      }}
+                      disabled={inputBusy}
+                      onClick={(e) => {
+                        // 阻止冒泡：否则会被画面容器的指针逻辑当成一次拖动手势
+                        e.stopPropagation();
+                        void tapMpElement(el.id);
+                      }}
+                      title={el.text}
+                    >
+                      <span className="sim-hotspot-label">{el.text}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
               {/* ── 元素列表（仅元素模式：小程序）─────────────────────
                   为什么不是可点画面：自动化接口**不返回元素坐标**
                   （Page.getElements 只给 elementId 与 tagName），
@@ -979,7 +1074,8 @@ export function SimulatorPanel({
                 <div className="sim-elements">
                   <div className="sim-elements-head">
                     <span className="sim-elements-title">
-                      页面元素{mpRoute ? ` · ${mpRoute}` : ''}
+                      可点元素{mpRoute ? ` · ${mpRoute}` : ''}
+                      {mpElements.length > 0 && ` · ${mpElements.length} 项`}
                     </span>
                     <button
                       className="sim-icon-btn"
@@ -1007,8 +1103,11 @@ export function SimulatorPanel({
                         onClick={() => void tapMpElement(el.id)}
                         title={`elementId=${el.id}`}
                       >
+                        {/* **文字在前**：那是用户在画面上看到的字，
+                            也是唯一能让人对上号的信息。
+                            tag 与 id 退到后面（排查时才需要）。 */}
+                        <span className="sim-element-text">{el.text}</span>
                         <span className="sim-element-tag">{el.tag}</span>
-                        <span className="sim-element-id">#{el.id}</span>
                       </button>
                     ))}
                   </div>

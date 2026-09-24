@@ -631,8 +631,29 @@ export interface PlatformStatus {
 /** 小程序当前页的一个可点元素。 */
 export interface MpElement {
   id: string;
-  /** 标签名（`view` / `button` 等），用于在列表里做可读标签。 */
+  /** 标签名（`view` / `button` 等）。 */
   tag: string;
+  /**
+   * 元素上的文字（`innerText`）。
+   *
+   * **这是热区标签的来源**：截图里用户看到的字就是它
+   * （「表单与指令」「配置演示」），拿它当提示文本，热区才看得懂。
+   */
+  text: string;
+  /** 元素位置与尺寸（**CSS px**，与 viewport 同一坐标系）。 */
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/** 小程序视口信息（元素坐标 → 截图比例 的换算依据）。 */
+export interface MpViewport {
+  /** 页面视口宽（CSS px）。 */
+  width: number;
+  /** **屏幕**高（CSS px），不是视口高——截图覆盖整屏，含状态栏。 */
+  screenHeight: number;
+  pixelRatio: number;
 }
 
 /** 四平台的整体状态。**四个平台都要显示**，不可用也要列出（附原因）。 */

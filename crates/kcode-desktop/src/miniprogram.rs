@@ -178,15 +178,93 @@ impl Session {
             )
             .await?;
         let list = r.get("elements").and_then(Value::as_array).cloned().unwrap_or_default();
-        Ok(list
-            .iter()
-            .filter_map(|e| {
-                Some(Element {
-                    id: value_to_string(e.get("elementId")?),
-                    tag: e.get("tagName").and_then(Value::as_str).unwrap_or("?").to_owned(),
-                })
-            })
-            .collect())
+        let mut out = Vec::with_capacity(list.len());
+        for e in &list {
+            let Some(idv) = e.get("elementId") else { continue };
+            let id = value_to_string(idv);
+            let tag = e.get("tagName").and_then(Value::as_str).unwrap_or("?").to_owned();
+            // 文本与几何各一次调用。失败时**退回空值而不是丢弃元素**：
+            // 少数元素取不到文本（如纯装饰性 view），但它仍然可点——
+            // 丢掉它会让用户点不到页面上的东西，而那是更难理解的失败。
+            let text = self.element_text(page_id, &id).await.unwrap_or_default();
+            let (left, top, width, height) =
+                self.element_offset(page_id, &id).await.unwrap_or((0.0, 0.0, 0.0, 0.0));
+            out.push(Element { id, tag, text, left, top, width, height });
+        }
+        Ok(out)
+    }
+
+    /// 取元素文字（`innerText`）。
+    ///
+    /// 方法名是 `Element.getDOMProperties` 而不是 `getProperties`：
+    /// 我最初按直觉探的是 `Element.getAttribute`，它**不存在**，
+    /// 于是得出结论「拿不到文本」。后来读官方客户端库
+    /// （miniprogram-automator 的 `out/Element.js`）才拿到真实方法名。
+    /// **教训：探测第三方协议的方法名，要先读它的官方客户端，不要猜。**
+    async fn element_text(&mut self, page_id: &str, element_id: &str) -> Option<String> {
+        let r = self
+            .call(
+                "Element.getDOMProperties",
+                json!({
+                    "pageId": numeric(page_id),
+                    "elementId": numeric(element_id),
+                    "names": ["innerText"],
+                }),
+            )
+            .await
+            .ok()?;
+        let t = r.get("properties")?.as_array()?.first()?.as_str()?.trim().to_owned();
+        // 折叠换行与多余空白：多行文本直接进列表会撑破布局
+        Some(t.split_whitespace().collect::<Vec<_>>().join(" "))
+    }
+
+    /// 取元素位置与尺寸（CSS px）。
+    ///
+    /// `getOffset` 只给 left/top，宽高要另问 `getDOMProperties`。
+    async fn element_offset(
+        &mut self,
+        page_id: &str,
+        element_id: &str,
+    ) -> Option<(f64, f64, f64, f64)> {
+        let off = self
+            .call(
+                "Element.getOffset",
+                json!({ "pageId": numeric(page_id), "elementId": numeric(element_id) }),
+            )
+            .await
+            .ok()?;
+        let left = off.get("left").and_then(Value::as_f64).unwrap_or(0.0);
+        let top = off.get("top").and_then(Value::as_f64).unwrap_or(0.0);
+        let dim = self
+            .call(
+                "Element.getDOMProperties",
+                json!({
+                    "pageId": numeric(page_id),
+                    "elementId": numeric(element_id),
+                    "names": ["offsetWidth", "offsetHeight"],
+                }),
+            )
+            .await
+            .ok()?;
+        let props = dim.get("properties")?.as_array()?;
+        let w = props.first().and_then(Value::as_f64).unwrap_or(0.0);
+        let h = props.get(1).and_then(Value::as_f64).unwrap_or(0.0);
+        Some((left, top, w, h))
+    }
+
+    /// 视口信息（页面宽高与屏幕高）。热区换算需要它。
+    pub async fn viewport(&mut self) -> Result<Viewport, String> {
+        let r = self
+            .call("App.callWxMethod", json!({ "method": "getSystemInfoSync", "args": [] }))
+            .await?;
+        let info = r.get("result").unwrap_or(&r);
+        let width = info.get("windowWidth").and_then(Value::as_f64).unwrap_or(0.0);
+        let screen_height = info.get("screenHeight").and_then(Value::as_f64).unwrap_or(0.0);
+        let pixel_ratio = info.get("pixelRatio").and_then(Value::as_f64).unwrap_or(1.0);
+        if width <= 0.0 || screen_height <= 0.0 {
+            return Err("getSystemInfoSync 未返回可用的窗口尺寸".to_owned());
+        }
+        Ok(Viewport { width, screen_height, pixel_ratio })
     }
 
     /// 点一个元素。
@@ -301,12 +379,49 @@ impl Session {
 }
 
 /// 一个可点元素。服务端**只给这两项**（实测）——没有位置信息。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+// 不派生 `Eq`：含 f64 字段（位置），而 f64 只有 `PartialEq`。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Element {
     pub id: String,
-    /// 标签名（`view` / `button` / `text` …）。用于在列表里做可读的标签。
+    /// 标签名（`view` / `button` / `text` …）。
     pub tag: String,
+    /// 元素上的文字（`innerText`）。
+    ///
+    /// # 为什么这是关键字段
+    ///
+    /// 最初只返回 `tag` + `id`，界面上显示成 `button #5`、`view #9`——
+    /// **用户根本不知道哪个对应页面上的哪个东西**（原话：「根本不知道哪个
+    /// 对应哪个，体验太差了」）。而 `innerText` 恰好就是用户在屏幕上看到的字
+    /// （实测：「表单与指令」「配置演示」「tapped 0 times」），
+    /// 拿它做标签，列表立刻就懂了。
+    pub text: String,
+    /// 元素在页面里的位置与尺寸（**CSS px**，与 `getSystemInfoSync` 的
+    /// `windowWidth/Height` 同一坐标系）。
+    ///
+    /// 用途是在截图上画热区——让用户直接点画面。实测映射关系：
+    /// 截图是整屏（含状态栏）按 `截图宽 / windowWidth` 等比缩放，
+    /// 而页面原点与屏幕原点重合（用 17 个文字行做逐行暗度分析拟合出来的，
+    /// 截距仅约 3px）。
+    pub left: f64,
+    pub top: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// 小程序视口信息（用于把元素坐标换算成截图上的比例位置）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Viewport {
+    /// 页面视口宽（CSS px）。
+    pub width: f64,
+    /// **屏幕**高（CSS px），不是视口高。
+    ///
+    /// 截图覆盖的是整屏（含状态栏），所以纵向比例要用屏幕高做分母。
+    /// 用 `windowHeight`（视口高）会让所有热区整体偏下——这是个容易
+    /// 写错且不报错的地方（热区只是"画歪了"）。
+    pub screen_height: f64,
+    pub pixel_ratio: f64,
 }
 
 /// 服务端对 `pageId`/`elementId` 的形状要求不一致（实测）：

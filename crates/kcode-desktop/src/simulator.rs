@@ -21,7 +21,7 @@
 //! | Android | `emulator -list-avds` + `adb devices` | `emulator -avd` | `adb exec-out screencap -p` | `adb shell input` |
 //! | iOS | `xcrun simctl list devices --json` | `simctl boot` | `simctl io ... screenshot` | `kcode-sim-hid`（私有接口） |
 //! | 鸿蒙 | `hdc list targets` | **无**（启动器在 DevEco 里） | `hdc shell snapshot_display` | `uinput`，未验证 |
-//! | 小程序 | 微信开发者工具 + 项目 | 无（由开发者工具管理） | 开发者工具自动化（WebSocket） | **元素级**（点元素，不能按坐标） |
+//! | 小程序 | 微信开发者工具 + 项目 | 无（由开发者工具管理） | 开发者工具自动化（WebSocket） | 元素级点击（界面叠热区） |
 //!
 //! 这些差异不是配置项而是**工具链的既成事实**，所以用
 //! [`PlatformStatus::can_launch`] / [`PlatformStatus::can_input`] /
@@ -971,12 +971,15 @@ pub fn miniprogram_status_full(
             tool: Some(tool_label),
             devices: Vec::new(),
             can_launch: false,
-            // **能做元素级点击**（实测：Element.tap 可用），但不能按坐标。
+            // **能做元素级点击**（实测：Element.tap 可用）。
+            // 注意：我们**能**拿到元素位置（Element.getOffset），所以界面
+            // 可以把热区叠在截图上让用户直接点画面——只是底层仍走元素点击，
+            // 因为自动化协议没有坐标触摸（Page.touchstart 未实现）。
             can_input: true,
             input_mode: InputMode::Element,
             input_hint: Some(
-                "小程序的输入是**元素级**：只能点下方列出的元素，不能点画面任意位置\
-                 （自动化接口不返回元素坐标）。"
+                "小程序：可直接点画面上的元素（悬停显示它是什么）。\
+                 底层走元素点击——协议没有坐标触摸。"
                     .to_owned(),
             ),
         };
@@ -1014,8 +1017,8 @@ pub fn miniprogram_status_full(
         can_input: true,
         input_mode: InputMode::Element,
         input_hint: Some(
-            "小程序的输入是**元素级**：只能点下方列出的元素，不能点画面任意位置\
-             （自动化接口不返回元素坐标）。"
+            "小程序：可直接点画面上的元素（悬停显示它是什么）。\
+             底层走元素点击——协议没有坐标触摸（Page.touchstart 未实现）。"
                 .to_owned(),
         ),
     }
@@ -2263,17 +2266,85 @@ async fn ensure_miniprogram_automation() -> Result<(), String> {
     crate::miniprogram::ensure_automation(&cli, &project).await
 }
 
-/// 列举小程序当前页的元素（供界面做成可点列表）。
-pub async fn miniprogram_elements() -> Result<(String, Vec<crate::miniprogram::Element>), String> {
+/// 小程序当前页的**可点元素**（带文字、位置、尺寸），供界面画热区。
+pub struct PageElements {
+    pub route: String,
+    pub viewport: crate::miniprogram::Viewport,
+    pub elements: Vec<crate::miniprogram::Element>,
+}
+
+pub async fn miniprogram_elements() -> Result<PageElements, String> {
     let mut s = crate::miniprogram::Session::connect(crate::miniprogram::AUTO_PORT)
         .await
         .map_err(|e| format!("{e}\n提示：请先在面板上点「重新检测」以启动自动化服务。"))?;
     let (pid, route) = s.current_page().await?;
-    // 只列这两类：view 是所有布局的容器（数量多、可点），button 是可点控件。
-    // 不列 text/image 之类的纯展示元素——它们点了没有意义，只会让列表变长。
-    let mut all = s.elements(&pid, "button").await.unwrap_or_default();
-    all.extend(s.elements(&pid, "view").await.unwrap_or_default());
-    Ok((route, all))
+    let viewport = s.viewport().await?;
+
+    // 取 view 与 button：前者是布局容器（可点区域常是它），后者是可点控件。
+    // text 元素不单独取——它们的文字会被父 view 的 innerText 汇总包含，
+    // 单独列出来只会产生一堆与父级重叠的热区。
+    let mut all = s.elements(&pid, "view").await.unwrap_or_default();
+    all.extend(s.elements(&pid, "button").await.unwrap_or_default());
+
+    Ok(PageElements { route, viewport, elements: pick_clickable(all) })
+}
+
+/// 从所有元素里挑出**值得做成热区**的那些。
+///
+/// # 为什么要挑，不能全画
+///
+/// 页面上绝大多数元素是**容器**：实测首页有 390×1975 的根 view（整页）、
+/// 390×850 的分组 view。它们的 `innerText` 是**所有子元素文字的拼接**
+/// （根 view 的文本长达 400+ 字）。若把它们也画成热区，会覆盖内部所有
+/// 真实可点项——用户点哪儿都命中容器，热区等于失效。
+///
+/// # 规则（纯函数，见测试）
+///
+/// 1. 丢掉没有文字的（无法作为标签，且多为装饰）；
+/// 2. 按**面积升序**处理，小的（更具体的）先入选；
+/// 3. 一个元素若**几乎包含**了已入选的元素，它就是容器 → 丢弃。
+///    （方向很重要：我第一版写成「自己是否被覆盖」，那是反的——
+///    大容器自己的「被覆盖率」很低，于是全都留下了。）
+///
+/// 按面积排序而不是直接做包含矩阵：包含判断是 O(n²) 且要处理
+/// 部分重叠；排序后只需与已入选项比较，逻辑更简单也够快（n≈50）。
+fn pick_clickable(mut all: Vec<crate::miniprogram::Element>) -> Vec<crate::miniprogram::Element> {
+    all.retain(|e| {
+        let t = e.text.trim();
+        // 空文字不要；超长的多半是容器（子元素文字拼接），也不要
+        !t.is_empty() && t.chars().count() <= 40
+    });
+    all.sort_by(|a, b| {
+        let aa = a.width * a.height;
+        let bb = b.width * b.height;
+        aa.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut kept: Vec<crate::miniprogram::Element> = Vec::new();
+    for e in all {
+        // 已入选的小元素几乎都在 e 里 → e 是它们的容器，丢掉
+        let is_container = kept.iter().any(|k| overlap_ratio(k, &e) > 0.9);
+        if !is_container {
+            kept.push(e);
+        }
+    }
+    // 输出按页面纵向顺序：列表顺序与用户在屏幕上看到的顺序一致
+    kept.sort_by(|a, b| a.top.partial_cmp(&b.top).unwrap_or(std::cmp::Ordering::Equal));
+    kept
+}
+
+/// `a` 有多少比例落在 `b` 内（0..1）。用于判断「b 是否包含 a」。
+fn overlap_ratio(a: &crate::miniprogram::Element, b: &crate::miniprogram::Element) -> f64 {
+    let x1 = a.left.max(b.left);
+    let y1 = a.top.max(b.top);
+    let x2 = (a.left + a.width).min(b.left + b.width);
+    let y2 = (a.top + a.height).min(b.top + b.height);
+    let inter = (x2 - x1).max(0.0) * (y2 - y1).max(0.0);
+    let area = a.width * a.height;
+    if area <= 0.0 {
+        return 0.0;
+    }
+    inter / area
 }
 
 /// 点击小程序的某个元素。
@@ -3358,6 +3429,70 @@ mod tests {
     /// 所以那边必须逐段解析；而 PNG 规范要求 IHDR 是第一个块，固定偏移是安全的。
     /// 但要**校验 magic 与块名**——否则一张恰好有同样字节偏移的别的格式会被
     /// 读出一个荒唐的尺寸，而后果是点击位置全错（不报错）。
+    /// 容器过滤：热区只能画「用户看到的那一行」，不能画它外面的容器。
+    ///
+    /// 这条守的是上线第一版的真实问题：列表里全是 `button #5` / `view #9`,
+    /// 而根 view（390×1975）与分组 view（390×850）也在里面——它们的文字是
+    /// 所有子元素拼接，会覆盖内部所有真实可点项。
+    #[test]
+    fn pick_clickable_drops_containers_keeps_rows() {
+        use crate::miniprogram::Element;
+        let mk = |id: &str, tag: &str, text: &str, l: f64, t: f64, w: f64, h: f64| Element {
+            id: id.into(), tag: tag.into(), text: text.into(),
+            left: l, top: t, width: w, height: h,
+        };
+        let all = vec![
+            // 整页根容器（文字是全部子元素的拼接）
+            mk("1", "view", "ProteusOne Vue source.tapped 0 times表单与指令配置演示", 0.0, 0.0, 390.0, 1975.0),
+            // 分组容器
+            mk("2", "view", "表单与指令配置演示组件演示", 0.0, 391.0, 390.0, 850.0),
+            // 真实可点行（用户看到的）
+            mk("3", "view", "表单与指令", 0.0, 391.0, 390.0, 39.0),
+            mk("4", "view", "配置演示", 0.0, 430.0, 390.0, 39.0),
+            mk("5", "button", "tap", 0.0, 319.0, 390.0, 47.0),
+            // 无文字的装饰元素
+            mk("6", "view", "  ", 0.0, 100.0, 20.0, 20.0),
+            // 超长文字（判定为容器）
+            mk("7", "view", &"很长".repeat(30), 0.0, 50.0, 100.0, 30.0),
+        ];
+        let kept = pick_clickable(all);
+        let texts: Vec<&str> = kept.iter().map(|e| e.text.as_str()).collect();
+        assert!(texts.contains(&"表单与指令"), "真实行必须保留: {texts:?}");
+        assert!(texts.contains(&"配置演示"), "真实行必须保留: {texts:?}");
+        assert!(texts.contains(&"tap"), "按钮必须保留: {texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.contains("ProteusOne")),
+            "整页根容器必须被丢掉: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.len() > 60),
+            "超长文字元素应被判定为容器并丢掉: {texts:?}"
+        );
+        assert!(!texts.contains(&"  "), "无文字元素应被丢掉");
+        // 输出按纵向顺序（列表顺序 = 屏幕顺序）
+        let tops: Vec<f64> = kept.iter().map(|e| e.top).collect();
+        assert!(tops.windows(2).all(|w| w[0] <= w[1]), "应按 top 升序: {tops:?}");
+    }
+
+    /// 重叠判断：`a` 落在 `b` 内的比例（容器过滤的判据）。
+    #[test]
+    fn overlap_ratio_measures_containment() {
+        use crate::miniprogram::Element;
+        let mk = |l: f64, t: f64, w: f64, h: f64| Element {
+            id: "x".into(), tag: "view".into(), text: "t".into(),
+            left: l, top: t, width: w, height: h,
+        };
+        // 完全包含
+        assert!((overlap_ratio(&mk(10.0, 10.0, 20.0, 20.0), &mk(0.0, 0.0, 100.0, 100.0)) - 1.0).abs() < 1e-9);
+        // 完全不相交
+        assert_eq!(overlap_ratio(&mk(0.0, 0.0, 10.0, 10.0), &mk(50.0, 50.0, 10.0, 10.0)), 0.0);
+        // 一半落入
+        let r = overlap_ratio(&mk(0.0, 0.0, 10.0, 10.0), &mk(5.0, 0.0, 10.0, 10.0));
+        assert!((r - 0.5).abs() < 1e-9, "期望 0.5，实际 {r}");
+        // 零面积不能除出 NaN（那会让比较静默变成 false，容器就漏过去了）
+        assert_eq!(overlap_ratio(&mk(0.0, 0.0, 0.0, 0.0), &mk(0.0, 0.0, 10.0, 10.0)), 0.0);
+    }
+
     #[test]
     fn png_size_reads_only_real_png() {
         // 真实截图的头部（从实测的 1179×2556 截图里取前 24 字节）
@@ -4270,5 +4405,40 @@ mod ios_input_effect_live {
     /// 而不是硬编码路径——否则测试通过只说明那一条路径可用。
     async fn developer_dir_for_test() -> Option<PathBuf> {
         resolve_ios().await.developer_dir
+    }
+}
+
+#[cfg(test)]
+mod mp_elements_live {
+    //! 小程序元素信息的端到端验证（需自动化服务在跑）。
+    use super::*;
+
+    #[tokio::test]
+    #[ignore]
+    async fn elements_carry_text_and_geometry() {
+        if !crate::miniprogram::is_ready().await {
+            eprintln!("跳过：自动化服务未就绪");
+            return;
+        }
+        let page = miniprogram_elements().await.expect("应能取元素");
+        eprintln!("route={} 视口={:?}", page.route, page.viewport);
+        eprintln!("可点元素 {} 个:", page.elements.len());
+        for e in page.elements.iter().take(14) {
+            eprintln!(
+                "  [{}] \"{}\"  top={:.0} left={:.0} {:.0}×{:.0}",
+                e.tag, e.text, e.top, e.left, e.width, e.height
+            );
+        }
+        assert!(!page.elements.is_empty(), "应能取到可点元素");
+        // 每条都必须有文字——没有文字的已在 pick_clickable 里被丢掉
+        assert!(
+            page.elements.iter().all(|e| !e.text.trim().is_empty()),
+            "列出的元素都必须有可读文字"
+        );
+        // 位置必须有效，否则热区会全挤在左上角
+        assert!(
+            page.elements.iter().any(|e| e.top > 1.0),
+            "至少应有元素不在页面顶端（位置没取到时会全是 0）"
+        );
     }
 }

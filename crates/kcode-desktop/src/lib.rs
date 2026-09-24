@@ -842,15 +842,24 @@ async fn simulator_miniprogram_start() -> Result<(), CommandError> {
 
 /// 列举小程序当前页的元素（供界面做成可点列表）。
 ///
-/// 小程序**不能按坐标点**（自动化接口不返回元素位置），所以界面给的是
-/// 元素列表而不是可点画面。这个命令就是那个列表的数据源。
+/// 小程序当前页的可点元素：**带文字、位置、尺寸**。
+///
+/// # 为什么返回的位置很关键
+///
+/// 自动化接口**没有**坐标点击（`Page.touchstart` 未实现），所以点击必须
+/// 落到元素上。但元素位置是有的（`Element.getOffset`）——用它把元素画成
+/// 截图上的**热区**，用户就能「看到哪个点哪个」，而不是面对
+/// `button #5` 这种看不懂的清单（那是上线第一版的体验，用户明确反馈不可用）。
 #[tauri::command]
-async fn simulator_miniprogram_elements(
-) -> Result<serde_json::Value, CommandError> {
-    let (route, elements) = simulator::miniprogram_elements()
+async fn simulator_miniprogram_elements() -> Result<serde_json::Value, CommandError> {
+    let page = simulator::miniprogram_elements()
         .await
         .map_err(CommandError::from)?;
-    Ok(serde_json::json!({ "route": route, "elements": elements }))
+    Ok(serde_json::json!({
+        "route": page.route,
+        "viewport": page.viewport,
+        "elements": page.elements,
+    }))
 }
 
 /// 点击小程序的一个元素。

@@ -3946,6 +3946,46 @@ body {
 /* ── 页面元素列表（小程序）─────────────────────────────────────────────
    小程序不能按坐标点（自动化接口不返回元素位置），所以输入走这个列表。
    放在画面下方：用户先看到画面，再在列表里找到要点的那一项。 */
+/* ── 热区层（小程序）────────────────────────────────────────────────────
+   叠在截图上，让用户直接点画面里的东西。
+   常驻**零装饰**：描边与文字只在悬停时出现——否则会糊住画面，
+   而用户看这个面板首先是要看清画面。 */
+.sim-hotspots {
+  position: absolute;
+  /* 不接指针：只有里面具体的热区才可点。
+     否则整块区域会吞掉画面的拖动/手势（将来接滑动时会用到）。 */
+  pointer-events: none;
+  z-index: 2;
+}
+.sim-hotspot {
+  position: absolute;
+  padding: 0; margin: 0;
+  background: transparent;
+  border: 1px solid transparent;   /* 占位，悬停时换色，避免布局抖动 */
+  border-radius: 4px;
+  cursor: pointer;
+  pointer-events: auto;            /* 覆盖父层的 none */
+  /* 文字默认不显示，悬停时才浮出 */
+  display: flex; align-items: center;
+}
+.sim-hotspot:hover:not(:disabled) {
+  border-color: rgba(106,165,255,0.9);
+  background: rgba(106,165,255,0.16);
+}
+.sim-hotspot:disabled { cursor: default; }
+.sim-hotspot-label {
+  position: absolute; left: 0; bottom: 100%;
+  margin-bottom: 3px;
+  padding: 2px 6px; border-radius: 4px;
+  background: rgba(12,14,18,0.92);
+  color: var(--t1); font-size: 10.5px; font-family: inherit;
+  white-space: nowrap; max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis;
+  opacity: 0; transition: opacity 0.1s ease;
+  pointer-events: none;
+}
+.sim-hotspot:hover .sim-hotspot-label { opacity: 1; }
+
 .sim-elements {
   margin-top: 8px;
   border-top: 1px solid var(--edge-soft);
@@ -3982,7 +4022,12 @@ body {
   background: rgba(106,165,255,0.14); border-color: rgba(106,165,255,0.45); color: var(--t1);
 }
 .sim-element:disabled { opacity: 0.5; cursor: default; }
-.sim-element-tag { color: var(--accent); }
+/* 文字为主、tag 为辅：文字是用户能对上号的信息，tag 只在排查时有用 */
+.sim-element-text {
+  color: var(--t1);
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sim-element-tag { color: var(--t4); font-size: 9.5px; }
 .sim-element-id { color: var(--t4); font-size: 9.5px; }
 
 
