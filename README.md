@@ -56,18 +56,23 @@ UI 对标的逐项状态见 [`docs/UI对标指标清单.md`](docs/UI对标指标
 > **已在 Linux 上转绿**（§3.29），`probe-exec` 在 CI 上同样报 ✅——
 > 「命令执行通道可用」已被实证，不再是推断。
 >
-> 仍未绿的只剩 **`rust` job 的「单元测试 · kcode-desktop」这一步**，
-> 其**根因已定位并修复**（§3.32）：`bundle.resources` 声明的 `binaries/`
-> 是打包时才生成、且刻意不入库的目录，而 tauri 的 build script **在编译期**
-> 就要求它存在——于是任何全新 clone（含 CI）都编译不过这个 crate，
-> 本机则因 282 MB 残留而「全绿」。
+> **rust job 的历史失败点已逐个排掉：**
 >
-> 错误行其实一直在日志里，只是被 cargo 的 ANSI 颜色码埋住
-> （`\x1b[1m\x1b[91merror…` 匹配不上 `^error`），于是连续多轮的诊断
-> 都读不到它、进而误判成资源打断。修法三件：`build.rs` 补齐该目录、
-> 诊断入口无条件剥色、rust job 显式 `CARGO_TERM_COLOR=never`。
-> 已在本机以「全新 checkout」形态复现验证（移走 `binaries/` + 清构建缓存后
-> 75 项全过、clippy 零告警）；**CI 上的确认待下一轮**。
+> 1. **`单元测试 · kcode-desktop`**——根因是 `bundle.resources` 声明的
+>    `binaries/`：该目录打包时才生成、且刻意不入库，而 tauri 的 build script
+>    **在编译期**就要求它存在，于是任何全新 clone（含 CI）都编译不过这个 crate，
+>    本机则因 282 MB 残留而「全绿」。错误行一直在日志里，只是被 cargo 的
+>    ANSI 颜色码埋住（`\x1b[1m\x1b[91merror…` 匹配不上 `^error`），
+>    导致连续多轮诊断读不到它、误判成资源打断。
+>    修法三件：`build.rs` 补齐该目录、诊断入口无条件剥色、
+>    rust job 显式 `CARGO_TERM_COLOR=never`（§3.32）。
+>    **CI #64 确认生效**：单元测试与集成测试在该轮都通过了。
+>
+> 2. **`静态检查`（clippy）**——独立的新问题：CI 用滚动的 `stable`（1.98.1），
+>    1.98 引入的 `manual_slice_fill` 命中了 `changeset.rs` 里一行旧代码；
+>    本机停在 1.95 故「全绿」。已 `rustup update stable` 到同版、一次复现并修掉
+>    （全量 321 项测试仍全过）。这类**工具链漂移**已通过「把 rustc/clippy
+>    版本打进 CI 注解」使其可见（§3.33）。
 
 ---
 

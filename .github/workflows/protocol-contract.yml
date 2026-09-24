@@ -240,6 +240,12 @@ jobs:
           color_env=$(env | grep -iE '^(CARGO_TERM_COLOR|CLICOLOR|CLICOLOR_FORCE|NO_COLOR|TERM|COLORTERM)=' | tr '\n' ' ' || true)
           echo "::notice::颜色环境：${color_env:-（均未设置）}"
 
+          # 工具链版本也必须可见。CI 用的是**滚动的 `stable`**，会随上游更新
+          # 引入新 lint——本项目的 `manual_slice_fill` 就是这样在 1.98 上
+          # 突然变红的（本地 1.95 全绿，见 §3.33）。没有这行版本号，
+          # 「本地绿、CI 红」就又要靠猜。开发机对表方式：`rustup update stable`。
+          echo "::notice::工具链：$(rustc --version) ／ $(cargo clippy --version)"
+
       - name: 单元测试 · 核心三 crate（纯逻辑，无外部依赖）
         run: |
           set -o pipefail
@@ -283,24 +289,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           # 注解放摘要脚本挑出的关键行
           bash scripts/ci-summarize-failures.sh "$LOG" | head -8
-
-      # 日志上传为 artifact，保留 7 天。
-      #
-      # **注意：这不是一条「匿名可读」的通道。** 上一轮我按推断写下「artifact
-      # 匿名可下载」，2026-09-24 实测否证：API 取是 401，走网页重定向取是 404
-      # （§3.31）。它只能靠带登录态的浏览器会话用。因此**凡决定性信息仍必须
-      # 走注解**——三条通道里只有注解真的通，而它配额最小（实测 23 条）。
-      # 上传保留的理由：拿到登录态的人（或仓库 admin）仍可取全文。
-      - name: 上传测试日志（失败时）
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rust-test-logs
-          path: |
-            /tmp/rust-tests.log
-            /tmp/rust-integration.log
-          if-no-files-found: warn
-          retention-days: 7
 
       - name: 集成测试（真实 app-server 进程 + 本地 mock 模型）
         run: |
@@ -389,8 +377,58 @@ jobs:
             [[ -n "$line" ]] && echo "::error::probe-exec $line"
           done
 
+      # 静态检查（clippy：把警告当错误）。
+      #
+      # # 为什么加 --keep-going
+      #
+      # 默认 cargo 在第一个 crate 编译失败时就停——本轮的多 crate 问题要看
+      # 多轮才能看全。`--keep-going` 让其余 crate 继续编译，一轮拿到全部错误。
+      # 这个选项本身在本项目的价值就是「少跑几轮 CI」。
+      #
+      # # 为什么要 tee
+      #
+      # 这一步此前**没有任何诊断**：失败时只知道「静态检查失败」，看不到
+      # 是哪个 crate、哪一行、哪条 lint。rust job 的每一步都该有可读的失败
+      # 报告（§3.23：不可行动的失败报告等于没有报告），这一步是最后一个
+      # 补上的。日志同时由下面的摘要步骤转成注解（唯一匿名可读的通道）。
       - name: 静态检查
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --all-targets --keep-going -- -D warnings \
+            2>&1 | tee /tmp/rust-clippy.log
+
+      - name: 静态检查失败摘要（仅失败时执行）
+        if: failure()
+        run: |
+          LOG=/tmp/rust-clippy.log
+          if [[ ! -f "$LOG" ]]; then
+            echo "::error::日志缺失：$LOG（步骤在写入前就失败了）"
+            exit 0
+          fi
+          # 剥 ANSI：与 ci-summarize-failures.sh 同一教训（§3.32）——
+          # cargo 在 CI 上给 `error` 加颜色码，会让 `^error` 匹配不上。
+          # 这里虽已设 CARGO_TERM_COLOR=never，但诊断**不该指望上游守规矩**。
+          sed $'s/\x1b\\[[0-9;]*[A-Za-z]//g' "$LOG" > /tmp/rust-clippy.clean
+          LOG=/tmp/rust-clippy.clean
+
+          # 失败原因就是 error 行本身（不像 cargo test 要再从日志里推断性质），
+          # 所以直接打：lint 名 + `-->` 定位行。用 awk 取「error 行及其后
+          # 第一行 `-->`」，避免 grep -A 的分组分隔符 `--` 混进注解。
+          # 排除 `could not compile`——那是汇总行，不是 lint 本身。
+          total=$(grep -cE "^error: " "$LOG" || true)
+          echo "::error::clippy 失败，${total} 条 error 行（完整日志见 artifact）"
+          awk '/^error: / && !/^error: could not compile/ {
+                 e=$0; sub(/^error: /,"",e)
+                 getline
+                 if ($0 ~ /^ *-->/) { p=$0; sub(/^ *--> */,"",p); print "  " e "  @ " p }
+                 else print "  " e
+               }' "$LOG" | head -6 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          # 哪个 crate 挂的，对定位同样关键
+          grep -E "^error: could not compile" "$LOG" | head -3 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
 
       # 测试数字的单一来源：README 的统计区间与 docs/test-stats.md 都由本脚本
       # **实跑**统计（Rust + 前端 + 三个契约脚本），漂移即失败——与
@@ -420,6 +458,35 @@ jobs:
           KCODE_MODEL_API_KEY: ${{ secrets.KCODE_MODEL_API_KEY }}
           KCODE_MODEL_NAME: ${{ secrets.KCODE_MODEL_NAME }}
         run: bash scripts/verify-sandbox-boundary.sh
+
+      # 日志上传为 artifact，保留 7 天。
+      #
+      # # 位置：**必须是 job 的最后一步**
+      #
+      # `if: failure()` 是在「轮到该步骤时」求值的。它此前紧跟在单元测试
+      # 后面，于是当 clippy（更靠后的一步）失败时，这一步根本轮不到执行
+      # ——最后一个失败点的日志永远不会被带上（2026-09-24 就是如此：
+      # rust job 红在静态检查，而 artifact 里只有单元测试的日志）。
+      # 移到末尾后，它覆盖 job 内任何一步的失败。
+      #
+      # # 它**不是**一条匿名可读的通道
+      #
+      # 上一轮我按推断写下「artifact 匿名可下载」，实测否证：API 取是 401、
+      # 走网页重定向取是 404（§3.31）。它只能靠带登录态的浏览器会话用。
+      # 因此**凡决定性信息仍必须走注解**——三条通道里只有注解真的通，
+      # 而它配额最小（实测 23 条）。上传保留的理由：拿到登录态的人
+      # （或仓库 admin）仍可取全文。
+      - name: 上传测试日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-test-logs
+          path: |
+            /tmp/rust-tests.log
+            /tmp/rust-integration.log
+            /tmp/rust-clippy.log
+          if-no-files-found: warn
+          retention-days: 7
 
   web:
     runs-on: ubuntu-latest

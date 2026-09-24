@@ -718,9 +718,9 @@ impl ChangeSet {
     }
 
     pub fn decide_all(&mut self, decision: FileDecision) {
-        for d in &mut self.decisions {
-            *d = decision;
-        }
+        // `fill` 而非手写循环：语义相同且更短，同时避开 clippy 1.98 的
+        // `manual_slice_fill`（见 docs/协议勘误与修正.md §3.33）。
+        self.decisions.fill(decision);
         self.recompute_state();
     }
 
