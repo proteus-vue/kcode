@@ -4029,6 +4029,15 @@ body {
   pointer-events: none;
 }
 
+/* 风险告知态（可输入但仍需说明实现方式，如 iOS 走私有接口）：
+   比只读提示更低调——它不阻塞操作，只是告知。 */
+.sim-readonly-hint.is-disclosure {
+  color: var(--t4);
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-line;
+}
+
 /* 落点标记：点击后立刻出现的确认。
    **必须有**：没有它，用户只能靠 350ms 后的画面变化判断点击是否生效，
    而点到无响应区域时无法区分「我没点到」与「设备没反应」。

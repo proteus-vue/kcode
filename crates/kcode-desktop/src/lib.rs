@@ -1171,6 +1171,10 @@ pub fn run() {
                 }
             };
 
+            // 把应用资源目录交给 simulator 模块：`kcode-sim-hid` helper 与
+            // codex 二进制同样有「打包后在资源目录、开发期在仓库」两种位置。
+            simulator::set_resource_dir(resource_dir.clone());
+
             // 开发者工具路径的自定义设置：启动时读一次并生效。
             // 读失败不阻塞启动（`load_overrides` 内部退回自动发现）——
             // 一份坏掉的配置文件不该让应用起不来。

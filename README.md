@@ -30,7 +30,7 @@
 | **L3** | React 前端：**液态玻璃三栏 UI**、审批弹窗、Diff 审阅、流式输出、Markdown、模型选择 | ✅ |
 
 <!-- test-stats:begin -->
-合计 **344 项 Rust 测试 + 581 项前端测试 + 56 项协议契约断言**——
+合计 **345 项 Rust 测试 + 582 项前端测试 + 56 项协议契约断言**——
 数字由 `scripts/test-stats.mjs` 实际运行统计，明细见 [`docs/test-stats.md`](docs/test-stats.md)。
 <!-- test-stats:end -->
 
@@ -156,6 +156,12 @@ npm run tauri build
 codex 与 rg 暂存到 `crates/kcode-desktop/binaries/`，再由
 `bundle.resources` 打进包内。应用启动时**优先查包内资源目录**，
 开发期才回退到 `node_modules`。
+
+同一个目录里还会放进 `kcode-sim-hid`（约 112 KB）——它是**本机编译**的
+Swift 程序，用来给 iOS 模拟器注入触摸（`simctl` 没有这个能力）。
+由 `scripts/build-sim-hid.sh` 编译，stage 脚本会自动调用它；
+编译失败**不中止打包**（iOS 会退回只读，其余平台不受影响），但会明确告警。
+它走 Apple 私有接口，代价与边界见 [`docs/协议勘误与修正.md`](docs/协议勘误与修正.md) §3.37。
 
 打包后用 `bash scripts/verify-bundle.sh` 校验：脱离仓库（cwd=/tmp、
 不设 `KCODE_REPO_ROOT`）启动，确认进程存活且 app-server 用的是包内二进制。

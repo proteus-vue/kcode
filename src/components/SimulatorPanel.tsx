@@ -907,8 +907,19 @@ export function SimulatorPanel({
                 </div>
               )}
 
-              {!interactive && plat.inputHint && (
-                <span className="sim-readonly-hint">{plat.inputHint}</span>
+              {/* 输入说明：**只要设置了就显示**，不只在不可用时。
+                  两种语义共用一个字段，但对用户都重要：
+                    · 「为什么不能输入」（鸿蒙未验证 / iOS 缺 helper）；
+                    · 「输入是怎么实现的」（iOS 走私有接口——使用前该知道，
+                      因为它会随 Xcode 升级而失效）。 */}
+              {plat.inputHint && (
+                <span
+                  className={`sim-readonly-hint ${
+                    interactive ? 'is-disclosure' : ''
+                  }`}
+                >
+                  {plat.inputHint}
+                </span>
               )}
             </div>
           ) : (

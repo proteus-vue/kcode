@@ -92,6 +92,18 @@ else
   echo "  ⚠ 未找到 rg（codex 将回退到系统 grep）"
 fi
 
+# ── iOS 输入注入 helper ────────────────────────────────────────────────
+#
+# 它不是下载来的，而是**本机编译**的（Swift 源码在 crates/kcode-desktop/native/）。
+# 放在这里一起暂存，是因为它必须与 codex 一样进 app bundle 才能用。
+#
+# **失败不中止打包**：这个 helper 只影响 iOS 触摸输入，缺了它 iOS 仍可看画面。
+# 而打包本身（生成能用的 .app）是更重要的目标——不让一个可选能力拖垮发布。
+# 但必须**明确告警**，而不是静默跳过（那会让「iOS 点不动」无从解释）。
+if ! bash "$ROOT/scripts/build-sim-hid.sh"; then
+  echo "⚠ kcode-sim-hid 未就绪：打包产物里 iOS 模拟器将只读（可看画面、不能点）" >&2
+fi
+
 # 记录来源版本，便于排查「包里的 codex 是哪个版本」
 if [[ -f "$ROOT/codex.lock.json" ]]; then
   cp "$ROOT/codex.lock.json" "$STAGE/codex.lock.json"
@@ -100,3 +112,8 @@ fi
 echo
 echo "✓ 已暂存到 $STAGE"
 echo "  该目录由 tauri.conf.json 的 bundle.resources 打进 app。"
+if [[ -x "$STAGE/kcode-sim-hid" ]]; then
+  echo "  · 含 kcode-sim-hid（iOS 触摸注入，走 Apple 私有接口）"
+else
+  echo "  · 无 kcode-sim-hid：iOS 模拟器将只读"
+fi

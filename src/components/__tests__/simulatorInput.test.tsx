@@ -159,9 +159,9 @@ const iosAvailable: PlatformStatus = {
     },
   ],
   canLaunch: true,
-  canInput: false,
-  inputHint: 'iOS 模拟器画面为只读：simctl 不提供触摸注入',
-  inputMode: 'none',
+  canInput: true,
+  inputHint: 'iOS 触摸通过 Apple 私有接口注入（kcode-sim-hid）：未经 Apple 承诺，Xcode 升级后可能需适配',
+  inputMode: 'coordinate',
 };
 
 /**
@@ -605,8 +605,20 @@ describe('多平台：设备清单区分型号与系统', () => {
   });
 });
 
-describe('只读平台：不给触摸交互', () => {
-  it('iOS 画面拖动不发任何输入，且说明为什么点不动', async () => {
+/**
+ * 能力位驱动交互：**iOS 已可交互，但边界仍要守**。
+ *
+ * # 这组测试改写过（2026-09-24）
+ *
+ * 原先断言「iOS 永远只读，拖动不发输入」——那是接入 iOS 触摸注入之前的
+ * 事实。接入之后它开始失败，而**测试是对的、代码也是对的，是断言过期了**。
+ *
+ * 改写为守住**不变的部分**：能力位必须被遵守。iOS 现在是坐标级输入，
+ * 所以拖动能发出 swipe；而真正只读的平台（如鸿蒙的 canInput:false）
+ * 仍然一个事件都不该发。后者才是这个 describe 该长期守的东西。
+ */
+describe('能力位驱动交互', () => {
+  it('iOS（坐标级）：拖动发出 swipe，并显示实现方式告知', async () => {
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
@@ -627,16 +639,67 @@ describe('只读平台：不给触摸交互', () => {
     });
     expect(host.querySelector('.sim-screen img'), 'iOS 可用时应出画面').not.toBeNull();
     expect(img().getAttribute('alt'), '画面应标明是哪台设备').toContain('iPhone 15 Pro');
-    // 只读提示必须存在：不写用户会以为是自己点错了
-    expect(host.querySelector('.sim-readonly-hint')?.textContent).toContain('只读');
 
+    // 私有接口的告知必须显示——用户有权知道它为什么可能失效
+    const hint = host.querySelector('.sim-readonly-hint')?.textContent ?? '';
+    expect(hint, '应告知 iOS 触摸的实现方式（私有接口）').toContain('私有接口');
+    expect(hint, '应说明会随 Xcode 升级需要适配').toContain('Xcode');
+
+    // 坐标级输入：拖动手势应发出 swipe（与 Android 同一套换算）
     stubRect(img());
     await pointer('pointerdown', 100, 200);
     await pointer('pointermove', 200, 400);
     await pointer('pointerup', 250, 500);
-    expect(lastInput(), 'iOS 不支持触摸，任何手势都不该发出输入').toBeUndefined();
-    // 也不该出现落点标记（那会让人以为点击生效了）
-    expect(host.querySelector('.sim-marker')).toBeNull();
+    const sent = lastInput();
+    expect(sent, 'iOS 已是坐标级输入，拖动应发出 swipe').toBeDefined();
+    expect(sent?.args.platform, '带上平台').toBe('ios');
+    expect(sent?.args.action, '长距离拖动是 swipe').toBe('swipe');
+  });
+
+  it('只读平台（canInput:false）：任何手势都不发输入，且说明原因', async () => {
+    // 鸿蒙：工具在、能列设备，但触摸注入未验证 → 界面必须只读
+    const harmonyReadonly: SimulatorStatus = {
+      ...status,
+      harmony: {
+        available: true,
+        reason: null,
+        tool: '/hdc',
+        devices: [
+          {
+            id: '7001', name: '鸿蒙设备 7001', os: 'HarmonyOS', resolution: null,
+            running: true, state: 'connected', detail: null, runtimeId: '7001',
+          },
+        ],
+        canLaunch: false,
+        canInput: false,
+        inputHint: '鸿蒙的触摸注入（uinput）尚未在真机上验证；当前画面为只读',
+        inputMode: 'none',
+      },
+    };
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(<SimulatorPanel status={harmonyReadonly} onRefreshStatus={() => {}} />);
+    });
+    const tab = [...host.querySelectorAll('.sim-tab')].find((t) =>
+      t.textContent?.includes('鸿蒙'),
+    ) as HTMLButtonElement;
+    await act(async () => {
+      tab.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(host.querySelector('.sim-readonly-hint')?.textContent).toContain('只读');
+    stubRect(img());
+    await pointer('pointerdown', 100, 200);
+    await pointer('pointermove', 200, 400);
+    await pointer('pointerup', 250, 500);
+    expect(lastInput(), 'canInput:false 时任何手势都不该发出输入').toBeUndefined();
+    expect(host.querySelector('.sim-marker'), '不该出现落点标记').toBeNull();
   });
 });
 
